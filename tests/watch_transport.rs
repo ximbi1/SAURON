@@ -7,7 +7,7 @@ use sauron::{
     kube::{
         Connection,
         discovery::{Catalog, Resource},
-        evidence, watch,
+        evidence, printer, watch,
         watch::Query,
     },
     resources::{Object, store::Store},
@@ -76,6 +76,49 @@ fn resource() -> Resource {
         namespaced: true,
         short_names: vec!["po".into()],
         verbs: vec!["list".into(), "watch".into()],
+    }
+}
+fn crd_definitions_resource() -> Resource {
+    Resource {
+        api: ApiResource {
+            group: "apiextensions.k8s.io".into(),
+            version: "v1".into(),
+            api_version: "apiextensions.k8s.io/v1".into(),
+            kind: "CustomResourceDefinition".into(),
+            plural: "customresourcedefinitions".into(),
+        },
+        namespaced: false,
+        short_names: vec!["crd".into()],
+        verbs: vec!["list".into(), "get".into()],
+    }
+}
+fn widget_resource() -> Resource {
+    Resource {
+        api: ApiResource {
+            group: "example.com".into(),
+            version: "v1".into(),
+            api_version: "example.com/v1".into(),
+            kind: "Widget".into(),
+            plural: "widgets".into(),
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["list".into(), "watch".into()],
+    }
+}
+fn connection_with(client: Client, resources: Vec<Resource>) -> Connection {
+    Connection {
+        client,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        namespace: "default".into(),
+        contexts: vec![],
+        catalog: Catalog {
+            resources,
+            warnings: vec![],
+        },
+        settings: Settings::default(),
+        version: "fake".into(),
     }
 }
 fn connection(client: Client) -> Connection {
@@ -369,4 +412,68 @@ async fn warning_only_filters_events_and_a_null_timestamp_field_falls_through() 
     assert!(!warnings_only.contains("Pulled"), "{warnings_only}");
     assert!(warnings_only.contains("BackOff"), "{warnings_only}");
     assert!(warnings_only.contains("(Warning only)"), "{warnings_only}");
+}
+
+#[tokio::test]
+async fn printer_columns_are_fetched_live_from_the_crd_spec() {
+    let server = Server::new(|path| {
+        if path.contains("/customresourcedefinitions/widgets.example.com") {
+            (200, json!({
+                "apiVersion":"apiextensions.k8s.io/v1","kind":"CustomResourceDefinition",
+                "metadata":{"name":"widgets.example.com"},
+                "spec":{"group":"example.com","versions":[
+                    {"name":"v1","additionalPrinterColumns":[
+                        {"name":"Color","type":"string","jsonPath":".spec.color"},
+                        {"name":"Replicas","type":"integer","jsonPath":".spec.replicas","priority":1}
+                    ]}
+                ]}
+            }).to_string())
+        } else {
+            (404, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}).to_string())
+        }
+    })
+    .await;
+    let connection = connection_with(
+        server.client(),
+        vec![crd_definitions_resource(), widget_resource()],
+    );
+    let columns = printer::fetch(&connection, &widget_resource())
+        .await
+        .expect("fetch");
+    assert_eq!(columns.len(), 2, "{columns:?}");
+    assert_eq!(columns[0].name, "Color");
+    assert_eq!(columns[0].field.key, "field:/spec/color");
+    assert_eq!(columns[1].name, "Replicas");
+    assert_eq!(columns[1].priority, 1);
+}
+
+#[tokio::test]
+async fn printer_columns_are_empty_not_an_error_for_a_non_crd_resource() {
+    let server = Server::new(|_| {
+        (404, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}).to_string())
+    })
+    .await;
+    let connection = connection_with(
+        server.client(),
+        vec![crd_definitions_resource(), widget_resource()],
+    );
+    let columns = printer::fetch(&connection, &widget_resource())
+        .await
+        .expect("a missing CRD is not an error, just no enrichment");
+    assert!(columns.is_empty());
+}
+
+#[tokio::test]
+async fn printer_columns_skip_the_network_entirely_for_core_resources() {
+    let server =
+        Server::new(|_| panic!("a core (empty-group) resource must never be looked up as a CRD"))
+            .await;
+    let connection = connection_with(
+        server.client(),
+        vec![resource(), crd_definitions_resource()],
+    );
+    let columns = printer::fetch(&connection, &resource())
+        .await
+        .expect("fetch");
+    assert!(columns.is_empty());
 }

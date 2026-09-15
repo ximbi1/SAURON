@@ -117,3 +117,19 @@ spec:
         - name: Focus
           type: string
           jsonPath: .spec.focus
+        - name: Count
+          type: integer
+          jsonPath: .spec.count
+        - name: Ratio
+          type: number
+          jsonPath: .spec.ratio
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Absent
+          type: string
+          jsonPath: .spec.doesNotExist
+        - name: Detail
+          type: string
+          jsonPath: .spec.cpu
+          priority: 1

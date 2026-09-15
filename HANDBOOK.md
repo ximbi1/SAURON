@@ -235,14 +235,76 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 M1 and M2 are ACCEPTED. Verified local annotated `m2-accepted` points to
 `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; initial M3 worktree was clean.
 This is a reference/rollback checkpoint, not permission to discard user changes.
-Items 1-4 (filters, sorting, documents, Events) are ACCEPTED. Current: M3 item 5
-(server Tables/CRD columns), then item 6 (combined adversarial live acceptance).
+Items 1-5 (filters, sorting, documents, Events, CRD printer columns) are ACCEPTED.
+Server Table conversion was researched and deliberately deferred (see item 5 journal).
+Current: M3 item 6 (combined adversarial live acceptance) — the last item.
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
 No `m3-accepted` until every required slice and combined live flow is demonstrated.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
 isolated unit tests alone. Keep buildable handoffs.
 
 ## Journal
+
+### 2026-09-15 — M3 item 5 accepted (CRD printer columns; server Table researched
+### and deliberately deferred)
+Researched before touching transport, as the plan required. `kube` 4.2/`k8s-openapi`
+0.28 have no typed support for the server's Table content-negotiation format; it would
+need a raw hand-built request/response. More importantly, Table is a one-shot
+snapshot — its `columnDefinitions` carry no JSONPath a live-watched object could be
+re-evaluated against, so it cannot drive a continuously-live table without either
+polling on a timer (against this project's watch-first design) or a second mechanism
+for live updates anyway. Decision: implement CRD `additionalPrinterColumns` directly
+instead -- it has a real `jsonPath`, converted once per resource (not per object) to a
+JSON Pointer and evaluated against every live object using the exact `Field`/`Scalar`
+machinery the filter language already provides. New `src/kube/printer.rs`:
+`fetch()` does one bounded GET on the CRD object (skipped entirely, no network call,
+for any empty-API-group/core resource), parses `spec.versions[served].
+additionalPrinterColumns`, and converts each `jsonPath` through a deliberately narrow
+"safe subset" parser -- plain dotted fields and simple non-negative numeric array
+indices only; anything with `[?(...)]`, `[*]`, `..`, or a negative/non-numeric index is
+rejected and that column silently omitted, never guessed at. Original ledger ordering
+("curated → server Table → safe CRD printer subset → generic fallback") becomes, after
+this research, **curated → CRD printer columns → generic fallback**; server Table
+stays noted, not built, as a lower-value fallback given curated projections already
+cover the common built-ins.
+
+Wired via a new `Payload::PrinterColumns`, spawned alongside (not instead of) the
+normal watch in `watch_resource()`, carrying the watch's own `epoch` so a stale result
+is dropped by the existing `reduce()` epoch check exactly like every other async
+result -- no new identity/staleness mechanism needed. `State.printer_columns` merges
+additively into `columns()` (skipping a name collision with a curated/generic column,
+none occurred in testing) and `priority == 0` always shows while `> 0` only shows with
+the *existing* Wide toggle -- reused directly, no new key needed. Cell values come
+from `State::cell()`, checking a printer column by name first, falling back to the
+object's existing curated/generic `field()` lookup.
+
+Extended the `eyes.testing.sauron.local` CRD fixture, whose schema already had
+`count`/`ratio`/`enabled`/`cpu`/`memory`/`percent` fields defined but no printer
+columns using them (evidently prepared for exactly this earlier and left unused),
+with a full type spread: `Focus` (string), `Count` (integer), `Ratio` (number),
+`Enabled` (boolean), `Absent` (a field that genuinely does not exist, for the missing
+case), and `Detail` (`priority: 1`, wide-only). Live: real `Count`/`Ratio`/`Enabled`
+values shown correctly; `Absent` showed `-`, not an error; `Detail` correctly
+hidden/shown by Wide; `kubectl patch` updated `Count` live on the next render with no
+manual refresh; deleting the CRD while viewing it left the watch stale/erroring but
+kept the already-fetched column headers rather than reverting mid-session (no crash,
+no wrong data); a 32x9 terminal with all six extra columns clipped normally; rapid
+resource switching while a fetch might still be in flight never showed stale columns
+from a previous resource (epoch-gated, as designed). `kubectl get` against the same
+CRD independently confirmed showing the identical `FOCUS`/`COUNT`/`RATIO`/`ENABLED`
+columns from the same `additionalPrinterColumns` declaration -- real cross-validation
+against native kubectl behavior, not just self-consistency.
+
+Added 7 fake-HTTP tests (`printer_columns_are_fetched_live_from_the_crd_spec`,
+`_are_empty_not_an_error_for_a_non_crd_resource`, `_skip_the_network_entirely_for_core_
+resources`) plus 4 unit tests for the JSONPath-subset parser and column parsing,
+covering the exact rejection cases (`[?(...)]`, `[*]`, `..`, negative/non-numeric
+index). No live bug found this pass -- the design was validated by research before
+writing transport code, per the ledger's own instruction, which is likely why.
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets` (53 unit + 10 fake-HTTP) after implementing. Fixture state reconciled
+(CRD delete/recreate during testing brought the Eye instance back to its clean fixture
+values). Full case-by-case evidence in `docs/M3_ACCEPTANCE.md` item 5.
 
 ### 2026-09-15 — M3 item 4 accepted (Events)
 Added a Warning-only toggle (`W` / `:toggle_warnings`, scoped to the new

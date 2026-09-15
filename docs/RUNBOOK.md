@@ -29,8 +29,8 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
 verified before M3; worktree initially clean. M3 items 1 (filters), 2 (typed stable
-sorting), 3 (shared document viewer), and 4 (Events) are ACCEPTED. Item 5 (server
-Tables/CRD columns) is next.
+sorting), 3 (shared document viewer), 4 (Events), and 5 (CRD printer columns) are
+ACCEPTED. Item 6 (combined adversarial live acceptance) is next and last.
 Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 must stay read-only.
 Latest full fmt/check/clippy clean, 49 unit + 4 fake-HTTP tests passed. Fake HTTP needs
 loopback permission outside sandbox. `cargo build --locked` followed by
@@ -80,7 +80,29 @@ deferred (fits the ledger's own escape clause: every Event already correlates to
 one selected object via the server-side UID filter). A fake-timeout test for
 `events()` was not added — acknowledged gap, not silently skipped; the mechanism is
 the same per-call timeout wrapper already exercised elsewhere. 49 unit + 7 fake-HTTP
-tests passing. Next: item 5, server Tables/CRD printer columns.
+tests passing.
+
+Item 5 (CRD printer columns) is done. Researched server Table conversion first, per
+the plan: `kube`/`k8s-openapi` have no typed support for it, and more fundamentally
+it's a one-shot snapshot with no JSONPath a live object could be re-evaluated
+against, so it can't drive a continuously-live table without polling or a second
+mechanism anyway. Implemented CRD `additionalPrinterColumns` directly instead (new
+`src/kube/printer.rs`): one bounded GET per resource view (skipped entirely for
+empty-group/core resources), a deliberately narrow JSONPath-subset parser (plain
+dotted fields + simple numeric array indices; anything else is omitted, not guessed
+at), reusing the filter language's own `Field`/`Scalar` machinery to evaluate each
+column live against every watched object. Spawned alongside the watch, epoch-gated
+like every other async result. Merges additively into existing curated/generic
+columns; priority-1+ columns reuse the existing Wide toggle, no new key. Extended the
+`eyes.testing.sauron.local` fixture (whose schema had unused numeric/bool fields
+already) with a full type spread including a missing field and a wide-only column.
+Live: numeric/bool/missing/priority/update(via kubectl patch)/CRD-removal-while-
+viewing/narrow-terminal/rapid-resource-switch all verified against `kind-sauron-test`;
+cross-validated against `kubectl get` showing the identical columns from the same
+CRD. No live bug found this pass. 53 unit + 10 fake-HTTP tests passing. Full
+case-by-case evidence in `M3_ACCEPTANCE.md`.
+
+Next: item 6, combined adversarial live acceptance — the last M3 item.
 
 ## Historical M1 checkpoint
 

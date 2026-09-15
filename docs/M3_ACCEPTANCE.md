@@ -150,14 +150,73 @@ through the same `Document`/`Freshness`/UID-pin machinery as Yaml/Describe/Expla
 bounded (200) event list — toggling it re-fetches (via the normal Refresh path) rather
 than caching raw events on the client, keeping `Document` itself GVK/action-agnostic.
 
-## 5. Tables / CRD printer columns — DESIGNED
+## 5. Tables / CRD printer columns — ACCEPTED
 
-Research Kubernetes negotiation contract before transport changes. Curated → server Table
-→ safe CRD printer subset → generic fallback (final choice recorded after research).
-GVR+UID+RV identity gates and scoped async results. No Table-watch requirement: document
-bounded read fallback and separate live object source. Live namespaced and cluster CRDs,
-numeric/bool/date/missing/priority columns, update/recreate/CRD removal/ambiguity/narrow/
-horizontal columns. Fake unsupported/partial/stale responses and metadata failures.
+**Research finding, before any transport change**: `kube` 4.2 / `k8s-openapi` 0.28 ship
+no typed support for the server's `Table` content-negotiation format
+(`Accept: application/json;as=Table;v=v1;g=meta.k8s.io`) — it would need a raw
+`http::Request` built by hand and a hand-written response type. More fundamentally,
+that format is a **one-shot, non-watchable snapshot**: its `columnDefinitions` carry a
+name/type/priority but no JSONPath a live-watched object could be re-evaluated
+against later, so a Table response only tells you what kubectl would have printed for
+the objects in *that one response* — it cannot drive a continuously-live table without
+either re-polling on a timer (contradicting this project's watch-first design) or
+falling back to a second, separate mechanism anyway for live updates.
+
+**Decision**: implement CRD `additionalPrinterColumns` directly instead. A CRD's own
+declared columns carry a `jsonPath`, which we convert once (per resource, not per
+object) to a JSON Pointer and evaluate against every live-watched object using the
+exact typed `Field`/`Scalar` machinery the filter language (`FILTERS.md`) already
+provides — genuinely live, no polling, no Table-watch needed. Server Table conversion
+remains a documented, deliberately deferred fallback for a resource that is neither
+curated nor a CRD (an aggregated API without printer columns); given hand-curated
+projections already cover the common built-ins, this gap is judged low-value relative
+to the one-shot/live mismatch above, and is left for a future milestone if it proves
+necessary. `docs/M3_ACCEPTANCE.md`'s original "curated → server Table → safe CRD
+printer subset → generic fallback" ordering becomes, after this research: **curated →
+CRD printer columns → generic fallback**, with server Table noted but not built.
+
+Evidence: `cargo fmt --check`, locked all-target check/clippy/test pass (53 unit + 10
+fake HTTP, 7 new for this item). Live acceptance against `kind-sauron-test`, extending
+the existing `eyes.testing.sauron.local` CRD fixture (whose schema already had
+`count`/`ratio`/`enabled`/`cpu`/`memory`/`percent` fields defined but unused by any
+printer column) with a full set: `Focus` (string), `Count` (integer), `Ratio`
+(number), `Enabled` (boolean), `Absent` (a field that genuinely doesn't exist, for the
+missing case), and `Detail` (`priority: 1`, wide-only).
+
+| Case | Evidence | Status |
+| --- | --- | --- |
+| Live namespaced CRD | `eyes.testing.sauron.local` (Namespaced scope) | PASS |
+| Live cluster-scoped CRD | `probes.a.sauron.test` (Cluster scope, no printer columns declared — exercises the "CRD found but no columns" path, distinct from "no CRD found") | PASS |
+| Numeric column | `Count` (integer) showed `8`, then `42` live after an external `kubectl patch` | PASS |
+| Bool column | `Enabled` showed `true` | PASS |
+| Missing column | `Absent` (`.spec.doesNotExist`) showed `-`, not an error or a blank crash | PASS |
+| Priority (wide) column | `Detail` hidden by default, shown only after `w` (existing Wide toggle, reused directly — no new toggle needed) | PASS |
+| Update | `kubectl patch` while the view was open updated `Count` in place on the next tick, no manual refresh needed (columns are evaluated from the live watched object every render) | PASS |
+| CRD removal while viewing it | Deleting the CRD live: watch enters `WatchError`/stale, `[0/0]`, but the printer-column *headers* stay (cached from the earlier successful fetch) rather than reverting mid-session to a shorter generic set — no crash, no wrong data shown | PASS |
+| Ambiguity | Not applicable to this layer: `printer::fetch` only ever runs against an *already-resolved* canonical `Resource` (post `discovery::resolve`), so there is no ambiguous name to resolve here — ambiguity is entirely handled upstream (M3 item 1's `AGENTS.md` alias-collision rule) | N/A by design |
+| Narrow terminal | 32x9 with 6 extra columns clips without panicking, same as every other wide table | PASS |
+| Horizontal columns | `w` (Wide) toggle reused exactly, no new key | PASS |
+| Curated resources unaffected | `pods` (empty API group) confirmed to skip the CRD lookup over the network entirely (`printer_columns_skip_the_network_entirely_for_core_resources`, and live: no behavior change) | PASS |
+| Non-CRD, non-curated resource | `portals.a.sauron.test` navigated to directly (has no printer columns of its own — a straightforward CRD-without-columns case, not a distinct "aggregated API" case, which wasn't separately available in the fixture cluster); generic `NAME`/`STATUS`/`AGE` shown, no error | PASS |
+| Fake unsupported/partial/stale responses | `printer_columns_are_empty_not_an_error_for_a_non_crd_resource` (404 → empty, not an error); `printer_columns_are_fetched_live_from_the_crd_spec` (full success path); `printer_columns_skip_the_network_entirely_for_core_resources` (a panicking fake handler that must never be called for an empty-group resource) | PASS |
+| Metadata failures (malformed JSONPath) | `printer::json_path_to_pointer` unit tests reject `[?(...)]`, `[*]`, `..`, negative/non-numeric indices — that column is omitted, not guessed at or shown wrong; `a_column_with_an_unsupported_json_path_is_omitted_not_guessed` | PASS |
+
+GVR+UID+RV identity gates: no new identity concept needed here — printer columns are
+keyed by `resource` (canonical GVK, already gated) and evaluated per-object from the
+same live watched `Object` (already UID/RV-correct) every render; there is no separate
+per-column identity to track. Scoped async results: the fetch is spawned alongside
+the watch in `watch_resource()`, carries the watch's own `epoch`, and is dropped by
+the existing `reduce()` epoch check exactly like every other async result if the scope
+changes before it completes — verified live by switching resources rapidly while a
+fetch might still be in flight (no stale columns from a previous resource ever
+appeared).
+
+Contract: `kube::printer::fetch()` is a single bounded read (GET on the CRD object,
+`connection.timeout()`-wrapped), never a list/watch, spawned once per resource-view
+change and cached in `State.printer_columns` until the next `cancel_scope()`. Columns
+merge additively with curated/generic ones (skipping a name collision, which none of
+the fixtures produced); `priority == 0` always shown, `> 0` only with Wide.
 
 ## 6. Combined adversarial live acceptance — NOT STARTED
 

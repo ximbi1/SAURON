@@ -1,5 +1,6 @@
 pub mod discovery;
 pub mod evidence;
+pub mod printer;
 pub mod watch;
 
 use crate::config::{Config as AppConfig, Settings};

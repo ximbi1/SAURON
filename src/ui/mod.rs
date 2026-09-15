@@ -144,7 +144,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                         crate::safety::text(&if column == "AGE" {
                             age_text(o.age(now))
                         } else {
-                            o.field(column, now).unwrap_or_else(|| "-".into())
+                            state.cell(o, column, now).unwrap_or_else(|| "-".into())
                         })
                         .replace(['\n', '\t'], " ")
                     })

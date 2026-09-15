@@ -77,6 +77,10 @@ pub struct State {
     pub filter_unknown: usize,
     pub autoselect: bool,
     pub page_size: usize,
+    /// Live-extracted CRD `additionalPrinterColumns`, fetched once per resource view
+    /// (never per object); empty for curated kinds and non-CRD resources alike. See
+    /// `kube::printer` for why this is preferred over server Table conversion.
+    pub printer_columns: Vec<crate::kube::printer::PrinterColumn>,
     prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
 impl State {
@@ -109,6 +113,7 @@ impl State {
             filter_unknown: 0,
             autoselect: true,
             page_size: 20,
+            printer_columns: vec![],
             prepared: None,
         })
     }
@@ -131,8 +136,32 @@ impl State {
                     .map(|(k, _)| k.clone()),
             );
         }
+        for column in &self.printer_columns {
+            if (column.priority == 0 || self.wide) && !columns.contains(&column.name) {
+                columns.push(column.name.clone());
+            }
+        }
         columns.push("AGE".into());
         columns
+    }
+    /// A column's display value for `object`: a live CRD printer column first (by
+    /// name), falling back to the object's own curated/generic field lookup. Printer
+    /// columns are checked first since their names are resource-declared and could in
+    /// principle shadow a generic field name; in practice authors avoid the common
+    /// ones (`NAME`/`AGE`/`STATUS`), so this ordering is a safety default, not a
+    /// scenario expected to matter often.
+    pub fn cell(
+        &self,
+        object: &crate::resources::Object,
+        column: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Option<String> {
+        self.printer_columns
+            .iter()
+            .find(|c| c.name == column)
+            .and_then(|c| c.field.read(object, now))
+            .map(|s| s.display())
+            .or_else(|| object.field(column, now))
     }
     pub fn set_filter(&mut self, text: &str) -> anyhow::Result<()> {
         let expression = Expr::parse(text)?;

@@ -18,7 +18,7 @@ pub enum Kind {
     Percent,
     Bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub key: String,
     pub kind: Kind,
@@ -64,6 +64,18 @@ impl Scalar {
             Self::Integer(_) => text.parse().ok().map(Self::Integer),
             Self::Number(_) => finite(text).map(Self::Number),
             Self::Bool(_) => text.parse().ok().map(Self::Bool),
+        }
+    }
+    /// Table-cell display text. Never rounds an exact integer through float
+    /// formatting; a `Number` prints with its natural precision, trimming a
+    /// trailing `.0` only, never adding false precision.
+    pub fn display(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Integer(n) => n.to_string(),
+            Self::Number(n) if *n == n.trunc() && n.abs() < 1e15 => format!("{n:.0}"),
+            Self::Number(n) => n.to_string(),
+            Self::Bool(b) => b.to_string(),
         }
     }
 }

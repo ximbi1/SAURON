@@ -1,4 +1,4 @@
-use crate::{kube::Connection, resources::Object};
+use crate::{kube::Connection, kube::printer::PrinterColumn, resources::Object};
 pub struct Event {
     pub epoch: u64,
     pub payload: Payload,
@@ -33,4 +33,9 @@ pub enum Payload {
         names: Vec<String>,
         truncated: bool,
     },
+    /// Best-effort enrichment for the currently active watch (see `kube::printer`).
+    /// Absence of this event (fetch failed or found no CRD) leaves generic/curated
+    /// columns exactly as they already were -- there is no error variant to show,
+    /// since this is enrichment, not a required part of showing the table at all.
+    PrinterColumns(Vec<PrinterColumn>),
 }

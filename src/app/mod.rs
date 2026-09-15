@@ -264,6 +264,7 @@ impl Runtime {
         );
         self.state.mode = Mode::Table;
         self.state.synced = false;
+        self.state.printer_columns.clear();
         self.state.dirty = true;
     }
     /// Start (or restart) the watch for an already-resolved canonical `resource` (GVK).
@@ -285,6 +286,24 @@ impl Runtime {
         let tx = self.tx.clone();
         let cancel = self.scope.clone();
         let query = self.state.query.clone();
+        // Best-effort CRD printer-column enrichment: one bounded read, independent of
+        // and in parallel with the watch itself (see kube::printer for why this isn't
+        // tied to the watch loop). A failure here is silently dropped -- generic/
+        // curated columns already work without it; see Payload::PrinterColumns.
+        let printer_connection = connection.clone();
+        let printer_resource = resource.clone();
+        let printer_tx = tx.clone();
+        let printer_cancel = cancel.clone();
+        self.tasks.spawn(async move {
+            if let Ok(columns) =
+                crate::kube::printer::fetch(&printer_connection, &printer_resource).await
+            {
+                tokio::select! {
+                    _=printer_cancel.cancelled()=>{},
+                    _=printer_tx.send(Event{epoch,payload:Payload::PrinterColumns(columns)})=>{},
+                }
+            }
+        });
         self.tasks.spawn(crate::kube::watch::run(
             connection, resource, query, epoch, tx, cancel,
         ));
@@ -429,6 +448,9 @@ impl Runtime {
                     active,
                     cursor: active.unwrap_or(0),
                 });
+            }
+            Payload::PrinterColumns(columns) => {
+                self.state.printer_columns = columns;
             }
             _ => {}
         }

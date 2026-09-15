@@ -33,6 +33,10 @@ namespace/generic-resource switching, filter AST, sorting, redacted YAML, contex
 descriptions, UID-related Events/Explain, and Pod logs. The live test cluster and fixture
 resources exist. No full Sofka parity claim.
 
+Tagged locally as `m1-accepted` (not pushed anywhere) as the checkpoint to diff/reset
+against once M2 work starts: context picker, fuller namespace navigation, generic
+resources/CRD polish, aliases, history/breadcrumbs, command palette.
+
 Completed checks (all green as of 2026-09-15):
 
 - `cargo fmt --check` clean.

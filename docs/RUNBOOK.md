@@ -175,8 +175,20 @@ never actually be typed by name while "in" a document. Two new regression tests
 assert every registered action is reachable by name and every suggested name is
 registered. 34/34 tests passing.
 
-Next: M2 item 6, interactive acceptance of M2 as a whole, trying to break it rather
-than demonstrate the happy path.
+Item 6 (whole-of-M2 combined acceptance) is done. Ran items 1-5 together against
+`kind-sauron-test`/`kind-sauron-test-b`: context→namespace→CRD→filter→back→context→
+forward; palette open + rapid scope change + immediate action; key remap agreeing
+across hint bar/help/key/name execution; ambiguous alias→qualified→context switch→
+back; `<all>`→namespace→picker→context→back/forward; a deleted CRD sitting in history
+then navigated back into (clean 404); context switch from the picker during an active
+watch; three rounds of combined `:ns`+back+`:ctx`+back+forward at zero settle time; a
+32x9 terminal with picker/palette/long-breadcrumb; Refresh interleaved with complex
+navigation, confirmed not to pollute history. No new bugs found — items 1-5 compose
+correctly under combined adversarial use. 34/34 tests passing.
+
+**M2 is ACCEPTED.** Tagged locally as `m2-accepted` (same pattern as `m1-accepted`,
+not pushed anywhere) — the checkpoint to diff/reset against once M3 work starts. M3
+is not yet planned in detail.
 
 ## Tools
 

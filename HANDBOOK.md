@@ -742,5 +742,58 @@ Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 
 M2 item 5 is ACCEPTED: one action registry drives keybindings, effective help, the
 hint bar, and the command palette, with no second hardcoded table anywhere and a
-regression test enforcing it going forward. Next: M2 item 6, interactive acceptance of
-M2 as a whole, trying to break it rather than just demonstrate the happy path.
+regression test enforcing it going forward.
+
+### 2026-09-15 — M2 item 6: whole-of-M2 interactive acceptance, combined sequences
+Not individual features in isolation — items 1-5 exercised together, in the
+combinations most likely to expose interaction bugs between them, against
+`kind-sauron-test` + `kind-sauron-test-b` (same physical cluster, two contexts) with
+the full ambiguous/cluster-scoped CRD fixture set. Three global criteria judged every
+sequence: never mix state from different scopes, never silently resolve an ambiguous
+identity, never show help/state that contradicts what a real action would do.
+
+Ran the full combined-sequence list: context A → namespace X → CRD → filter → back →
+context B → forward (each step showed the correct real data for its exact
+context+namespace+resource, filter correctly cleared/restored across the boundary,
+forward correctly no-op'd after a new navigation cleared it — expected stack
+semantics, not a bug); palette open → rapid scope change typed inside it → immediate
+action execution; key remap → help → hint bar → key execution → name execution, all
+four agreeing (`z` for Explain everywhere, verified live); ambiguous `:widgets` →
+qualified `:widgets.a.sauron.test` → context switch (same physical cluster, so the
+canonical resource re-resolved cleanly; correctly showed zero rows for the new
+context's different default namespace, not stale rows from the old one) → back
+restored the original namespace's real data; `<all>` → concrete namespace → picker
+(showing recents) → context switch → back/forward; deleting a CRD that was sitting in
+the back stack, then navigating back into it — clean 404, not a crash; switching
+context from the picker while the previously-viewed resource had just started a fresh
+successful watch — no interference, correct data for the new context; three rounds of
+combined `:ns` + back + `:ctx` + back + forward with zero settle time (first attempt
+used a cluster-scoped resource, which made the test visually inconclusive since
+namespace has no effect on cluster-scoped data or its breadcrumb — redone with `pods`,
+a namespaced resource, converging to correct, real, coherent data every time); a
+32x9 terminal with the namespace picker, then the palette with a long resource name
+being typed, then after navigating with a long breadcrumb — all clipped without
+panicking; Refresh interleaved with context/namespace navigation, then confirmed via
+Back that the refreshes never added spurious history entries.
+
+No new bugs found in this pass — a meaningful result on its own: it means the fixes
+from items 1 through 5 compose correctly under combined, adversarial use, not just
+individually. Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+and `cargo test --all-targets` (34/34) after reconciling fixtures back to a clean
+state.
+
+**M2 is ACCEPTED** against all three global criteria, observed under combined
+sequences, not just each item's own isolated acceptance:
+- Never mixed state from different scopes — every combination of context/namespace/
+  resource/filter change showed exactly the real data for its own exact combination,
+  including the "looks unchanged" cluster-scoped case, which was verified to be
+  correct-and-boring rather than broken.
+- Never silently resolved an ambiguous identity — `:widgets` errored with both
+  `plural.group` options every time it was tried, including mid-sequence, never once
+  silently picking one.
+- Never showed help/state contradicting the real available action — hint bar, help
+  screen, key execution and name execution all agreed with each other and with a live
+  config remap in every combination tried.
+
+Tagged locally as `m2-accepted` (see RUNBOOK), the same lightweight checkpoint pattern
+as `m1-accepted`. Next milestone: M3, not yet planned in detail.

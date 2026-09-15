@@ -125,9 +125,9 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED (namespace/generic); context switching UNTESTED (only one context in the isolated kubeconfig); picker/history pending |
+| Context/namespace/generic discovery/commands | ACCEPTED | namespace, generic/CRD, all-namespaces and context switching all observed live; picker/history pending |
 | Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
-| Pod logs | ACCEPTED (follow); `--previous`/explicit-container UNTESTED |
+| Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
@@ -345,7 +345,35 @@ against `kind-sauron-test` all correctly redisplayed all four fixture Pods after
 M1 is now ACCEPTED for: live discovery/watch/table, namespace switching, generic/CRD
 resource resolution, filters, YAML redaction, Explain, Events, Pod log follow, resize
 resilience, and terminal restore on quit — all directly observed against the isolated
-cluster, not inferred from unit tests. NOT yet accepted: Pod `--previous` logs, `:ctx`
-switching to a second real context (only one context exists in the isolated kubeconfig,
-so switching itself is untested), all-namespaces mode, and sustained-session/long-running
-watch stability beyond this session's manual testing.
+cluster, not inferred from unit tests.
+
+### 2026-09-15 — remaining M1 slices observed: previous logs, explicit container,
+### context switching, all-namespaces, sustained session; a third bug found and fixed
+Closed out the previously-untested M1 acceptance items, all against `kind-sauron-test`:
+`p` (previous logs) on `crashloop` correctly showed the terminated container's last line
+and ended cleanly; `:logs worker` (explicit container) streamed the named container's
+live output; `0` (all-namespaces) correctly relisted 13 real Pods across `kube-system`,
+`sauron-fixtures` and `local-path-storage` with a NAMESPACE column and `<all>` header;
+`:ctx` switching was exercised by temporarily adding a second context
+(`kind-sauron-test-alias`, same cluster/user, different default namespace) to the
+isolated `.test-cluster/config` with `kubectl config set-context` — never touching the
+default kubeconfig — and switching to it reconnected correctly and relisted the same
+fixtures; the added context was removed again immediately after. A ~150s continuous
+soak of the live watch showed AGE advancing correctly, RSS ~25MB, ~2% CPU, no crash, and
+a clean terminal restore on quit (not a multi-hour endurance run, but sustained beyond a
+single interaction).
+
+While testing explicit container logs, found that `open_logs` never resets
+`state.status`, so opening a new log stream kept showing whatever status text was left
+over from the previous action (observed as "Log stream ended" displayed while a brand new
+follow session was actively streaming live lines) — misleading, since it implies the
+stream already ended when it has not. Fixed by setting `status` to "Streaming logs · Esc
+returns" at the start of `open_logs`, mirroring the pattern `open_document` already uses.
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (23/23) after the fix; verified live that opening a new log
+view after a previous one had ended no longer shows stale "ended" text.
+
+M1 is now ACCEPTED for all slices listed above, including previous/explicit-container
+logs, context switching, and all-namespaces mode. Remaining gap: this was a single
+~150s soak, not a multi-hour/overnight endurance run, and only one namespace/context
+combination was exercised per feature — broader combinatorial coverage is still open.

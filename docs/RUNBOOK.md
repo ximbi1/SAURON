@@ -64,13 +64,20 @@ only unit/fake-HTTP evidence existed). Full details and the second bug found whi
 this (`prepare()`'s cache key aliased revision numbers across reconnects, leaving the
 table permanently empty after a Refresh) are in the HANDBOOK journal.
 
-NOT yet observed: Pod `--previous` logs, explicit-container log selection, `:ctx`
-switching to a second real context (the isolated kubeconfig only has one), all-namespaces
-mode, and long-running/multi-hour watch stability.
+Also observed (2026-09-15, same session): Pod `--previous` logs, explicit-container log
+selection (`:logs worker`), `:ctx` switching (tested by temporarily adding a second
+context to the isolated kubeconfig, removed immediately after), all-namespaces mode
+(`0`, 13 real Pods across 3 namespaces with a NAMESPACE column), and a ~150s continuous
+watch soak (AGE advancing correctly, ~25MB RSS, ~2% CPU, no crash, clean terminal restore).
+Found and fixed a third bug this way: `open_logs` never reset `state.status`, so a new
+log stream could display stale "Log stream ended" text from a previous, unrelated action
+while actively streaming live lines. Fixed in `src/app/mod.rs`.
 
-Next work: exercise the remaining untested slices above; then move to M2/M3 acceptance.
-Update this checkpoint after every verification. Never re-mark ACCEPTED from unit tests
-alone — only from a directly observed session against the isolated cluster.
+Remaining gap: the soak was ~150s, not multi-hour/overnight; only one namespace/context
+combination was exercised per feature. Next work: broader combinatorial and endurance
+coverage, then move to M2/M3 acceptance. Update this checkpoint after every verification.
+Never re-mark ACCEPTED from unit tests alone — only from a directly observed session
+against the isolated cluster.
 
 ## Tools
 

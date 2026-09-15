@@ -437,6 +437,7 @@ impl Runtime {
         doc.streaming = true;
         doc.follow = true;
         self.state.mode = Mode::Document(doc);
+        self.state.status = "Streaming logs · Esc returns".into();
         self.tasks.spawn(crate::kube::evidence::logs(
             connection,
             object,

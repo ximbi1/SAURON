@@ -52,7 +52,7 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Filtering | Typed comparisons: CPU/memory/age/count/percent | Typed scalar values with explicit unknown | P0 | ACCEPTED | M3 unit + live CRD/Pod comparisons | Metrics collection unavailable; finite f64 quantities |
 | Filtering | AND/OR/parentheses/negation, invalid-input errors | Lexer + recursive descent AST | P0 | ACCEPTED | M3 unit + live recovery including regression replay | Strong Kleene; unknown count visible |
 | Filtering | Faults-only pod toggle | Health predicate | P1 | RESEARCHED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
-| Sorting | Column picker, ascending/descending, age shortcut | Typed stable ordering | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Sorting | Column picker, ascending/descending, age shortcut | Stable typed cycle/explicit command | P0 | ACCEPTED | M3 item 2 unit + live accept-m3.py sorting | Unknown last; no picker/age shortcut, use :sort age; generic Table types item 5 |
 | Sorting | Configured defaults and remembered per-kind sort | Config/session persistence | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Metrics | Pod/node/container CPU and memory | Optional Metrics API collector | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Metrics | Requests/limits, percentages, allocatable, QoS | Quantity/accounting projection | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |

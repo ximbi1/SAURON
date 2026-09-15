@@ -3,7 +3,7 @@
 Baseline: local annotated `m2-accepted` → `675567d`, verified 2026-09-15.
 Status vocabulary and safety rules: HANDBOOK.md / AGENTS.md. No production fixtures.
 All live work targets verified `kind-sauron-test`, `.test-cluster/config` explicitly.
-Item 1 is ACCEPTED (2026-09-15); remaining slices are not accepted.
+Items 1 and 2 are ACCEPTED (2026-09-15); remaining slices are not accepted.
 
 ## 1. Filters — ACCEPTED
 
@@ -34,14 +34,20 @@ Generic scalar fields use explicit JSON Pointer `field:/spec/path`, with optiona
 prefix `integer:`, `number:`, `count:`, `duration:`, `cpu:`, `memory:`, `percent:`, `bool:`
 before that field name. No arbitrary code or JSONPath evaluation in filters.
 
-## 2. Sorting — IMPLEMENTING
+## 2. Sorting — ACCEPTED
+
+Full fmt/check/clippy clean; 46 unit + 4 fake HTTP passed. Fresh-binary
+`accept-m3.py sorting` PASS: typed quantity/count/bool and unknown ordering, selected
+UID after live value update, history restoration, rapid scopes, delete/recreate no
+auto-selection, Pod age/restarts/name/filter. Unit tests cover stable ties, mixed numeric
+precision, pending-list selection, rapid updates and no task/history/epoch change on sort.
 
 Typed stable ascending/descending; unknown always last in either direction. Test name,
 age, restart/count/quantity/percent/bool and generic fields; duplicate ties remain stable;
 selected UID preserved, disappearance clears it. Filter/scope/history/rapid-watch
 compositions live; no additional history, alias resolution or tick-only sort rebuilds.
 
-## 3. Documents — DESIGNED
+## 3. Documents — IMPLEMENTING
 
 Shared vertical/page/home/end/horizontal/wrap/fullscreen/search/next/previous/refresh
 actions. Live long YAML, 32x9, resize/search, no matches, wrap, update then refresh,

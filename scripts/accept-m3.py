@@ -118,6 +118,63 @@ def filters():
     print('PASS filters: snapshots, types, unknowns, selectors, history, malformed recovery, rapid scope changes, ambiguity')
 
 
+def sorting():
+    run('bash', 'scripts/test-cluster.sh', 'm3-sort-fixtures')
+    expect('pods [', 'list synchronized')
+    command('configmaps -n sauron-fixtures -l test=m3-sort')
+    expect('configmaps [3 / 3;', 'm3-sort-a')
+    def ordered(names, selected=None):
+        output = expect(*names, 'list synchronized')
+        # Retry ordering too: a watch modification can land after a previous render.
+        deadline = time.monotonic() + 15
+        while True:
+            rows = [line for line in output.splitlines() if any(name in line for name in names) and line.startswith('│')]
+            positions = [next(i for i, row in enumerate(rows) if name in row) for name in names]
+            selection_ok = selected is None or any('› ' + selected in row for row in rows)
+            if positions == sorted(positions) and selection_ok:
+                return output
+            if time.monotonic() > deadline:
+                raise AssertionError(f'Ordering {names} or selection {selected} failed\n{output}')
+            time.sleep(.08)
+            output = screen()
+    command('sort count:field:/data/rank')
+    ordered(['m3-sort-a', 'm3-sort-b', 'm3-sort-c'], 'm3-sort-a')
+    keys('I')
+    ordered(['m3-sort-b', 'm3-sort-a', 'm3-sort-c'], 'm3-sort-a')
+    for spec in ['memory:field:/data/memory:desc', 'bool:field:/data/enabled:desc']:
+        command('sort ' + spec)
+        ordered(['m3-sort-b', 'm3-sort-a', 'm3-sort-c'], 'm3-sort-a')
+    command('sort count:field:/data/rank')
+    run('bash', 'scripts/test-cluster.sh', 'm3-sort-update')
+    ordered(['m3-sort-b', 'm3-sort-a', 'm3-sort-c'], 'm3-sort-a')
+    command('eyes')
+    expect('observatory')
+    keys('[')
+    ordered(['m3-sort-b', 'm3-sort-a', 'm3-sort-c'], 'm3-sort-a')
+    for text in ['ns *', 'ns sauron-fixtures', 'ctx kind-sauron-test-b', 'ns sauron-fixtures']:
+        command(text)
+    ordered(['m3-sort-b', 'm3-sort-a', 'm3-sort-c'])
+    expect('count:field:/data/rank')
+    # Reselect A deliberately, then delete and recreate its name through guarded script.
+    keys('Home')
+    keys('j')
+    ordered(['m3-sort-b', 'm3-sort-a', 'm3-sort-c'], 'm3-sort-a')
+    run('bash', 'scripts/test-cluster.sh', 'm3-sort-delete')
+    expect('configmaps [2 / 2;', absent=('m3-sort-a',))
+    run('bash', 'scripts/test-cluster.sh', 'm3-sort-fixtures')
+    output = ordered(['m3-sort-a', 'm3-sort-b', 'm3-sort-c'])
+    assert '› m3-sort-a' not in output, output
+    command('pods -n sauron-fixtures / restarts>=0')
+    expect('crashloop')
+    command('sort restarts:desc')
+    expect('RESTARTS ↓')
+    command('sort age')
+    expect('AGE ↑')
+    command('sort name:desc')
+    expect('NAME ↓')
+    print('PASS sorting: typed/unknown-last, live update, UID selection, history, rapid scopes, same-name replacement')
+
+
 def main():
     run('bash', 'scripts/test-cluster.sh', 'check')
     launch = shlex.join([str(BINARY), '--kubeconfig', str(CONFIG), '--context', CONTEXT,
@@ -128,6 +185,8 @@ def main():
         keys('Enter')
         if sys.argv[1:] == ['filters']:
             filters()
+        elif sys.argv[1:] == ['sorting']:
+            sorting()
         else:
             raise ValueError('Usage: python3 scripts/accept-m3.py filters')
         keys('C-c')

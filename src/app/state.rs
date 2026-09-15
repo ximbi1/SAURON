@@ -1,7 +1,7 @@
 use crate::{
     command::{Action, Keymap},
     config::Settings,
-    filters::{Expr, Truth, quantity},
+    filters::{Expr, Truth, value::Field},
     kube::{discovery::Resource, watch::Query},
     resources::{SharedObject, store::Store},
 };
@@ -135,6 +135,7 @@ pub struct State {
     pub quit: bool,
     pub watch_errors: u64,
     pub filter_unknown: usize,
+    pub autoselect: bool,
     pub page_size: usize,
     prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
@@ -166,6 +167,7 @@ impl State {
             quit: false,
             watch_errors: 0,
             filter_unknown: 0,
+            autoselect: true,
             page_size: 20,
             prepared: None,
         })
@@ -208,7 +210,6 @@ impl State {
     }
     pub fn rebuild(&mut self) {
         let now = Utc::now();
-        let was_empty = self.rows.is_empty();
         self.filter_unknown = 0;
         self.rows = self
             .store
@@ -224,44 +225,20 @@ impl State {
             })
             .cloned()
             .collect();
-        let column = &self.sort;
-        let desc = self.descending;
-        self.rows.sort_by_cached_key(|o| {
-            let value = o.field(column, now);
-            let numeric = if column == "AGE"
-                || [
-                    "RESTARTS",
-                    "UPDATED",
-                    "AVAILABLE",
-                    "FAILED",
-                    "SUCCEEDED",
-                    "ACTIVE",
-                    "DATA",
-                    "SUBSETS",
-                ]
-                .contains(&column.as_str())
-            {
-                value.as_deref().and_then(quantity).map(|n| n.to_bits())
-            } else {
-                None
-            };
-            (
-                numeric,
-                value,
-                o.namespace.clone(),
-                o.name.clone(),
-                o.uid.clone(),
-            )
-        });
-        if desc {
-            self.rows.reverse();
+        if let Ok(field) = Field::parse(&self.sort) {
+            crate::resources::sort::rows(&mut self.rows, &field, self.descending, now);
         }
-        if let Some(uid) = &self.selected {
-            if !self.rows.iter().any(|o| &o.uid == uid) {
-                self.selected = None;
+        // A pending list has not disproved the history's selected UID. Conversely,
+        // after live deletion an empty→nonempty transition must not select a replacement.
+        if self.synced || !self.store.objects.is_empty() {
+            if let Some(uid) = &self.selected {
+                if !self.rows.iter().any(|o| &o.uid == uid) {
+                    self.selected = None;
+                }
+            } else if self.autoselect {
+                self.selected = self.rows.first().map(|o| o.uid.clone());
             }
-        } else if was_empty && !self.rows.is_empty() {
-            self.selected = Some(self.rows[0].uid.clone());
+            self.autoselect = false;
         }
         self.table.select(
             self.selected
@@ -347,6 +324,70 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sorting_preserves_uid_and_does_not_reselect_after_delete_recreate() {
+        use crate::resources::Object;
+        use serde_json::json;
+        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let object = |name: &str, uid: &str, rv: &str, n: i64| {
+            Object::new(json!({
+                "metadata":{"name":name,"uid":uid,"resourceVersion":rv,"creationTimestamp":format!("2026-09-15T10:00:0{n}Z")},
+                "kind":"Pod","apiVersion":"v1","spec":{"containers":[{"name":"c"}]},
+                "status":{"containerStatuses":[{"name":"c","ready":true,"restartCount":n}]}
+            }))
+        };
+        s.store.apply(object("a", "a", "1", 2), false);
+        s.store.apply(object("b", "b", "1", 1), false);
+        s.synced = true;
+        s.prepare();
+        assert_eq!(s.selected.as_deref(), Some("a"));
+        s.sort = "RESTARTS".into();
+        s.prepare();
+        assert_eq!(s.rows[0].name, "b");
+        assert_eq!(s.selected.as_deref(), Some("a"));
+        s.descending = true;
+        s.prepare();
+        assert_eq!(s.rows[0].name, "a");
+        s.sort = "AGE".into();
+        s.prepare();
+        assert_eq!(s.rows[0].name, "b");
+        for i in 3..9 {
+            s.store.apply(object("a", "a", &i.to_string(), i), false);
+            s.prepare();
+            assert_eq!(s.selected.as_deref(), Some("a"));
+        }
+        s.store.delete(&object("a", "a", "9", 8));
+        s.prepare();
+        assert!(s.selected.is_none());
+        s.store.delete(&object("b", "b", "1", 1));
+        s.prepare();
+        s.store.apply(object("a", "replacement", "10", 2), false);
+        s.prepare();
+        assert!(
+            s.selected.is_none(),
+            "a new incarnation must not become selected"
+        );
+    }
+    #[test]
+    fn history_selection_waits_for_initial_list_before_validation() {
+        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        s.selected = Some("history-uid".into());
+        s.prepare();
+        assert_eq!(s.selected.as_deref(), Some("history-uid"));
+        s.store.begin();
+        s.prepare();
+        assert_eq!(s.selected.as_deref(), Some("history-uid"));
+        s.store.apply(
+            crate::resources::Object::new(
+                serde_json::json!({"metadata":{"name":"target","uid":"history-uid"}}),
+            ),
+            true,
+        );
+        s.store.finish();
+        s.synced = true;
+        s.prepare();
+        assert_eq!(s.selected_object().expect("selected").uid, "history-uid");
+    }
     #[test]
     fn repaired_filter_clears_input_error_but_preserves_transport_error() {
         let mut state = State::new(Query::default(), &Settings::default()).expect("state");

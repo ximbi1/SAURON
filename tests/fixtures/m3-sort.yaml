@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m3-sort-a
+  namespace: sauron-fixtures
+  labels: {test: m3-sort}
+data:
+  rank: '2'
+  memory: 500Mi
+  enabled: 'false'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m3-sort-b
+  namespace: sauron-fixtures
+  labels: {test: m3-sort}
+data:
+  rank: '10'
+  memory: 1Gi
+  enabled: 'true'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m3-sort-c
+  namespace: sauron-fixtures
+  labels: {test: m3-sort}
+data:
+  description: Missing values must remain unknown

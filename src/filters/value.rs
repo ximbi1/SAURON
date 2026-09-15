@@ -31,6 +31,24 @@ pub enum Scalar {
     Bool(bool),
 }
 impl Scalar {
+    /// Total order for sorting heterogeneous generic JSON scalars: numbers, booleans,
+    /// then text. Numeric integer/float comparisons never round the integer to f64.
+    pub fn order(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Integer(a), Self::Number(b)) => integer_float_order(*a, *b),
+            (Self::Number(a), Self::Integer(b)) => integer_float_order(*b, *a).reverse(),
+            _ => self
+                .compare(other)
+                .unwrap_or_else(|| self.rank().cmp(&other.rank())),
+        }
+    }
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Integer(_) | Self::Number(_) => 0,
+            Self::Bool(_) => 1,
+            Self::Text(_) => 2,
+        }
+    }
     pub fn compare(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
             (Self::Text(a), Self::Text(b)) => Some(a.cmp(b)),
@@ -48,6 +66,24 @@ impl Scalar {
             Self::Bool(_) => text.parse().ok().map(Self::Bool),
         }
     }
+}
+fn integer_float_order(integer: i128, float: f64) -> Ordering {
+    if float >= -(i128::MIN as f64) {
+        return Ordering::Less;
+    }
+    if float < i128::MIN as f64 {
+        return Ordering::Greater;
+    }
+    let truncated = float as i128;
+    integer.cmp(&truncated).then_with(|| {
+        if float.fract() > 0.0 {
+            Ordering::Less
+        } else if float.fract() < 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    })
 }
 fn finite(text: &str) -> Option<f64> {
     text.parse::<f64>().ok().filter(|v| v.is_finite())

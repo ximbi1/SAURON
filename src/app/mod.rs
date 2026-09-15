@@ -251,6 +251,7 @@ impl Runtime {
         self.state.epoch += 1;
         self.state.request += 1;
         self.state.selected = None;
+        self.state.autoselect = true;
         self.state.rows.clear();
         self.state.filter_unknown = 0;
         self.state.store = Store::new(
@@ -553,19 +554,25 @@ impl Runtime {
                 previous,
             } => self.open_logs(container, previous),
             Command::Sort(spec) => {
-                let (column, direction) = spec.split_once(':').unwrap_or((&spec, "asc"));
+                let (column, direction) = match spec.rsplit_once(':') {
+                    Some((column, direction @ ("asc" | "desc"))) => (column, direction),
+                    _ => (spec.as_str(), "asc"),
+                };
+                let field = crate::filters::value::Field::parse(column)?;
                 anyhow::ensure!(
-                    ["asc", "desc"].contains(&direction),
-                    "Sort direction must be asc or desc"
-                );
-                anyhow::ensure!(
-                    self.state
-                        .columns()
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(column)),
+                    field.key.starts_with("field:")
+                        || self
+                            .state
+                            .columns()
+                            .iter()
+                            .any(|c| c.eq_ignore_ascii_case(column)),
                     "Unknown sort column"
                 );
-                self.state.sort = column.to_uppercase();
+                self.state.sort = if field.key.starts_with("field:") {
+                    column.into()
+                } else {
+                    column.to_uppercase()
+                };
                 self.state.descending = direction == "desc";
                 self.state.dirty = true;
                 Ok(())
@@ -1008,6 +1015,27 @@ mod tests {
         });
         assert!(rt.state.store.objects.is_empty());
         assert!(!rt.state.synced);
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn sort_and_reverse_do_not_start_tasks_or_pollute_history() {
+        let mut rt = runtime();
+        let epoch = rt.state.epoch;
+        let tasks = rt.tasks.len();
+        for spec in [
+            "sort name:desc",
+            "sort count:field:/spec/count:desc",
+            "sort field:/spec/enabled",
+        ] {
+            rt.command(spec).expect("sort");
+            rt.action(Action::Reverse).expect("reverse");
+            assert_eq!(rt.state.epoch, epoch);
+            assert_eq!(rt.tasks.len(), tasks);
+            assert!(rt.history.is_empty());
+        }
+        let sort = rt.state.sort.clone();
+        assert!(rt.command("sort name:wrong").is_err());
+        assert_eq!(rt.state.sort, sort);
         rt.shutdown().await;
     }
     #[test]

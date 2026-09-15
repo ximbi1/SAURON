@@ -132,8 +132,9 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Context/namespace/generic discovery/commands | ACCEPTED | entire M2 including combined adversarial flows; annotated local m2-accepted at 675567d |
 | Basic filters/sort/documents/events (M1 scope only) | ACCEPTED | basic flows observed live; NOT acceptance of the fuller M3 requirements |
 | M3 filter completion | ACCEPTED | 41 unit + 4 fake HTTP checks; reproducible live snapshots/PTY `scripts/accept-m3.py filters`; stale input-error regression fixed and replayed |
-| M3 sorting | IMPLEMENTING | shared scalar types available; stable/unknown-last ordering next |
-| M3 documents/events/Tables/CRD columns | DESIGNED | ordered slices, not accepted; see docs/M3_ACCEPTANCE.md |
+| M3 sorting | ACCEPTED | 46 unit + 4 fake HTTP; live typed sort/update/selection/history/scope/replacement via accept-m3.py sorting |
+| M3 documents | IMPLEMENTING | shared viewer/refresh/search interaction slice next |
+| M3 events/Tables/CRD columns | DESIGNED | ordered slices, not accepted; see docs/M3_ACCEPTANCE.md |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
@@ -234,14 +235,37 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 M1 and M2 are ACCEPTED. Verified local annotated `m2-accepted` points to
 `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; initial M3 worktree was clean.
 This is a reference/rollback checkpoint, not permission to discard user changes.
-Current: M3 item 2, typed sorting, then shared document UX,
-Events, server Tables/CRD columns, combined adversarial live acceptance. Contract and
+Current: M3 item 3, shared document UX, then Events, server Tables/CRD columns,
+combined adversarial live acceptance. Contract and
 case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
 No `m3-accepted` until every required slice and combined live flow is demonstrated.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
 isolated unit tests alone. Keep buildable handoffs.
 
 ## Journal
+
+### 2026-09-15 — M3 item 2 accepted
+fmt/check/clippy clean; 46 unit + 4 fake-HTTP tests passed. Fresh binary then
+`python3 scripts/accept-m3.py sorting` PASS: numeric 2 vs 10, memory, bool, reverse,
+unknown-last, live update moving selected A while UID stays selected, history round-trip
+with selection, rapid namespace/context switches retaining sort, deletion then recreation
+of selected A leaves selection empty, Pod restarts/age/name sorts combined with filter.
+Terminal returned normally. No new live bug. Fixture ConfigMap A deleted and recreated
+only inside verified kind; B/C unchanged. No production access.
+All-target benchmark: 100/1000/5000 rows filter+sort median 0.273/2.302/13.750ms and
+render 2.937/10.082/45.633ms (debug, five samples, local load not controlled).
+Next shared document UX; server-table field metadata integration remains item 5.
+
+### 2026-09-15 — M3 item 2 implementation
+Re-read current handbook/code after filter commit `ce02631`. Added pure `resources/sort.rs`
+using shared scalar fields, unknown-last in both directions, stable namespace/name ties,
+cached per-row keys and exact mixed integer/float ordering. Sort command accepts explicit
+typed JSON Pointer fields without re-resolving resources or creating history/tasks.
+Code review found history UID cleared before initial list completion and automatic
+selection after empty→replacement transitions; fixed using initial-list gating and a
+one-time per-view autoselect flag. Added regressions plus guarded ConfigMap fixtures and
+`accept-m3.py sorting` for live updates/delete/recreate. Full checks/live acceptance pending.
+No new dependencies. Fixture mutations exclusively through identity-verifying helper.
 
 ### 2026-09-15 — M3 item 1 accepted (query/filter slice)
 Full fmt/check/clippy clean; 41 unit + 4 fake-HTTP tests pass; fake servers require

@@ -38,5 +38,14 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test cluster -- --ignored --nocapture
     ;;
+  m3-sort-fixtures)
+    kube_test apply -f "$repo_dir/tests/fixtures/m3-sort.yaml"
+    ;;
+  m3-sort-update)
+    kube_test patch configmap m3-sort-a -n sauron-fixtures --type merge -p '{"data":{"rank":"20"}}'
+    ;;
+  m3-sort-delete)
+    kube_test delete configmap m3-sort-a -n sauron-fixtures --wait=true --timeout=15s
+    ;;
   *) echo 'Usage: bash scripts/test-cluster.sh [check|fixtures|test]' >&2; exit 2 ;;
 esac

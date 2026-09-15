@@ -28,16 +28,20 @@ It never falls back to the default kubeconfig and has no production cleanup path
 ## Current checkpoint
 
 M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
-verified before M3; worktree initially clean. M3 item 1 (filters) is ACCEPTED; item 2
-(typed stable sorting) is IMPLEMENTING.
+verified before M3; worktree initially clean. M3 items 1 (filters) and 2 (typed stable
+sorting) are ACCEPTED; item 3 (shared documents) is IMPLEMENTING.
 Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 must stay read-only.
-Latest full fmt/check/clippy clean, 41 unit + 4 fake-HTTP tests passed. Fake HTTP needs
+Latest full fmt/check/clippy clean, 46 unit + 4 fake-HTTP tests passed. Fake HTTP needs
 loopback permission outside sandbox. `cargo build --locked` followed by
 `python3 scripts/accept-m3.py filters` PASS, including exact replay of the stale-error
 regex repair bug and rapid scope changes. Full evidence in HANDBOOK journal.
 New filter language: FILTERS.md. `po` with colliding Portal CRD is now ambiguous by
 current AGENTS policy; use `pods` or `v1/pods`. Historical M2 alias behavior below is
-superseded. No M3-wide acceptance/tag yet. Next: implement and live-accept sorting.
+superseded. No M3-wide acceptance/tag yet. Next: shared document UX.
+`python3 scripts/accept-m3.py sorting` passed after full checks and fresh build. This
+flow applies/patches/deletes ONLY named
+`m3-sort-*` ConfigMaps in isolated `sauron-fixtures`, through `test-cluster.sh` identity
+verification on every operation. It recreates the deleted fixture, never touches production.
 
 ## Historical M1 checkpoint
 

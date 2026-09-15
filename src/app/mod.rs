@@ -449,7 +449,31 @@ impl Runtime {
     pub fn command(&mut self, text: &str) -> Result<()> {
         self.state.error = None;
         match crate::command::parse(text)? {
-            Command::Action(action) => self.action(action),
+            Command::Action(action) => {
+                // The palette can type any action regardless of mode, unlike a key
+                // binding, which the keymap only ever matches for its own mode. Without
+                // this check, typing e.g. :search_next while not viewing a document
+                // would silently do nothing instead of the same "not available here"
+                // feedback a mismatched key press would never even have a chance to
+                // produce (since it isn't bound outside its mode in the first place).
+                let mode_name = if matches!(self.state.mode, Mode::Document(_)) {
+                    "document"
+                } else {
+                    "table"
+                };
+                if let Some(binding) = crate::command::registry()
+                    .into_iter()
+                    .find(|b| b.action == action)
+                {
+                    anyhow::ensure!(
+                        matches!(binding.mode, "global" | "navigation")
+                            || binding.mode == mode_name,
+                        "{} is not available in {mode_name} mode",
+                        binding.name
+                    );
+                }
+                self.action(action)
+            }
             Command::Resource(query) => {
                 self.push_history();
                 self.navigate(query)
@@ -840,9 +864,9 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
 }
 impl Runtime {
     fn suggestions(&self, text: &str) -> Vec<String> {
-        let mut names: Vec<String> = crate::command::COMMANDS
-            .iter()
-            .map(|s| s.to_string())
+        let mut names: Vec<String> = crate::command::command_names()
+            .into_iter()
+            .map(str::to_string)
             .collect();
         if let Some(c) = &self.connection {
             names.extend(c.catalog.resources.iter().map(|r| r.qualified()));

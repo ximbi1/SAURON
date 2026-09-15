@@ -155,8 +155,28 @@ selection bug; it was confusion from an extremely long single test session, not 
 bug — a clean isolated re-run with temporary instrumentation confirmed `rebuild()`
 already clears a stale-UID selection correctly. 31/31 tests passing (2 new).
 
-Next: M2 item 5 (command palette centralized on the action registry), item 6 (M2
-interactive acceptance trying to break it as a whole).
+Item 5 (command palette unified on the action registry) is also done. Removed two
+separate, drifting name->behavior tables (`parse`'s hardcoded action match, which only
+covered 7 of ~30 registered actions, and the `COMMANDS` autocomplete list) in favor of
+one lookup against `registry()` for both. Found a real name collision this surfaced:
+`sort`/`logs`/`previous_logs` were each both a zero-arg key action and an
+argument-taking command sharing the same name with different behavior — unified so
+bare `:name` is always the action, an explicit argument takes the special path. Also
+replaced a hardcoded hint-bar string in `src/ui/mod.rs` (independent of the actual
+keymap) with `hint_bar()` built from `Keymap::primary_key`, verified live against a
+real config override. Added a dispatch-time mode gate so a palette-typed action
+respects the same mode-scoping a key binding already has, instead of silently
+no-op-ing. Verified live: rapid palette open/close, fuzzy search, Tab-complete,
+identical result via key vs. palette, "select a row first" on a selection-requiring
+action with none, scope-change-then-reopen, narrow-terminal clipping. One non-bug
+documented rather than fixed: opening the palette from a document always returns to
+the table first (same existing pattern as Esc/Back), so a document-scoped action can
+never actually be typed by name while "in" a document. Two new regression tests
+assert every registered action is reachable by name and every suggested name is
+registered. 34/34 tests passing.
+
+Next: M2 item 6, interactive acceptance of M2 as a whole, trying to break it rather
+than demonstrate the happy path.
 
 ## Tools
 

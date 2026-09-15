@@ -129,7 +129,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED | context picker (item 1), namespace picker (item 2), canonical-GVK resolution (item 3), bounded semantic navigation history + breadcrumb (item 4) all observed live; command palette centralization pending (item 5) |
+| Context/namespace/generic discovery/commands | ACCEPTED | context picker (1), namespace picker (2), canonical-GVK resolution (3), navigation history + breadcrumb (4), command palette unified on the action registry (5) all observed live; M2 item 6 (whole-M2 acceptance) next |
 | Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
@@ -658,5 +658,89 @@ Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 M2 item 4 is ACCEPTED: bounded, semantic-intent-only navigation history with working
 back/forward across resource/namespace/context changes, a compact canonical
 breadcrumb, and no crashes or stale-data leaks under adversarial rapid use — all
-observed live. Next: M2 item 5 (command palette centralized on the action registry),
-then item 6 (M2 interactive acceptance trying to break it as a whole).
+observed live.
+
+### 2026-09-15 — M2 item 5: command palette unified on the action registry
+Found and removed real duplication, exactly the class of bug the user's rules for this
+item were written to catch. Before this item there were THREE separate, drifting
+name->behavior tables: `registry()` (the real one, driving keybindings and effective
+help), a hardcoded `match` inside `command::parse` mapping a handful of command names
+to `Action`s, and a separate `COMMANDS` constant used only for autocomplete
+suggestions. The hardcoded `parse` match only covered 7 of the registry's ~30 actions
+(most navigation/table/document actions like `sort`, `reverse`, `wide`, `wrap`,
+`fullscreen`, `search_next/previous`, `history_back/forward`, `down/up/first/last`
+were silently unreachable by name even though they had real key bindings), and
+`COMMANDS` was a third, independently-maintained partial list.
+
+Removed both. `parse` now resolves a typed name by looking it up directly in
+`registry()` — the SAME list `Keymap` compiles keybindings from and `Keymap::help()`
+renders — so a name is reachable by typing it if and only if it is a registered
+action; there is no second table to fall out of sync. `command::command_names()`
+replaces `COMMANDS`, built from `registry()` plus the handful of argument-taking
+commands (`ctx`, `ns`, `info`, `reload`, `sort` with an argument, `logs`/
+`previous_logs` with a container) that have no zero-arg `Action` equivalent and so
+are necessarily handled before the generic registry lookup.
+
+That registry-wide lookup immediately surfaced a real, previously invisible name
+collision: `sort` is both a registered *action* (key `S`, cycles to the next column,
+no argument) and a *command* with its own argument syntax (`:sort column[:asc|:desc]`)
+that predates this item — same name, different behavior depending on whether you
+pressed the key or typed the word. `:logs`/`:previous_logs` had the same shape
+(action vs. optional-container command). Fixed uniformly: bare `:sort`/`:logs`/
+`:previous_logs` now resolve to the exact same `Action` as their key binding; only an
+explicit argument takes the argument-taking path. A new test,
+`every_registered_action_name_resolves_via_parse_to_the_same_action`, asserts this
+holds for literally every entry in `registry()` — it would have caught the `sort`
+collision immediately, and now guards against any future one. A second test,
+`command_names_never_silently_drops_a_registered_action`, asserts the reverse: nothing
+in the registry is missing from what the palette suggests.
+
+Also found and fixed a duplicated hardcoded string that isn't an `Action` name but is
+the same class of bug: the idle-mode hint bar (` : commands  / filter  X explain  y
+YAML  l logs  ? help`) was a literal string in `src/ui/mod.rs`, completely
+disconnected from the actual effective keymap — a user remapping `yaml` in config
+would see a hint bar still claiming `y` opens it. Replaced with `hint_bar()`, built
+from `state.keymap.primary_key(Action::X)` for each hinted action (a new `Keymap`
+method) — verified live with a real config override remapping `yaml` to `z`: the hint
+bar correctly showed "z YAML" instead of the old hardcoded "y YAML".
+
+Also added a mode gate the palette didn't have before: a key binding is naturally
+mode-scoped (`Keymap::action` only matches bindings for the current mode), but a typed
+`Command::Action` bypassed that entirely and would silently do nothing for a
+mode-inappropriate action (e.g. typing `:search_next` while not viewing a document) —
+found live while working through the user's "comandos deshabilitados según modo" case.
+Fixed by checking the action's own registered `mode` against the current UI mode at
+dispatch time in `command()` and returning a real error ("`search_next` is not
+available in table mode") instead of a silent no-op.
+
+Live acceptance against `kind-sauron-test`, attacking the full case list for this
+item: rapid open/close of the palette (10 cycles at zero delay) never got stuck or
+quit — an earlier attempt with 0.15s inter-key sleeps DID appear to fail intermittently,
+traced to tmux/test-harness subprocess timing, not the app (0.3s sleeps and a
+step-by-step re-run were reliably clean; noted as a harness sensitivity, not a bug);
+fuzzy search (`expln` suggesting `explain`) and Tab-completion both work; a full
+action name executes identically whether typed or pressed (`X` vs `:explain` on the
+same pod produced the same Explain report); an action requiring a selection with none
+present shows "Select a row first", not a crash, exactly as before; executing a
+scope-changing command and immediately reopening the palette works cleanly; a 35x10
+(then 30x8 with the palette open) terminal clips without panicking; the suggestion
+popup is capped at 8 fuzzy matches by design, never literally scrolls, so "long enough
+list to scroll" is satisfied by the existing bound rather than a new scroll mechanism.
+
+One thing chased and *not* fixed, documented instead as an existing, coherent design
+rather than a bug: opening the palette from within a document view (`Action::Palette`)
+unconditionally returns to the table underneath, discarding the document — meaning a
+document-scoped action like `search_next` can never actually be typed by name while
+"in" a document, since opening the palette to type it has already left document mode
+by the time the command runs. This matches `Action::Back`'s existing behavior (Esc from
+a document also always returns to the table, never to some other prior document) —
+one overlay level, always returns to the table, a simple and already-established
+mental model, not something introduced by or in scope for this item.
+
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (34/34, three new) after all of the above.
+
+M2 item 5 is ACCEPTED: one action registry drives keybindings, effective help, the
+hint bar, and the command palette, with no second hardcoded table anywhere and a
+regression test enforcing it going forward. Next: M2 item 6, interactive acceptance of
+M2 as a whole, trying to break it rather than just demonstrate the happy path.

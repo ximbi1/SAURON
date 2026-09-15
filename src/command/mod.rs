@@ -265,6 +265,16 @@ impl Keymap {
             })
             .map(|b| b.action)
     }
+    /// The effective primary key for `action` (its first configured key, honoring any
+    /// user override), for UI hints that must show what a key actually does now, not
+    /// a hardcoded default that could silently drift from a remapped binding.
+    pub fn primary_key(&self, action: Action) -> Option<&str> {
+        self.bindings
+            .iter()
+            .find(|b| b.action == action)
+            .and_then(|b| b.keys.first())
+            .map(String::as_str)
+    }
     pub fn help(&self) -> String {
         self.bindings
             .iter()
@@ -426,23 +436,9 @@ pub fn parse(s: &str) -> Result<Command> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("Enter a resource or command"))?;
     let tail = &args[1..];
-    let action = match name.as_str() {
-        "q" | "quit" => Some(Action::Quit),
-        "help" => Some(Action::Help),
-        "yaml" => Some(Action::Yaml),
-        "describe" => Some(Action::Describe),
-        "explain" => Some(Action::Explain),
-        "events" => Some(Action::Events),
-        "timeline" => Some(Action::Timeline),
-        _ => None,
-    };
-    if let Some(action) = action {
-        ensure!(
-            tail.is_empty() && filter.is_none(),
-            "This command takes no arguments"
-        );
-        return Ok(Command::Action(action));
-    }
+    // Commands that carry their own arguments have no zero-arg Action equivalent and
+    // are handled here, before the registry lookup below, so they're never shadowed
+    // by (and never shadow) a same-named registered action.
     match name.as_str() {
         "ctx" | "context" => {
             ensure!(tail.len() <= 1, "Use :ctx [context]");
@@ -460,6 +456,9 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :reload");
             return Ok(Command::Reload);
         }
+        // Bare ":logs"/":previous_logs" are the SAME action as their key bindings; an
+        // explicit container name is the only reason this isn't just Command::Action.
+        "logs" if tail.is_empty() => return Ok(Command::Action(Action::Logs)),
         "logs" => {
             ensure!(tail.len() <= 1, "Use :logs [container]");
             return Ok(Command::Logs {
@@ -467,25 +466,39 @@ pub fn parse(s: &str) -> Result<Command> {
                 previous: false,
             });
         }
-        "previous-logs" => {
-            ensure!(tail.len() <= 1, "Use :previous-logs [container]");
+        "previous_logs" if tail.is_empty() => return Ok(Command::Action(Action::PreviousLogs)),
+        "previous_logs" => {
+            ensure!(tail.len() <= 1, "Use :previous_logs [container]");
             return Ok(Command::Logs {
                 container: tail.first().cloned(),
                 previous: true,
             });
         }
+        // Bare ":sort" is the SAME action as pressing the "sort" key binding (cycle to
+        // the next column) -- a name collision between this and Action::Sort would
+        // otherwise mean the key and the typed command with the same name did
+        // different things. With an explicit column argument it sets sort directly.
+        "sort" if tail.is_empty() => return Ok(Command::Action(Action::Sort)),
         "sort" => {
-            ensure!(tail.len() == 1, "Use :sort column[:asc|:desc]");
+            ensure!(tail.len() == 1, "Use :sort [column[:asc|:desc]]");
             return Ok(Command::Sort(tail[0].clone()));
         }
         _ => {}
     }
+    // Every zero-argument command name resolves through the SAME action registry that
+    // drives keybindings and the effective-help listing -- there is exactly one place
+    // that knows "quit" means Action::Quit, and it is `registry()`. A name typed here
+    // that isn't a registered action name falls through to the resource-query parsing
+    // below, matching how an unrecognized bare word was already treated.
+    if let Some(binding) = registry().into_iter().find(|b| b.name == name.as_str()) {
+        ensure!(
+            tail.is_empty() && filter.is_none(),
+            "This command takes no arguments"
+        );
+        return Ok(Command::Action(binding.action));
+    }
     let mut query = ResourceCommand {
-        resource: if name == "ns" || name == "namespace" {
-            "namespaces".into()
-        } else {
-            name.clone()
-        },
+        resource: name.clone(),
         filter,
         ..Default::default()
     };
@@ -524,22 +537,16 @@ pub fn parse(s: &str) -> Result<Command> {
     Ok(Command::Resource(query))
 }
 
-pub const COMMANDS: &[&str] = &[
-    "ctx",
-    "ns",
-    "yaml",
-    "describe",
-    "explain",
-    "events",
-    "timeline",
-    "logs",
-    "previous-logs",
-    "sort",
-    "info",
-    "reload",
-    "help",
-    "q",
-];
+/// Every command-palette-suggestible name, all in one place: the handful of
+/// argument-taking commands that have no zero-arg `Action` (so `parse` handles them
+/// before ever consulting the registry), plus every name the registry itself defines.
+/// Adding a binding to `registry()` makes it suggestible automatically -- there is no
+/// second list to remember to update.
+pub fn command_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = vec!["ctx", "ns", "info", "reload", "sort"];
+    names.extend(registry().iter().map(|b| b.name));
+    names
+}
 
 #[cfg(test)]
 mod tests {
@@ -565,5 +572,58 @@ mod tests {
         );
         assert!(Keymap::compile(&overrides).is_err());
         assert!(Keymap::compile(&BTreeMap::new()).is_ok());
+    }
+    /// The core single-source-of-truth guarantee: every registered action's name,
+    /// typed bare in the command palette, resolves to that SAME action -- there is no
+    /// second hardcoded name->Action table (like the old `parse` match or `COMMANDS`
+    /// list) to drift out of sync with the registry that also drives keybindings and
+    /// the effective-help listing. This also covers the "sort"/"logs"/"previous_logs"
+    /// collision between a key action and an argument-taking command sharing a name:
+    /// bare resolves to the action, only an explicit argument takes the other path.
+    #[test]
+    fn every_registered_action_name_resolves_via_parse_to_the_same_action() {
+        for binding in registry() {
+            match parse(&format!(":{}", binding.name)) {
+                Ok(Command::Action(a)) => assert_eq!(
+                    a, binding.action,
+                    "{} resolved to a different action than its own registry entry",
+                    binding.name
+                ),
+                other => panic!(
+                    "{}: registered action name did not resolve to Command::Action ({other:?})",
+                    binding.name
+                ),
+            }
+        }
+    }
+    #[test]
+    fn logs_and_previous_logs_take_an_explicit_container_but_bare_is_the_action() {
+        assert!(matches!(parse(":logs"), Ok(Command::Action(Action::Logs))));
+        assert!(matches!(
+            parse(":logs worker"),
+            Ok(Command::Logs {
+                container: Some(c),
+                previous: false
+            }) if c == "worker"
+        ));
+        assert!(matches!(
+            parse(":previous_logs"),
+            Ok(Command::Action(Action::PreviousLogs))
+        ));
+    }
+    #[test]
+    fn command_names_never_silently_drops_a_registered_action() {
+        // The other half of "a name that resolves must be registered": every name the
+        // palette suggests must itself be a real registry name or one of the small
+        // fixed argument-taking commands -- never a stray string with no Action/Command
+        // behind it.
+        let names = command_names();
+        for binding in registry() {
+            assert!(
+                names.contains(&binding.name),
+                "{} is registered but not suggested",
+                binding.name
+            );
+        }
     }
 }

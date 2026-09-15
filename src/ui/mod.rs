@@ -1,5 +1,6 @@
 use crate::{
     app::state::{Document, Mode, State},
+    command::{Action, Keymap},
     kube::discovery::Resource,
     resources::{age_text, health::Severity},
 };
@@ -224,7 +225,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Mode::Filter(text) => format!("/{text}▏"),
         Mode::Search(_, text) => format!("search /{text}▏"),
         Mode::Picker(_) => " ↑↓ move   enter switch   esc cancel ".into(),
-        _ => " : commands   / filter/search   X explain   y YAML   l logs   ? help ".into(),
+        _ => hint_bar(&state.keymap),
     };
     frame.render_widget(
         Paragraph::new(prompt).style(Style::default().fg(theme.accent)),
@@ -246,6 +247,28 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
             popup,
         );
     }
+}
+/// The idle-mode hint bar, built from whatever the effective keymap actually binds --
+/// never a hardcoded string of default keys, which would silently lie once a user
+/// overrides a binding in config. Actions with no bound key are simply omitted.
+fn hint_bar(keymap: &Keymap) -> String {
+    let hint = |action: Action, label: &str| {
+        keymap
+            .primary_key(action)
+            .map(|key| format!("{key} {label}"))
+    };
+    let parts = [
+        hint(Action::Palette, "commands"),
+        hint(Action::Filter, "filter/search"),
+        hint(Action::Explain, "explain"),
+        hint(Action::Yaml, "YAML"),
+        hint(Action::Logs, "logs"),
+        hint(Action::Help, "help"),
+    ];
+    format!(
+        " {} ",
+        parts.into_iter().flatten().collect::<Vec<_>>().join("   ")
+    )
 }
 fn render_picker(frame: &mut Frame, area: Rect, picker: &crate::app::state::Picker, theme: Theme) {
     let rows = picker.items.iter().enumerate().map(|(i, item)| {

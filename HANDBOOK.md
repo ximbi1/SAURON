@@ -124,10 +124,10 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | --- | --- | --- |
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
-| Kubeconfig/discovery/live resource store/table | IMPLEMENTING | cargo check passes; real M1 acceptance pending |
-| Context/namespace/generic discovery/commands | IMPLEMENTING | command navigation implemented; picker/history pending |
-| Filters/sort/documents/events | IMPLEMENTING | regex cell-matching regression fixed; all unit tests pass; full acceptance pending |
-| Pod logs | IMPLEMENTING | native follow/previous; explicit container command; validation pending |
+| Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
+| Context/namespace/generic discovery/commands | ACCEPTED (namespace/generic); context switching UNTESTED (only one context in the isolated kubeconfig); picker/history pending |
+| Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
+| Pod logs | ACCEPTED (follow); `--previous`/explicit-container UNTESTED |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
@@ -308,3 +308,44 @@ membership across a tick, and that `Object::age` keeps advancing independent of 
 Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 `cargo test --all-targets` (22/22 passing) after the fix; re-ran the 100/1,000/5,000-object
 bench, no regression (debug-profile, single machine, single run).
+
+### 2026-09-15 — M1 interactive acceptance against kind-sauron-test, and a second
+### prepare() bug the first fix uncovered
+Ran `bash scripts/test-cluster.sh fixtures` and `bash scripts/test-cluster.sh test`
+(`tests/cluster.rs` live test now passes against the real cluster, not just `#[ignore]`d).
+Drove the real TUI interactively over tmux against `kind-sauron-test`: live watch table
+for `pods -n sauron-fixtures` showed correct STATUS/RESTARTS/AGE for all four fixtures
+(CrashLoopBackOff, ImagePullBackOff, Unschedulable, Running); `:ns kube-system` relisted
+real cluster Pods; the `ey` CRD shortname resolved and rendered `observatory` with the
+generic-kind `Unknown` status fallback; `/coredns` filter correctly narrowed `[2/8]`; `y`
+showed redacted YAML (`last-applied-configuration: <redacted>`); `X` showed Explain
+findings with real evidence and next-inspection guidance; `E` showed UID-correlated
+Events; `l` streamed real timestamped log lines with working follow; resizing to 40x10 and
+back caused no panic and re-rendered correctly; `q` restored the terminal cleanly every
+time (no leftover raw mode/alternate screen).
+
+While exercising `r` (Refresh/restart current watch) repeatedly, found that the *previous*
+fix exposed a second, more serious latent bug: `prepare()`'s key used `store.revision`,
+but `cancel_scope()` (called by every reconnect/refresh/context/namespace/resource switch)
+replaces `store` with a fresh `Store::new()` whose revision restarts at 0 and unconditionally
+clears `rows`. Two independent watches routinely finish their initial relist at the same
+revision number (e.g. both land on 1 after one `finish()`), so on the second such switch
+`prepare()` saw an unchanged key, skipped `rebuild()`, and the table stayed permanently
+empty (`[0 / N]`, still labeled "list synchronized") until something else changed the
+filter or sort. The original unconditional per-second timestamp had been accidentally
+masking this by forcing a rebuild at least once per second regardless of the rest of the
+key; removing it for the common case surfaced the real aliasing bug. Fixed by adding
+`epoch` to the key alongside `revision` — `epoch` is bumped on every `cancel_scope()` and
+never resets, so the pair is unique across watch generations even when the revision number
+alone repeats. Added a regression test reproducing the exact scenario (second watch lands
+on the same revision as the first; asserts rows are rebuilt from the new store, not left
+empty). Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --all-targets` (23/23), and re-verified live: five consecutive `r` presses
+against `kind-sauron-test` all correctly redisplayed all four fixture Pods afterward.
+M1 is now ACCEPTED for: live discovery/watch/table, namespace switching, generic/CRD
+resource resolution, filters, YAML redaction, Explain, Events, Pod log follow, resize
+resilience, and terminal restore on quit — all directly observed against the isolated
+cluster, not inferred from unit tests. NOT yet accepted: Pod `--previous` logs, `:ctx`
+switching to a second real context (only one context exists in the isolated kubeconfig,
+so switching itself is untested), all-namespaces mode, and sustained-session/long-running
+watch stability beyond this session's manual testing.

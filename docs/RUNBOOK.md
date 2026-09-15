@@ -27,40 +27,50 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
-Implemented, awaiting visual/TUI acceptance: native connection/discovery/watch, staged
-UID-aware store, Pod and generic tables, command namespace/context switching, filter AST,
-sorting, redacted YAML, contextual descriptions, UID-related Events/Explain, timeline and
-Pod logs. The live test cluster and fixture resources exist. No full Sofka parity claim.
+M1 core is implemented AND interactively accepted against the isolated cluster: native
+connection/discovery/watch, staged UID-aware store, Pod and generic tables, command
+namespace/generic-resource switching, filter AST, sorting, redacted YAML, contextual
+descriptions, UID-related Events/Explain, and Pod logs. The live test cluster and fixture
+resources exist. No full Sofka parity claim.
 
-Completed checks (all green as of 2026-09-15, first commit):
+Completed checks (all green as of 2026-09-15):
 
 - `cargo fmt --check` clean.
 - `cargo check --all-targets` clean.
 - `cargo clippy --all-targets -- -D warnings` clean (0 lints; the original 8 are fixed).
-- `cargo test --all-targets`: 22/22 passing — 19 unit tests, 3 fake-HTTP integration tests
+- `cargo test --all-targets`: 23/23 passing — 20 unit tests, 3 fake-HTTP integration tests
   in `tests/watch_transport.rs` (paged list+watch relist, bounded-channel cancellation,
   403 error surfacing without leaking credentials, partial discovery on a forbidden group).
-  The live `tests/cluster.rs` test is `#[ignore]`d and has NOT been run against
-  `kind-sauron-test` yet — that is a separate, still-pending step (`scripts/test-cluster.sh
-  test`).
-- Fixed a `prepare()` memoization bug where the clock was part of the cache key
-  unconditionally, forcing a resort every tick regardless of data/filter/sort changes.
-  Now only an `age`-based filter comparison ticks the cache, since that is the only thing
-  whose membership can change from time alone; AGE display/sort stay correct without it.
-  See HANDBOOK journal for the full analysis; covered by 3 new regression tests.
+  `tests/cluster.rs` (live acceptance) now passes for real against `kind-sauron-test`.
+- Fixed two `prepare()` memoization bugs, both in the HANDBOOK journal:
+  1. the clock was part of the cache key unconditionally, forcing a resort every tick
+     regardless of data/filter/sort changes — fixed by ticking only when the filter has an
+     `age` comparison, the only predicate whose membership can change from time alone.
+  2. that fix exposed that `store.revision` resets to 0 on every reconnect/refresh and can
+     alias a previous watch's revision, silently skipping a required rebuild and leaving
+     the table permanently empty after Refresh — fixed by adding `epoch` (never resets) to
+     the key alongside `revision`.
+  Covered by 4 regression tests total.
 - `benches/pipeline.rs` runs and prints real (debug-profile, single-sample) numbers over
   100/1,000/5,000 synthetic objects; no release-profile or repeated-run data yet.
 - Local `sauron-test` fixture node Ready; healthy Pod Running; failure fixtures present.
 
-Explicitly NOT yet done, do not mark ACCEPTED: no interactive TUI session against the live
-isolated cluster has been observed and recorded (watch/recovery, namespace/context
-switching, terminal restore on resize/exit, Pod logs follow/previous with an explicit
-container). Green unit/fake-HTTP tests are necessary but not sufficient evidence for that.
+Interactive TUI acceptance against the live isolated cluster is now done and recorded
+(2026-09-15): live watch table, namespace switching, generic/CRD resource resolution via
+shortname, text filter, redacted YAML, Explain, Events, Pod log follow, narrow-terminal
+resize, and clean terminal restore on quit were all directly observed over tmux against
+`kind-sauron-test`. `bash scripts/test-cluster.sh test` now passes for real (previously
+only unit/fake-HTTP evidence existed). Full details and the second bug found while doing
+this (`prepare()`'s cache key aliased revision numbers across reconnects, leaving the
+table permanently empty after a Refresh) are in the HANDBOOK journal.
 
-Next work: run `bash scripts/test-cluster.sh fixtures` then `bash scripts/test-cluster.sh
-test` against the isolated cluster; drive the real TUI interactively and record what was
-actually observed; only then update this checkpoint to ACCEPTED for the observed slices.
-Update this checkpoint after every verification. No live application acceptance yet.
+NOT yet observed: Pod `--previous` logs, explicit-container log selection, `:ctx`
+switching to a second real context (the isolated kubeconfig only has one), all-namespaces
+mode, and long-running/multi-hour watch stability.
+
+Next work: exercise the remaining untested slices above; then move to M2/M3 acceptance.
+Update this checkpoint after every verification. Never re-mark ACCEPTED from unit tests
+alone — only from a directly observed session against the isolated cluster.
 
 ## Tools
 

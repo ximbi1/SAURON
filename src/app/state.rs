@@ -101,7 +101,7 @@ pub struct State {
     pub quit: bool,
     pub watch_errors: u64,
     pub page_size: usize,
-    prepared: Option<(u64, String, String, bool, Option<i64>)>,
+    prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
 impl State {
     pub fn new(query: Query, settings: &Settings) -> anyhow::Result<Self> {
@@ -219,12 +219,18 @@ impl State {
     /// The current second is only part of the cache key while the filter has an `age`
     /// comparison, since only that predicate's membership can change from time alone;
     /// AGE column values and sort order stay correct without it (see `rebuild`/`ui::render`).
+    /// `epoch` must be part of the key alongside `store.revision`: every reconnect/refresh
+    /// replaces `store` with a fresh one whose revision restarts at 0, so a bare revision
+    /// can alias a previous watch's revision even though `rows` was already cleared for the
+    /// new one — epoch is bumped on every such restart and never resets, so the pair is
+    /// unique across watch generations.
     pub fn prepare(&mut self) {
         let tick = self
             .filter
             .has_time_predicate()
             .then(|| Utc::now().timestamp());
         let key = (
+            self.epoch,
             self.store.revision,
             self.filter_text.clone(),
             self.sort.clone(),
@@ -327,6 +333,46 @@ mod tests {
             2,
             "prepare() must not rebuild from the clock alone when there is no age filter"
         );
+    }
+    #[test]
+    fn prepare_rebuilds_after_a_reconnect_even_when_revision_number_repeats() {
+        // Regression: found while driving the app interactively against a live cluster.
+        // Every reconnect/refresh replaces `store` with a fresh Store whose revision
+        // restarts at 0, so two independent watches can each land on the same revision
+        // number (e.g. both finish their initial list at revision 1). Without `epoch` in
+        // the key, the second watch's rebuild was skipped as "unchanged" even though rows
+        // had just been cleared for it, leaving the table permanently empty after refresh.
+        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        s.store.apply(
+            crate::resources::Object::new(
+                serde_json::json!({"metadata":{"name":"a","uid":"1","resourceVersion":"1"}}),
+            ),
+            false,
+        );
+        s.prepare();
+        assert_eq!(s.rows.len(), 1);
+        // Simulate cancel_scope(): bump epoch, clear rows, and start a fresh Store that
+        // lands on the exact same revision (1) as the one just cached.
+        s.epoch += 1;
+        s.rows.clear();
+        s.store = Store::new(s.settings.max_objects, s.settings.max_bytes);
+        s.store.apply(
+            crate::resources::Object::new(
+                serde_json::json!({"metadata":{"name":"b","uid":"2","resourceVersion":"1"}}),
+            ),
+            false,
+        );
+        assert_eq!(
+            s.store.revision, 1,
+            "second watch coincidentally reaches the same revision"
+        );
+        s.prepare();
+        assert_eq!(
+            s.rows.len(),
+            1,
+            "a new watch generation must always rebuild, even if revision aliases the last one"
+        );
+        assert_eq!(s.rows[0].uid, "2");
     }
     #[test]
     fn prepare_with_age_filter_rechecks_membership_across_a_clock_tick() {

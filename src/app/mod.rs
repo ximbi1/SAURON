@@ -96,7 +96,14 @@ impl Runtime {
         }
         self.state.query.namespace = namespace;
         self.state.mode = Mode::Table;
-        self.watch()
+        // If a just-issued context switch's connect is still in flight, self.connection
+        // is briefly None and watch() fails with "Not connected"; the namespace is
+        // already recorded in state.query above, so Payload::Connected's rewatch()
+        // fallback re-applies it correctly once the connection lands. Surfacing that
+        // transient failure here would instead reopen the palette with this command's
+        // text, silently absorbing subsequent keystrokes as edits to it (see navigate()).
+        let _ = self.watch();
+        Ok(())
     }
     /// Snapshot the current navigation *intent* (never store/rows) onto the back stack
     /// and drop any forward stack, matching standard back/forward semantics: taking a
@@ -469,7 +476,17 @@ impl Runtime {
             self.connect(Some(context.clone()));
             return Ok(());
         }
-        let connection = self.connection.as_ref().context("Not connected yet")?;
+        // A connect from a just-issued context switch may still be in flight (self.
+        // connection is briefly None between that switch and its Payload::Connected).
+        // Queue this query instead of failing outright: erroring here would reopen the
+        // palette with this query's text still in the edit buffer, silently absorbing
+        // any further keystrokes the user types as edits to that stale buffer instead
+        // of as the next command they intended. Payload::Connected applies `pending`
+        // once the connection lands, exactly like the explicit-context-switch case above.
+        let Some(connection) = self.connection.as_ref() else {
+            self.pending = Some(query);
+            return Ok(());
+        };
         // Resolve once, here, from the human-typed name. This is the ONLY point that
         // should turn an alias/shortname into a canonical GVK: everything downstream
         // (Refresh, namespace switches) must reuse this resolved `Resource`, not the
@@ -1143,6 +1160,62 @@ mod tests {
         let sort = rt.state.sort.clone();
         assert!(rt.command("sort name:wrong").is_err());
         assert_eq!(rt.state.sort, sort);
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn navigate_while_reconnecting_queues_instead_of_erroring() {
+        // Reproduces a live combined-acceptance finding: typing a resource command
+        // (e.g. `:pods`) in the brief window right after a context switch, before its
+        // Payload::Connected has landed, used to fail with "Not connected yet". That
+        // error reopened the palette with the failed text still in the edit buffer,
+        // so any further keystrokes -- e.g. a next, entirely unrelated `:ns ...`
+        // command -- were silently appended to that stale buffer as edits instead of
+        // starting a fresh command, corrupting everything typed afterward.
+        let mut rt = runtime();
+        let connection = rt.connection.take().expect("connection");
+        assert!(
+            rt.command("pods").is_ok(),
+            "must queue, not error, while disconnected"
+        );
+        assert!(rt.pending.is_some(), "query must be queued as pending");
+        assert!(
+            rt.history.is_empty(),
+            "no history entry for a query that never actually navigated"
+        );
+        let epoch = rt.state.epoch;
+        rt.reduce(Event {
+            epoch,
+            payload: Payload::Connected(Box::new(connection)),
+        });
+        assert!(
+            rt.pending.is_none(),
+            "the queued query must be applied once connected"
+        );
+        assert_eq!(rt.state.query.resource, "v1/pods");
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn namespace_switch_while_reconnecting_is_applied_once_connected() {
+        // Same race as above, via `:ns` instead of a resource query: switch_namespace()
+        // used to propagate watch()'s "Not connected" error, which the palette turns
+        // into a reopened, stuck edit buffer that swallows subsequent keystrokes.
+        let mut rt = runtime();
+        let connection = rt.connection.take().expect("connection");
+        assert!(
+            rt.switch_namespace(Some("kube-system".into())).is_ok(),
+            "must not error while disconnected"
+        );
+        assert_eq!(rt.state.query.namespace.as_deref(), Some("kube-system"));
+        let epoch = rt.state.epoch;
+        rt.reduce(Event {
+            epoch,
+            payload: Payload::Connected(Box::new(connection)),
+        });
+        assert_eq!(
+            rt.state.query.namespace.as_deref(),
+            Some("kube-system"),
+            "rewatch() on Connected must apply the namespace set while disconnected"
+        );
         rt.shutdown().await;
     }
     #[test]

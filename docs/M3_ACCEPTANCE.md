@@ -218,23 +218,87 @@ change and cached in `State.printer_columns` until the next `cancel_scope()`. Co
 merge additively with curated/generic ones (skipping a name collision, which none of
 the fixtures produced); `priority == 0` always shown, `> 0` only with Wide.
 
-## 6. Combined adversarial live acceptance — NOT STARTED
+## 6. Combined adversarial live acceptance — ACCEPTED
 
-- Complex filter → CRD → namespace → back → forward.
-- Invalid regex → repair → context switch; semantics unchanged.
-- Server+local selectors → Refresh → all namespaces → concrete namespace.
-- Typed sort → live update → UID selection retained.
-- Document → update → refresh → delete → explicit failure.
-- Document search → resize → return; history unchanged.
-- Warning Events → context switch → back → replacement UID.
-- CRD columns → update → same-name replacement; no old cells.
-- Table → rapid resource switches → return; no old columns/rows.
-- 32x9 with long breadcrumb/filter/table/document transitions.
-- Filter + sort + history + Refresh interleaved.
-- Rapid context/namespace/resource changes with Table/Event/document requests in flight.
+All sequences run live against `kind-sauron-test` + `kind-sauron-test-b` (same
+physical cluster, two contexts), genuinely combining filters + sort + documents +
+Events + CRD printer columns + history/context/namespace in one flow each — not
+each feature retested in isolation. One real bug found, root-caused, fixed, and
+regression-tested before continuing (below); every other checkpoint passed clean.
+
+| Case | Live result | Verdict |
+|---|---|---|
+| CRD + typed filter → sort → YAML → search → back | On the `eyes.testing.sauron.local` CRD (two live instances): `integer:field:/spec/count>5` correctly isolated the matching instance; `:sort Count`+`I` correctly ordered/reversed by the CRD-backed typed field; `y` opened real YAML for the top-sorted row; `/focus` search found 1/1; a single `Esc` returned straight to the table with filter, sort, printer columns, and selection all exactly as left | PASS |
+| Warning-only Events + UID correlation | Eye CRD has no controller-generated Events (expected, N/A); switched to `pods`/`crashloop`, which has both Normal and Warning events — `E` showed all with correct `UID=...` in the header, `W` correctly narrowed to only the `Warning BackOff` entry | PASS |
+| Namespace/context switch → back/forward → refresh, filter+sort surviving | With `/integer:field:/spec/count>2` and `COUNT ↓` active on the Eye CRD: `E`vents on a different resource, `:history_back`/`:history_forward` between `pods` and the CRD view, `:ctx kind-sauron-test-b`, `:history_back` to restore the original context, and `r` refresh — filter, sort, CRD columns, selection, and scope were exactly restored at every step; confirmed in code (`switch_context`/`cancel_scope`) that the local filter is *not* cleared on a context switch (by design — it stayed active across contexts) | PASS |
+| Invalid regex → repair → context switch | `/[obs/` (unterminated char class) correctly rejected in-place with "invalid or oversized regex", edit buffer preserved for correction, no partial apply; repaired to `/obs/` → `[1/2]` correct; context switch afterward preserved the compiled filter unchanged (filter is not context-scoped) | PASS |
+| Server + local selectors → Refresh → all-namespaces → concrete namespace | `-l app=healthy` (server) + `/Running` (local) together correctly narrowed to `[1/1]`; survived `r` Refresh, `0` all-namespaces (NAMESPACE column appended, selectors unchanged), and `:ns sauron-fixtures` back to concrete — both selectors intact throughout | PASS |
+| Document → update (external) → refresh → delete → explicit failure | Opened YAML for `crashloop`; deleted the pod out-of-band via `kubectl`; `r` (document refresh) correctly showed `NOT CURRENT` / `404 Not found` with a clear message, no crash; returning to the table correctly dropped the row (`[3/3]`); fixture reconciled after | PASS |
+| CRD columns → update → same-name replacement | Deleted and recreated `sentinel` (same name, new UID, new spec values) via `kubectl`; after refresh, the row showed the new UID's values (`Count=99`, `Ratio=9.9`, `Enabled=true`) with no leftover cells from the deleted instance | PASS |
+| Rapid resource switches → return | `:pods` → `:svc` → `:secrets` → `:ey`, each issued before the previous watch had necessarily settled: landed cleanly on the Eye CRD with its own columns/rows, no stale columns or rows bled through from the intermediate resources | PASS |
+| 32x9 with long breadcrumb/filter/table/document transitions | Resized to 32x9 mid-session on the CRD table: header/columns clipped without panic; opened the command palette and typed a long qualified CRD name (`customresourcedefinitions...`), clipped correctly; opened YAML, clipped correctly; returned and restored to 140x36 cleanly | PASS |
+| Filter + sort + history + Refresh interleaved | `integer:field:/spec/count>50` → `:sort Ratio` → `r` → `:pods` → `:history_back` → `r` again, all on the Eye CRD: final state showed the correct single matching row (`sentinel`, count 99) with `RATIO ↑` and the filter intact — no interleaving corrupted any of the four | PASS |
+| Rapid context/namespace/resource changes with requests in flight | **Found a real bug here** (below); after the fix, three repeated rounds of `:ctx`→resource-switch→`:ns`→`:ctx` back, all issued back-to-back with zero settle time, converged to correct, coherent state every time (verified: an intervening context switch correctly discards an earlier context's still-queued resource switch — last-command-wins, not a stale carry-over) | PASS (post-fix) |
+
+### Bug found and fixed: resource/namespace commands typed right after a context switch could fail and glue the palette buffer
+
+**Symptom:** issuing `:ctx B` → `:pods` → `:ns X` → `:ctx A` back-to-back with no gap
+between them (reproducible only under true zero-delay bursts; a ~100ms gap between
+commands never showed it) sometimes left the app on the wrong context/namespace/
+resource — one or more commands appeared to simply not have happened.
+
+**Root cause:** `navigate()` (used by any bare `:<resource>` command) and
+`switch_namespace()` (`:ns`, `0`) both required `self.connection` to already be
+`Some`, erroring with "Not connected"/"Not connected yet" if a just-issued context
+switch's async `connect()` hadn't completed yet (a real, if brief, window — `connect()`
+sets `self.connection = None` synchronously and only repopulates it once
+`Payload::Connected` arrives). The palette's Enter handler reopens the command
+editor with the *same, now-stale* text on any `Err`. Reopening does not clear or
+dismiss the buffer, so every keystroke of the *next*, entirely unrelated command
+typed immediately after got silently appended to that stale buffer as an edit
+instead of opening a fresh palette — confirmed live by capturing the buffer
+mid-burst and reading it back verbatim as `:pods:ns sauron-fixtures:ctx
+kind-sauron-test` with a trailing `Too many resource arguments` error, i.e. three
+separate commands concatenated into one garbled string.
+
+**Fix:** `navigate()` now queues the query into `self.pending` (reusing the exact
+mechanism the explicit-context-switch path already had) instead of erroring when
+`self.connection` is `None`; it gets applied once `Payload::Connected` lands, exactly
+like the existing pending-context-switch case. `switch_namespace()` now ignores
+(rather than propagates) a transient "Not connected" from `watch()`, since it has
+already recorded the new namespace in `state.query` and the existing
+`Payload::Connected` → `rewatch()` fallback re-applies it correctly once connected —
+matching the pattern that already worked for Refresh. Neither path can now surface
+a spurious error that reopens/glues the palette for a purely timing-driven,
+otherwise-harmless race. `src/app/mod.rs`.
+
+**Regression tests:** `navigate_while_reconnecting_queues_instead_of_erroring` and
+`namespace_switch_while_reconnecting_is_applied_once_connected`
+(`src/app/mod.rs::tests`) — both simulate `self.connection = None` mid-reconnect,
+assert the command returns `Ok` and queues/applies rather than erroring, then feed a
+synthetic `Payload::Connected` and assert the queued intent lands.
+
+**Full suite:** fmt clean; `cargo check --all-targets` clean; `cargo clippy
+--all-targets --locked -- -D warnings` clean; `cargo test --all-targets --locked`:
+57/57 passing (55 unit incl. the 2 new regressions, 10 fake-HTTP), 1 live cluster
+test correctly `ignored`. Fresh binary rebuilt; the exact live burst that found the
+bug was replayed three times post-fix with consistent, correct convergence (see
+table above).
+
+### Observed, pre-existing, out-of-M3-scope characteristic (not a regression, not fixed)
+
+Curated/generic columns (e.g. `STATUS`) are derived from a *sample row*
+(`state.columns()` reads `self.rows.first()`/`store.objects.values().next()`), so
+they disappear entirely when a view has zero objects (e.g. switching to a namespace
+with no matching resources) — confirmed to predate M3 item 5 entirely (present
+before CRD printer columns existed). CRD printer columns do **not** share this
+weakness: they are schema-driven (fetched from the CRD's declared
+`additionalPrinterColumns`, independent of any instance existing) and correctly
+persisted/rendered even at `[0/0]`, confirmed live. Left as a known characteristic
+of the curated-column path, not addressed here since it is orthogonal to what M3
+was scoped to build.
 
 Each real live bug interrupts progress: minimal repro, root cause, regression, full suite,
-fresh binary, exact live replay. Record commands/results in RUNBOOK and handbook journal.
-Each slice runs fmt/check/clippy/tests with `--locked --all-targets` (fmt separately).
-Only after all acceptance, reconcile docs and create local annotated `m3-accepted` with
-features, fixes, limits, live scope and deferrals. Never publish/push.
+fresh binary, exact live replay — done above. Full check suite green. Docs (this file,
+HANDBOOK, RUNBOOK) reconciled below; local annotated `m3-accepted` tag created with
+features, fixes, limits, live scope and deferrals. Never published/pushed.

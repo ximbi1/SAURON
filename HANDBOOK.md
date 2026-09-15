@@ -232,18 +232,79 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 
 ## Current milestone / continuation instructions
 
-M1 and M2 are ACCEPTED. Verified local annotated `m2-accepted` points to
-`675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; initial M3 worktree was clean.
-This is a reference/rollback checkpoint, not permission to discard user changes.
-Items 1-5 (filters, sorting, documents, Events, CRD printer columns) are ACCEPTED.
-Server Table conversion was researched and deliberately deferred (see item 5 journal).
-Current: M3 item 6 (combined adversarial live acceptance) — the last item.
-Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
-No `m3-accepted` until every required slice and combined live flow is demonstrated.
+M1, M2, and M3 are all ACCEPTED. Verified local annotated `m2-accepted` points to
+`675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; local annotated `m3-accepted` created
+after item 6 (see journal below). This is a reference/rollback checkpoint, not
+permission to discard user changes. All 6 M3 items (filters, sorting, documents,
+Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Server
+Table conversion was researched and deliberately deferred (see item 5 journal).
+Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs.
+isolated unit tests alone. Keep buildable handoffs. Next milestone: not yet started;
+await direction before opening M4.
 
 ## Journal
+
+### 2026-09-15 — M3 item 6 accepted (combined adversarial live acceptance; one
+### real bug found, root-caused, and fixed)
+Ran genuinely combined sequences (not features retested in isolation) against
+`kind-sauron-test`/`kind-sauron-test-b`: CRD printer columns → typed filter → sort →
+YAML → document search → back → Warning-only Events (on `pods`, since the Eye CRD
+has no controller-generated Events) → namespace/context switch → back/forward →
+refresh, then the remaining `M3_ACCEPTANCE.md` item-6 cases (invalid-regex-repair
+across a context switch, server+local selectors surviving Refresh/all-namespaces/
+concrete-namespace, document update+refresh+delete showing an explicit `NOT
+CURRENT`/404 rather than a crash, CRD same-name replacement showing the new UID's
+values with no leftover cells, rapid resource switching leaving no stale
+columns/rows, a 32x9 terminal through breadcrumb/palette/document transitions,
+filter+sort+history+Refresh interleaved). Full case-by-case results in
+`docs/M3_ACCEPTANCE.md` item 6.
+
+Found one real bug under the last case (rapid context/namespace/resource changes
+with requests in flight), reproducible only with true zero-delay command bursts (a
+~100ms gap between commands never triggered it): `:ctx B` → `:pods` → `:ns X` →
+`:ctx A` issued back-to-back could leave the app on the wrong final
+context/namespace/resource. Root cause: `navigate()` (any bare `:<resource>`
+command) and `switch_namespace()` (`:ns`, `0`) both required `self.connection` to
+already be `Some`, erroring "Not connected"/"Not connected yet" during the brief
+window right after a context switch's `connect()` sets `self.connection = None`
+before its `Payload::Connected` arrives. The palette's Enter handler reopens the
+editor with the *same* stale text on any `Err` rather than clearing it, so every
+keystroke of the *next*, unrelated command typed immediately after got silently
+appended to that stale buffer as an edit instead of opening fresh — caught live by
+capturing the buffer mid-burst and reading back `:pods:ns sauron-fixtures:ctx
+kind-sauron-test` glued into one string with a trailing "Too many resource
+arguments" error.
+
+Fixed by making both paths tolerate the transient disconnection instead of
+erroring: `navigate()` now queues into `self.pending` (reusing the mechanism the
+explicit-context-switch path already had), applied once `Payload::Connected`
+lands; `switch_namespace()` now ignores a transient "Not connected" from `watch()`
+since the namespace is already recorded in `state.query` and the existing
+`Payload::Connected` → `rewatch()` fallback re-applies it correctly, mirroring how
+Refresh already behaved. Added two regression tests
+(`navigate_while_reconnecting_queues_instead_of_erroring`,
+`namespace_switch_while_reconnecting_is_applied_once_connected` in
+`src/app/mod.rs::tests`) that simulate `self.connection = None` mid-reconnect and
+assert queue-then-apply rather than error. Full suite green (57/57: 55 unit incl.
+the 2 new regressions, 10 fake-HTTP, 1 live-cluster test correctly ignored); fresh
+binary rebuilt; the exact live burst that found the bug was replayed three times
+post-fix with consistent, correct convergence, including confirming that an
+intervening context switch correctly discards an earlier context's still-queued
+resource switch (last-command-wins via `switch_context()`'s existing
+`self.pending = None`, not a stale carry-over).
+
+Also confirmed, live, two things worth recording as *not* bugs: (1) the local
+filter is intentionally not cleared by a context switch — it survives across
+contexts by design, confirmed in code (`cancel_scope()`/`connect()` never touch
+`filter`/`filter_text`); (2) curated/generic columns like `STATUS` are derived from
+a sample row (`state.columns()`) and disappear entirely at `[0/0]`, a characteristic
+that predates M3 item 5 (confirmed by diffing that commit) and is orthogonal to it
+— CRD printer columns do not share this weakness since they are schema-driven and
+render correctly even with zero objects. Recorded as a known, out-of-scope
+characteristic, not addressed here.
+
+M3 fully ACCEPTED. Local annotated tag `m3-accepted` created, never pushed.
 
 ### 2026-09-15 — M3 item 5 accepted (CRD printer columns; server Table researched
 ### and deliberately deferred)

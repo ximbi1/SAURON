@@ -28,10 +28,11 @@ It never falls back to the default kubeconfig and has no production cleanup path
 ## Current checkpoint
 
 M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
-verified before M3; worktree initially clean. M3 items 1 (filters), 2 (typed stable
-sorting), 3 (shared document viewer), 4 (Events), and 5 (CRD printer columns) are
-ACCEPTED. Item 6 (combined adversarial live acceptance) is next and last.
-Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 must stay read-only.
+verified before M3; worktree initially clean. All 6 M3 items are ACCEPTED (filters,
+typed stable sorting, shared document viewer, Events, CRD printer columns, combined
+adversarial live acceptance). **M3 is ACCEPTED** — see item 6 below and local
+annotated `m3-accepted`.
+Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 was entirely read-only.
 Latest full fmt/check/clippy clean, 49 unit + 4 fake-HTTP tests passed. Fake HTTP needs
 loopback permission outside sandbox. `cargo build --locked` followed by
 `python3 scripts/accept-m3.py filters` PASS, including exact replay of the stale-error
@@ -102,7 +103,30 @@ cross-validated against `kubectl get` showing the identical columns from the sam
 CRD. No live bug found this pass. 53 unit + 10 fake-HTTP tests passing. Full
 case-by-case evidence in `M3_ACCEPTANCE.md`.
 
-Next: item 6, combined adversarial live acceptance — the last M3 item.
+Item 6 (combined adversarial live acceptance) is done. Ran genuinely combined
+sequences against `kind-sauron-test`/`kind-sauron-test-b`: CRD printer columns →
+typed filter → sort → YAML → search → back → Warning-only Events → context/
+namespace switch → back/forward → refresh; invalid-regex-repair across a context
+switch; server+local selectors surviving Refresh/all-namespaces/concrete-namespace;
+document update+refresh+delete showing an explicit NOT CURRENT/404 rather than a
+crash; CRD same-name replacement with no leftover cells; rapid resource switching
+with no stale columns/rows; a 32x9 terminal through breadcrumb/palette/document
+transitions; filter+sort+history+Refresh interleaved. Found and fixed one real bug
+under rapid context/namespace/resource churn with zero settle time: `navigate()`
+and `switch_namespace()` both errored "Not connected" during the brief window
+right after a context switch (before its `Payload::Connected` lands), and the
+palette's reopen-on-error preserved that stale text, silently absorbing every
+subsequent keystroke as an edit to it instead of a fresh command — confirmed live
+by capturing the buffer mid-burst as three commands glued into one garbled string.
+Fixed by queuing (`navigate()`, reusing the existing `self.pending` mechanism) or
+ignoring the transient error (`switch_namespace()`, since `Payload::Connected`'s
+`rewatch()` fallback already re-applies the namespace set beforehand) instead of
+erroring. Two new regression tests. Full case-by-case evidence and the bug
+write-up are in `M3_ACCEPTANCE.md`. 57/57 tests passing (55 unit incl. 2 new
+regressions, 10 fake-HTTP, 1 live-cluster test correctly ignored).
+
+**M3 is ACCEPTED.** Tagged locally as `m3-accepted` (same pattern as `m1-accepted`/
+`m2-accepted`, not pushed anywhere).
 
 ## Historical M1 checkpoint
 

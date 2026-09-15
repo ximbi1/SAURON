@@ -89,28 +89,25 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
     ])
     .split(area);
     let heading = format!(
-        "{} {}  ·  {}  ·  READ ONLY",
+        "{} {}  ·  READ ONLY",
         crate::brand::MARK,
         crate::brand::NAME,
-        crate::safety::text(&state.context)
     );
-    let namespace_label = if state.resource.as_ref().is_some_and(|r| !r.namespaced) {
-        "n/a (cluster-scoped)".to_string()
+    // Short, canonical breadcrumb for the current scope: ctx:X › ns:Y › resource, or
+    // ctx:X › resource with no ns segment for a cluster-scoped resource. Always the
+    // resolved GVK's qualified name, never the raw alias the user may have typed.
+    let cluster_scoped = state.resource.as_ref().is_some_and(|r| !r.namespaced);
+    let resource_label = state
+        .resource
+        .as_ref()
+        .map(Resource::qualified)
+        .unwrap_or_else(|| state.query.resource.clone());
+    let scope = if cluster_scoped {
+        format!("ctx:{} › {resource_label}", state.context)
     } else {
-        state
-            .query
-            .namespace
-            .clone()
-            .unwrap_or_else(|| "<all>".into())
+        let ns = state.query.namespace.as_deref().unwrap_or("*");
+        format!("ctx:{} › ns:{ns} › {resource_label}", state.context)
     };
-    let scope = format!(
-        "Namespace: {namespace_label}   Resource: {}",
-        state
-            .resource
-            .as_ref()
-            .map(Resource::qualified)
-            .unwrap_or_else(|| state.query.resource.clone())
-    );
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(

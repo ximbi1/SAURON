@@ -29,6 +29,25 @@ pub struct Picker {
     pub active: Option<usize>,
     pub cursor: usize,
 }
+/// A back/forward-stack entry: semantic navigation intent, not a state snapshot. Never
+/// carries store/rows/watch data -- restoring replays the intent (reconnect if needed,
+/// re-resolve `resource` against whatever catalog is current, restart the watch) and
+/// lets the normal watch/rebuild pipeline repopulate real data, rather than reviving
+/// anything old as if it were current. `resource` is the canonical qualified name
+/// (`Resource::qualified()`, e.g. "pods" or "widgets.a.sauron.test"), never a raw
+/// human alias, so restoring re-resolves deterministically even if aliases/CRDs changed.
+/// `selected` is a UID, not a name: same-name-different-UID must not reselect (matches
+/// the existing rebuild() invariant that replacement clears selection).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryEntry {
+    pub context: String,
+    pub namespace: Option<String>,
+    pub resource: String,
+    pub filter_text: String,
+    pub sort: String,
+    pub descending: bool,
+    pub selected: Option<String>,
+}
 pub struct Document {
     pub title: String,
     pub lines: VecDeque<String>,

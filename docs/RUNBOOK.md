@@ -131,9 +131,32 @@ selection is explicitly deferred to item 4 — there is no resource-navigation h
 yet. A suspected crash chased at length during this item turned out to be intentional
 `Esc`-at-root-quits behavior (see AGENTS.md), not a bug; no code change from it.
 
-Next: M2 item 4 (navigation history/breadcrumbs — `pods → CRD → deployments → back →
-forward`), item 5 (command palette centralized on the action registry), item 6 (M2
-interactive acceptance trying to break it).
+Item 4 (navigation history/breadcrumbs) is also done. `state::HistoryEntry` stores
+semantic intent only — context, namespace, canonical resource name, filter, sort,
+selected UID — never store/rows data. Two `VecDeque` back/forward stacks on `Runtime`,
+capped at a fixed `HISTORY_LIMIT = 100` from the start. Pushed only at `Command::Resource`,
+`switch_namespace`, `switch_context` (Refresh/sort/filter/document-view never push, by
+construction, not a special case). New `[`/`]` keys walk the stacks and re-resolve/
+rewatch, never reviving old rows. Header replaced with a compact breadcrumb: `ctx:X ›
+ns:Y › resource` (no `ns:` segment for cluster-scoped), always the canonical name.
+
+Verified live: `pods → eyes → deployments → back → back → forward → forward` walks
+correctly; back after a namespace or context change restores correctly; `<all>` vs a
+concrete namespace round-trips; opening/closing a document doesn't touch history;
+several Refreshes then one Back returns directly to the prior view; going back to a
+CRD deleted in the meantime errors cleanly, not a crash; 15 rapid `[`/`]` presses past
+the real stack depth stop cleanly at the boundary; a narrow-terminal breadcrumb clips
+instead of panicking. Found and fixed a real bug: restoring history updated the
+canonical `state.resource` but not the text field `state.query.resource` that a later
+context switch re-resolves — a Back to `pods` followed by a context switch landed on
+the previous resource (`eyes`) instead of `pods` on the new context. Fixed in
+`finish_history`. Also spent time on what looked like a same-name-different-UID
+selection bug; it was confusion from an extremely long single test session, not a real
+bug — a clean isolated re-run with temporary instrumentation confirmed `rebuild()`
+already clears a stale-UID selection correctly. 31/31 tests passing (2 new).
+
+Next: M2 item 5 (command palette centralized on the action registry), item 6 (M2
+interactive acceptance trying to break it as a whole).
 
 ## Tools
 

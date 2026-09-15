@@ -32,6 +32,8 @@ pub enum Action {
     Fullscreen,
     SearchNext,
     SearchPrevious,
+    HistoryBack,
+    HistoryForward,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -184,6 +186,20 @@ pub fn registry() -> Vec<Binding> {
             "document",
             "Previous matching line",
             "N",
+        ),
+        (
+            Action::HistoryBack,
+            "history_back",
+            "navigation",
+            "Back to previous scope",
+            "[",
+        ),
+        (
+            Action::HistoryForward,
+            "history_forward",
+            "navigation",
+            "Forward to next scope",
+            "]",
         ),
     ];
     definitions

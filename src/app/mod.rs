@@ -27,9 +27,16 @@ pub struct Runtime {
     scope: CancellationToken,
     document: CancellationToken,
     pending: Option<ResourceCommand>,
+    pending_history: Option<state::HistoryEntry>,
     namespace_by_context: std::collections::HashMap<String, Option<String>>,
     recent_namespaces: std::collections::VecDeque<String>,
+    history: std::collections::VecDeque<state::HistoryEntry>,
+    forward: std::collections::VecDeque<state::HistoryEntry>,
 }
+/// Back-stack cap: fixed from the start so it can never grow unbounded across a long
+/// session. 100 is generous for a "how did I get here" trail without being a memory
+/// concern -- each entry is a handful of short strings, never store/rows data.
+const HISTORY_LIMIT: usize = 100;
 impl Runtime {
     pub fn new(
         options: ConnectOptions,
@@ -52,8 +59,11 @@ impl Runtime {
                 scope: CancellationToken::new(),
                 document: CancellationToken::new(),
                 pending: None,
+                pending_history: None,
                 namespace_by_context: std::collections::HashMap::new(),
                 recent_namespaces: std::collections::VecDeque::new(),
+                history: std::collections::VecDeque::new(),
+                forward: std::collections::VecDeque::new(),
             },
             rx,
         ))
@@ -62,6 +72,7 @@ impl Runtime {
     /// if this session has visited it before, instead of always resetting to the
     /// kubeconfig default. Remembers the outgoing context's current namespace first.
     fn switch_context(&mut self, context: String) {
+        self.push_history();
         if let Some(current) = self.connection.as_ref().map(|c| c.context.clone()) {
             self.namespace_by_context
                 .insert(current, self.state.query.namespace.clone());
@@ -72,6 +83,7 @@ impl Runtime {
     /// Switch the visible namespace (`None` is all-namespaces) and remember it in the
     /// recents list shown at the top of the namespace picker on future opens.
     fn switch_namespace(&mut self, namespace: Option<String>) -> Result<()> {
+        self.push_history();
         if let Some(ns) = &namespace {
             self.recent_namespaces.retain(|n| n != ns);
             self.recent_namespaces.push_front(ns.clone());
@@ -80,6 +92,80 @@ impl Runtime {
         self.state.query.namespace = namespace;
         self.state.mode = Mode::Table;
         self.watch()
+    }
+    /// Snapshot the current navigation *intent* (never store/rows) onto the back stack
+    /// and drop any forward stack, matching standard back/forward semantics: taking a
+    /// new path invalidates the old "redo". A no-op (not yet connected, or no resource
+    /// resolved yet -- e.g. still on the very first connect) pushes nothing.
+    fn push_history(&mut self) {
+        let Some(entry) = self.current_history_entry() else {
+            return;
+        };
+        push_capped(&mut self.history, entry, HISTORY_LIMIT);
+        self.forward.clear();
+    }
+    /// The current view as a `HistoryEntry`, or `None` before anything is resolved yet
+    /// (e.g. still on the very first connect) -- there is nothing meaningful to record.
+    fn current_history_entry(&self) -> Option<state::HistoryEntry> {
+        let connection = self.connection.as_ref()?;
+        let resource = self.state.resource.as_ref()?;
+        Some(state::HistoryEntry {
+            context: connection.context.clone(),
+            namespace: self.state.query.namespace.clone(),
+            resource: resource.qualified(),
+            filter_text: self.state.filter_text.clone(),
+            sort: self.state.sort.clone(),
+            descending: self.state.descending,
+            selected: self.state.selected.clone(),
+        })
+    }
+    /// Restore a history entry's navigation intent: reconnect only if its context
+    /// differs from the current one, re-resolve `resource` (a canonical qualified name)
+    /// against whatever catalog ends up current, then start a fresh watch. Never
+    /// revives old rows -- the normal watch/rebuild pipeline repopulates real data, and
+    /// the existing UID-not-found-clears-selection invariant in `rebuild()` handles a
+    /// selection that no longer exists (or was replaced by a same-named different UID).
+    fn apply_history(&mut self, entry: state::HistoryEntry) {
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|c| c.context == entry.context)
+        {
+            self.finish_history(entry);
+        } else {
+            let context = entry.context.clone();
+            self.pending_history = Some(entry);
+            self.connect(Some(context));
+        }
+    }
+    fn finish_history(&mut self, entry: state::HistoryEntry) {
+        let result = (|| -> Result<()> {
+            let connection = self.connection.as_ref().context("Not connected")?;
+            let resource = connection
+                .catalog
+                .resolve(&entry.resource, &connection.settings.aliases)?;
+            // Keep query.resource (the text rewatch()/a later context switch re-resolves)
+            // in sync with what was actually just restored -- otherwise it would still
+            // hold whatever was typed before this restore, and a subsequent context
+            // switch would re-resolve THAT stale text instead of the resource just
+            // returned to.
+            self.state.query.resource = entry.resource.clone();
+            self.state.query.namespace = entry.namespace;
+            self.state.filter_text = entry.filter_text;
+            self.state.filter = crate::filters::Expr::parse(&self.state.filter_text)
+                .unwrap_or(crate::filters::Expr::All);
+            self.state.sort = entry.sort;
+            self.state.descending = entry.descending;
+            self.watch_resource(resource)?;
+            // Set after watch_resource: cancel_scope() unconditionally clears selection,
+            // so the desired UID must be applied afterward, then validated by the normal
+            // rebuild() once the fresh list arrives (existing invariant, not duplicated).
+            self.state.selected = entry.selected;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.state.error = Some(format!("Could not restore history entry: {e}"));
+        }
     }
     /// Fetch the real namespace list from the cluster (bounded to 500, same pattern as
     /// Events) and open it as a picker, instead of navigating away to a namespaces
@@ -227,7 +313,9 @@ impl Runtime {
                     self.state.query.namespace = Some(connection.namespace.clone());
                 }
                 self.connection = Some(*connection);
-                if let Some(query) = self.pending.take() {
+                if let Some(entry) = self.pending_history.take() {
+                    self.finish_history(entry);
+                } else if let Some(query) = self.pending.take() {
                     if let Err(e) = self.navigate(query) {
                         self.state.error = Some(e.to_string());
                     }
@@ -362,7 +450,10 @@ impl Runtime {
         self.state.error = None;
         match crate::command::parse(text)? {
             Command::Action(action) => self.action(action),
-            Command::Resource(query) => self.navigate(query),
+            Command::Resource(query) => {
+                self.push_history();
+                self.navigate(query)
+            }
             Command::Namespace(Some(ns)) => self.switch_namespace(if ns == "all" || ns == "*" {
                 None
             } else {
@@ -508,6 +599,22 @@ impl Runtime {
                     d.search_next(action == SearchPrevious);
                 }
             }
+            HistoryBack => {
+                if let Some(entry) = self.history.pop_back() {
+                    if let Some(current) = self.current_history_entry() {
+                        self.forward.push_back(current);
+                    }
+                    self.apply_history(entry);
+                }
+            }
+            HistoryForward => {
+                if let Some(entry) = self.forward.pop_back() {
+                    if let Some(current) = self.current_history_entry() {
+                        push_capped(&mut self.history, current, HISTORY_LIMIT);
+                    }
+                    self.apply_history(entry);
+                }
+            }
         }
         self.state.dirty = true;
         Ok(())
@@ -616,6 +723,19 @@ fn namespace_for_context(
         .get(context)
         .cloned()
         .unwrap_or_else(|| Some(String::new()))
+}
+
+/// Push onto a bounded back/forward stack, dropping the oldest entry once `cap` would
+/// otherwise be exceeded, so a long session's history can never grow unbounded.
+fn push_capped(
+    stack: &mut std::collections::VecDeque<state::HistoryEntry>,
+    entry: state::HistoryEntry,
+    cap: usize,
+) {
+    stack.push_back(entry);
+    while stack.len() > cap {
+        stack.pop_front();
+    }
 }
 
 struct TerminalGuard;
@@ -777,5 +897,41 @@ mod tests {
             None,
             "None means all-namespaces and must be preserved, not confused with unvisited"
         );
+    }
+    fn entry(resource: &str) -> state::HistoryEntry {
+        state::HistoryEntry {
+            context: "kind-sauron-test".into(),
+            namespace: Some("sauron-fixtures".into()),
+            resource: resource.into(),
+            filter_text: String::new(),
+            sort: "NAME".into(),
+            descending: false,
+            selected: None,
+        }
+    }
+    #[test]
+    fn push_capped_drops_oldest_once_over_the_limit() {
+        let mut stack = std::collections::VecDeque::new();
+        for i in 0..5 {
+            push_capped(&mut stack, entry(&format!("r{i}")), 3);
+        }
+        // A fixed cap from the start: never grows past it, and it's the OLDEST entries
+        // that go, so "back" still walks the most recent history first.
+        assert_eq!(stack.len(), 3);
+        assert_eq!(
+            stack
+                .iter()
+                .map(|e| e.resource.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r2", "r3", "r4"]
+        );
+    }
+    #[test]
+    fn push_capped_never_exceeds_a_cap_of_one() {
+        let mut stack = std::collections::VecDeque::new();
+        push_capped(&mut stack, entry("a"), 1);
+        push_capped(&mut stack, entry("b"), 1);
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].resource, "b");
     }
 }

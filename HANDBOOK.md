@@ -129,7 +129,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED | context picker (M2 item 1), namespace picker (item 2), canonical-GVK resolution with deterministic non-silent alias/CRD ambiguity handling (item 3) all observed live; history/breadcrumbs still pending (item 4) |
+| Context/namespace/generic discovery/commands | ACCEPTED | context picker (item 1), namespace picker (item 2), canonical-GVK resolution (item 3), bounded semantic navigation history + breadcrumb (item 4) all observed live; command palette centralization pending (item 5) |
 | Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
@@ -590,3 +590,73 @@ deployments → back → forward` restoring resource+namespace+context+selection
 explicitly NOT covered here: there is no resource-level navigation history yet
 (`Action::Back` only leaves document mode, clears a filter, or quits) — that is M2 item
 4, next.
+
+### 2026-09-15 — M2 item 4: navigation history/breadcrumbs
+Followed the user's rule exactly: history stores semantic navigation *intent*, never a
+state snapshot. `state::HistoryEntry` is six short fields — `context`, `namespace`,
+`resource` (the canonical `Resource::qualified()` string, never a raw alias, so a
+restore re-resolves deterministically even across catalog changes), `filter_text`,
+`sort`, `descending`, and `selected` (a UID, not a name — same-name-different-UID must
+not reselect, matching the existing `rebuild()` invariant). No store/rows/watch data
+ever touches it. `Runtime` holds two `VecDeque<HistoryEntry>` (`history`/`forward`,
+classic browser stacks) fixed at `HISTORY_LIMIT = 100` from the start via a pure,
+unit-tested `push_capped` helper — never grows unbounded across a long session.
+
+Push points are deliberately narrow: `Command::Resource` (typing a new resource),
+`switch_namespace`, and `switch_context` — each pushes the view being *left* before
+applying the change, then clears `forward` (taking a new path invalidates old redo,
+standard back/forward semantics). Refresh, sort/filter/wide tweaks, and opening/
+closing a document or log view do NOT push — they don't call any of those three, so
+they're excluded by construction, not by a special case. New keys `[`/`]`
+(`Action::HistoryBack`/`HistoryForward`, "navigation" scope) pop a stack entry, push
+the current view onto the other stack, and call `apply_history`: reconnect only if the
+entry's context differs from the current one (`pending_history`, mirroring the
+existing `pending`/context-switch-replay mechanism), otherwise re-resolve `resource`
+against whatever catalog is current and start a fresh watch directly. Never revives
+old rows — the normal watch/rebuild pipeline repopulates real data every time.
+
+Header/scope line replaced with the requested compact breadcrumb: `ctx:X › ns:Y ›
+resource`, or `ctx:X › resource` with no `ns:` segment for a cluster-scoped resource.
+Always the resolved canonical name, never the typed alias (`:ey` shows
+`eyes.testing.sauron.local`).
+
+Live acceptance against `kind-sauron-test`, attacking the full case list given for
+this item: `pods → eyes(CRD) → deployments → back → back → forward → forward` walked
+the stack exactly as expected; back after a namespace change and after a context
+change both restored correctly; `<all>` vs a concrete namespace round-tripped
+correctly through back/forward; opening a YAML view and returning via Esc did not add
+or disturb any history entry; two/three Refreshes in a row followed by one Back
+returned directly to the prior view, confirming Refresh never pushes; going back to a
+CRD deleted mid-session (or before ever watching it again) produced a clean
+`WatchError`/404, not a crash, consistent with the M2-item-3 finding; 15 rapid `[`
+presses past the actual stack depth, and 15 rapid `]` presses back, both stopped
+cleanly at the real boundary with no crash (`pop_back` on an exhausted stack is a
+no-op by construction); a breadcrumb at 35x10 clipped instead of panicking or
+corrupting the layout.
+
+Found and fixed a real bug this way: restoring a history entry set `state.resource`
+(the canonical `Resource`, used for display and for the watch itself) correctly, but
+never updated `state.query.resource` (the *text* field `rewatch()` re-resolves against
+a *new* catalog after a context switch). Sequence that exposed it: navigate to `pods`,
+then `eyes`, Back to `pods` (now `state.resource` = pods, but `query.resource` was
+still last set by the `eyes` navigation), then switch context — `rewatch()` used the
+stale `query.resource` text and landed on `eyes` on the new context instead of `pods`.
+Fixed by also setting `state.query.resource = entry.resource.clone()` in
+`finish_history`. Also chased what looked like a same-name-different-UID selection
+bug (deleted and recreated a CRD instance with a new UID, went Back, and initially saw
+the row rendered as selected) — turned out to be leftover confusion from an extremely
+long single test session with many overlapping back/forward/context/namespace
+operations, not a real bug: a clean, isolated re-run with `eprintln!` instrumentation
+confirmed `rebuild()` correctly cleared `selected` to `None` when the remembered UID
+wasn't among the fresh rows (`selected_before=Some(old-uid)`, `row_uids=[new-uid]`,
+`selected_after=None`), exactly per the existing invariant. Instrumentation removed
+before committing either way.
+
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (31/31, two new for `push_capped`) after the fix.
+
+M2 item 4 is ACCEPTED: bounded, semantic-intent-only navigation history with working
+back/forward across resource/namespace/context changes, a compact canonical
+breadcrumb, and no crashes or stale-data leaks under adversarial rapid use — all
+observed live. Next: M2 item 5 (command palette centralized on the action registry),
+then item 6 (M2 interactive acceptance trying to break it as a whole).

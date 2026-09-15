@@ -3,5 +3,14 @@ kind: Eye
 metadata:
   name: observatory
   namespace: sauron-fixtures
+  labels:
+    example.test/Team: Ops
+    empty: ''
 spec:
   focus: deterministic-evidence
+  count: 8
+  ratio: 1.5
+  enabled: true
+  cpu: 250m
+  memory: 1Gi
+  percent: 75%

@@ -62,9 +62,12 @@ impl Object {
     }
     pub fn field(&self, key: &str, now: DateTime<Utc>) -> Option<String> {
         match key.to_ascii_lowercase().as_str() {
-            "name" | "metadata.name" => Some(self.name.clone()),
-            "namespace" | "ns" | "metadata.namespace" => Some(self.namespace.clone()),
-            "status" => Some(self.health.status.clone()),
+            "name" | "metadata.name" => (!self.name.is_empty()).then(|| self.name.clone()),
+            "namespace" | "ns" | "metadata.namespace" => {
+                (!self.namespace.is_empty()).then(|| self.namespace.clone())
+            }
+            "status" => (self.health.severity != health::Severity::Unknown)
+                .then(|| self.health.status.clone()),
             "age" => self.age(now).map(|x| x.to_string()),
             "spec.nodename" => self
                 .value
@@ -128,19 +131,24 @@ fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(St
     let mut add = |name: &str, value: String| out.push((name.to_owned(), value));
     if api == "v1" && kind == "Pod" {
         let (ready, total, restarts) = health::pod_counts(v);
-        add("READY", format!("{ready}/{total}"));
+        let display =
+            |value: Option<usize>| value.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
+        add("READY", format!("{}/{}", display(ready), display(total)));
         add("STATUS", health.status.clone());
-        add("RESTARTS", restarts.to_string());
+        add(
+            "RESTARTS",
+            restarts
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into()),
+        );
         add("NODE", scalar(v, "/spec/nodeName"));
     } else if api == "apps/v1" && ["Deployment", "StatefulSet", "ReplicaSet"].contains(&kind) {
         add(
             "READY",
             format!(
                 "{}/{}",
-                number(v, "/status/readyReplicas"),
-                v.pointer("/spec/replicas")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(1)
+                scalar(v, "/status/readyReplicas"),
+                scalar(v, "/spec/replicas")
             ),
         );
         add("STATUS", health.status.clone());
@@ -151,8 +159,8 @@ fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(St
             "READY",
             format!(
                 "{}/{}",
-                number(v, "/status/numberReady"),
-                number(v, "/status/desiredNumberScheduled")
+                scalar(v, "/status/numberReady"),
+                scalar(v, "/status/desiredNumberScheduled")
             ),
         );
         add("STATUS", health.status.clone());
@@ -194,8 +202,8 @@ fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(St
             "DATA",
             v.get("data")
                 .and_then(Value::as_object)
-                .map_or(0, |m| m.len())
-                .to_string(),
+                .map(|m| m.len().to_string())
+                .unwrap_or_else(|| "-".into()),
         );
         if kind == "Secret" {
             add("TYPE", scalar(v, "/type"));
@@ -207,8 +215,8 @@ fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(St
             "ACTIVE",
             v.pointer("/status/active")
                 .and_then(Value::as_array)
-                .map_or(0, Vec::len)
-                .to_string(),
+                .map(|m| m.len().to_string())
+                .unwrap_or_else(|| "-".into()),
         );
     } else if api == "batch/v1" && kind == "Job" {
         add("STATUS", health.status.clone());

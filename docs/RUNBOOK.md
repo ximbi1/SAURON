@@ -27,6 +27,20 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
+M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
+verified before M3; worktree initially clean. M3 item 1 (filters) is ACCEPTED; item 2
+(typed stable sorting) is IMPLEMENTING.
+Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 must stay read-only.
+Latest full fmt/check/clippy clean, 41 unit + 4 fake-HTTP tests passed. Fake HTTP needs
+loopback permission outside sandbox. `cargo build --locked` followed by
+`python3 scripts/accept-m3.py filters` PASS, including exact replay of the stale-error
+regex repair bug and rapid scope changes. Full evidence in HANDBOOK journal.
+New filter language: FILTERS.md. `po` with colliding Portal CRD is now ambiguous by
+current AGENTS policy; use `pods` or `v1/pods`. Historical M2 alias behavior below is
+superseded. No M3-wide acceptance/tag yet. Next: implement and live-accept sorting.
+
+## Historical M1 checkpoint
+
 M1 core is implemented AND interactively accepted against the isolated cluster: native
 connection/discovery/watch, staged UID-aware store, Pod and generic tables, command
 namespace/generic-resource switching, filter AST, sorting, redacted YAML, contextual
@@ -187,8 +201,7 @@ navigation, confirmed not to pollute history. No new bugs found — items 1-5 co
 correctly under combined adversarial use. 34/34 tests passing.
 
 **M2 is ACCEPTED.** Tagged locally as `m2-accepted` (same pattern as `m1-accepted`,
-not pushed anywhere) — the checkpoint to diff/reset against once M3 work starts. M3
-is not yet planned in detail.
+not pushed anywhere). The following milestone is now defined in M3_ACCEPTANCE.md.
 
 ## Tools
 

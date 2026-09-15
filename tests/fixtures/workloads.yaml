@@ -107,6 +107,12 @@ spec:
               type: object
               properties:
                 focus: {type: string}
+                count: {type: integer}
+                ratio: {type: number}
+                enabled: {type: boolean}
+                cpu: {type: string}
+                memory: {type: string}
+                percent: {type: string}
       additionalPrinterColumns:
         - name: Focus
           type: string

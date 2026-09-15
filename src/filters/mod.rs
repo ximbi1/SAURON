@@ -3,6 +3,8 @@ use crate::resources::Object;
 use anyhow::{Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use regex::{Regex, RegexBuilder};
+pub mod value;
+use value::Field;
 
 #[derive(Clone, Debug)]
 pub enum Expr {
@@ -10,7 +12,8 @@ pub enum Expr {
     Text(String),
     Exact(String),
     Regex(Regex),
-    Compare(String, Op, String),
+    LabelExists(String),
+    Compare(Field, Op, String),
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -95,8 +98,10 @@ impl Expr {
     /// is invariant even though the displayed value changes every frame regardless.
     pub fn has_time_predicate(&self) -> bool {
         match self {
-            Self::All | Self::Text(_) | Self::Exact(_) | Self::Regex(_) => false,
-            Self::Compare(key, ..) => key == "age",
+            Self::All | Self::Text(_) | Self::Exact(_) | Self::Regex(_) | Self::LabelExists(_) => {
+                false
+            }
+            Self::Compare(field, ..) => field.key == "age",
             Self::Not(a) => a.has_time_predicate(),
             Self::And(a, b) | Self::Or(a, b) => a.has_time_predicate() || b.has_time_predicate(),
         }
@@ -116,44 +121,21 @@ impl Expr {
             Self::Not(a) => a.evaluate(obj, now).not(),
             Self::And(a, b) => a.evaluate(obj, now).and(b.evaluate(obj, now)),
             Self::Or(a, b) => a.evaluate(obj, now).or(b.evaluate(obj, now)),
-            Self::Compare(key, op, want) => {
-                let actual = if let Some(label) = key.strip_prefix("label.") {
-                    obj.value
-                        .pointer("/metadata/labels")
-                        .and_then(|v| v.get(label))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned)
-                } else {
-                    obj.field(key, now)
-                };
-                let Some(actual) = actual else {
+            Self::LabelExists(key) => match obj.value.pointer("/metadata") {
+                Some(serde_json::Value::Object(metadata)) => match metadata.get("labels") {
+                    None | Some(serde_json::Value::Null) => Truth::No,
+                    Some(serde_json::Value::Object(labels)) => match labels.get(key) {
+                        None => Truth::No,
+                        Some(serde_json::Value::String(_)) => Truth::Yes,
+                        _ => Truth::Unknown,
+                    },
+                    _ => Truth::Unknown,
+                },
+                _ => Truth::Unknown,
+            },
+            Self::Compare(field, op, want) => {
+                let Some(ordering) = field.compare(obj, now, want) else {
                     return Truth::Unknown;
-                };
-                let numeric = matches!(op, Op::Lt | Op::Le | Op::Gt | Op::Ge)
-                    || [
-                        "age",
-                        "cpu",
-                        "memory",
-                        "mem",
-                        "restarts",
-                        "failed",
-                        "succeeded",
-                    ]
-                    .contains(&key.as_str());
-                let ordering = if numeric {
-                    let parse = |s: &str| {
-                        if key == "age" {
-                            duration(s).or_else(|| s.parse::<f64>().ok().filter(|n| n.is_finite()))
-                        } else {
-                            quantity(s)
-                        }
-                    };
-                    let (Some(a), Some(b)) = (parse(&actual), parse(want)) else {
-                        return Truth::Unknown;
-                    };
-                    a.total_cmp(&b)
-                } else {
-                    actual.to_lowercase().cmp(&want.to_lowercase())
                 };
                 Truth::from_bool(match op {
                     Op::Eq => ordering.is_eq(),
@@ -301,7 +283,12 @@ fn lex(s: &str) -> Result<Vec<Token>> {
                     word.push(next);
                     chars.next();
                 }
-                Token::Word(word)
+                match word.as_str() {
+                    "AND" => Token::And,
+                    "OR" => Token::Or,
+                    "NOT" => Token::Not,
+                    _ => Token::Word(word),
+                }
             }
         });
     }
@@ -363,14 +350,12 @@ impl Parser {
                         _ => bail!("comparison needs a value"),
                     };
                     self.index += 1;
-                    let key = key.to_lowercase();
-                    if key == "age" {
-                        ensure!(
-                            duration(&value).is_some(),
-                            "age needs a duration such as 1h30m"
-                        );
-                    }
-                    Expr::Compare(key, op, value)
+                    let field = Field::parse(&key)?;
+                    field.validate_literal(&value)?;
+                    Expr::Compare(field, op, value)
+                } else if let Some(label) = key.strip_prefix("label.") {
+                    ensure!(!label.is_empty(), "label key cannot be empty");
+                    Expr::LabelExists(label.to_owned())
                 } else {
                     Expr::Text(key)
                 }
@@ -391,6 +376,157 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    fn fixture() -> Object {
+        Object::new(json!({"apiVersion":"v1","kind":"Pod",
+            "metadata":{"name":"api-worker","namespace":"test","creationTimestamp":"2026-09-15T10:00:00Z",
+                "labels":{"app":"API","example.test/Team":"Ops","empty":""}},
+            "spec":{"containers":[{"name":"worker"}], "cpu":"250m", "memory":"1Gi", "percent":"75%",
+                "enabled":true,"ratio":1.5,"count":9007199254740993u64,"signed":-2,"duration":"1h30m"},
+            "status":{"phase":"Running","containerStatuses":[{"name":"worker","ready":true,"restartCount":8}]}
+        }))
+    }
+    fn now() -> DateTime<Utc> {
+        "2026-09-15T12:00:00Z".parse().expect("timestamp")
+    }
+    #[test]
+    fn complete_expression_acceptance_matrix() {
+        let object = fixture();
+        for query in [
+            "apwrk",
+            "\"api-worker\"",
+            "/^api-.*$/",
+            "!/nomatch/",
+            "NOT nomatch",
+            "name=api-worker OR name=other AND name=none",
+            "(name=api-worker OR name=other) AND NOT (name=none OR /nomatch/)",
+            "age>1h30m",
+            "age=2h",
+            "restarts>=8",
+            "label.app",
+            "label.empty=\"\"",
+            "label.example.test/Team=Ops",
+            "!label.missing",
+            "label.app=API",
+            "cpu:field:/spec/cpu>100m",
+            "memory:field:/spec/memory=1024Mi",
+            "percent:field:/spec/percent>=50%",
+            "bool:field:/spec/enabled=true",
+            "field:/spec/enabled=true",
+            "field:/spec/ratio>1.4",
+            "field:/spec/count=9007199254740993",
+            "integer:field:/spec/signed=-2",
+            "duration:field:/spec/duration=90m",
+            "number:field:/spec/signed<-1.5",
+        ] {
+            assert_eq!(
+                Expr::parse(query).expect(query).evaluate(&object, now()),
+                Truth::Yes,
+                "{query}"
+            );
+        }
+        for query in [
+            "label.app=api",
+            "label.example.test/team",
+            "field:/spec/count=9007199254740992",
+            "restarts>8",
+            "age<2h",
+            "label.missing",
+        ] {
+            assert_eq!(
+                Expr::parse(query).expect(query).evaluate(&object, now()),
+                Truth::No,
+                "{query}"
+            );
+        }
+        for query in [
+            "cpu>100m",
+            "NOT (cpu>100m)",
+            "cpu!=0",
+            "label.missing=foo",
+            "field:/missing=false",
+            "number:field:/spec/enabled=0",
+            "field:/spec=null",
+            "label.example.test/team=Ops",
+        ] {
+            assert_eq!(
+                Expr::parse(query).expect(query).evaluate(&object, now()),
+                Truth::Unknown,
+                "{query}"
+            );
+        }
+    }
+    #[test]
+    fn malformed_filters_are_errors_not_broader_queries() {
+        for query in [
+            "/[/",
+            "/unfinished",
+            "NOT",
+            "a AND",
+            "OR a",
+            "(a OR b",
+            "a)",
+            "cpu>NaN",
+            "cpu>10%",
+            "restarts>1.2",
+            "age>5",
+            "bool:field:/spec/enabled=yes",
+            "count:field:/spec/count=-1",
+            "percent:field:/spec/percent=1Gi",
+            "label.",
+            "field:spec/x=1",
+            "field:/bad~2=1",
+            "mystery:field:/spec/x=1",
+        ] {
+            assert!(Expr::parse(query).is_err(), "{query}");
+        }
+    }
+    #[test]
+    fn full_strong_kleene_truth_tables() {
+        use Truth::*;
+        let values = [Yes, No, Unknown];
+        let and = [[Yes, No, Unknown], [No, No, No], [Unknown, No, Unknown]];
+        let or = [[Yes, Yes, Yes], [Yes, No, Unknown], [Yes, Unknown, Unknown]];
+        for (i, a) in values.iter().enumerate() {
+            for (j, b) in values.iter().enumerate() {
+                assert_eq!(a.and(*b), and[i][j]);
+                assert_eq!(a.or(*b), or[i][j]);
+            }
+        }
+        assert_eq!(Unknown.not(), Unknown);
+        let object = fixture();
+        assert_eq!(
+            Expr::parse("cpu>1 OR name=api-worker")
+                .expect("valid")
+                .evaluate(&object, now()),
+            Yes
+        );
+        assert_eq!(
+            Expr::parse("cpu>1 AND name=other")
+                .expect("valid")
+                .evaluate(&object, now()),
+            No
+        );
+    }
+    #[test]
+    fn missing_counts_and_malformed_labels_stay_unknown() {
+        let object = Object::new(
+            json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"x","labels":false},"spec":{"containers":[{"name":"c"}]}}),
+        );
+        for query in [
+            "restarts=0",
+            "NOT restarts=0",
+            "label.app",
+            "status=Running",
+        ] {
+            assert_eq!(
+                Expr::parse(query).expect("valid").evaluate(&object, now()),
+                Truth::Unknown,
+                "{query}"
+            );
+        }
+        assert_eq!(object.field("restarts", now()), None);
+    }
     #[test]
     fn precedence_and_unknown_survive_negation() {
         let p = Object::new(

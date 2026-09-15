@@ -1,7 +1,7 @@
 use crate::{
     command::{Action, Keymap},
     config::Settings,
-    filters::{Expr, quantity},
+    filters::{Expr, Truth, quantity},
     kube::{discovery::Resource, watch::Query},
     resources::{SharedObject, store::Store},
 };
@@ -31,18 +31,19 @@ pub struct Picker {
 }
 /// A back/forward-stack entry: semantic navigation intent, not a state snapshot. Never
 /// carries store/rows/watch data -- restoring replays the intent (reconnect if needed,
-/// re-resolve `resource` against whatever catalog is current, restart the watch) and
+/// resolve canonical GVR only when crossing catalogs, restart the watch) and
 /// lets the normal watch/rebuild pipeline repopulate real data, rather than reviving
-/// anything old as if it were current. `resource` is the canonical qualified name
-/// (`Resource::qualified()`, e.g. "pods" or "widgets.a.sauron.test"), never a raw
-/// human alias, so restoring re-resolves deterministically even if aliases/CRDs changed.
+/// anything old as if it were current. `resource` is resolved metadata, never a raw
+/// human alias. Explicit server selectors are part of the intent, not global state.
 /// `selected` is a UID, not a name: same-name-different-UID must not reselect (matches
 /// the existing rebuild() invariant that replacement clears selection).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct HistoryEntry {
     pub context: String,
     pub namespace: Option<String>,
-    pub resource: String,
+    pub resource: Resource,
+    pub labels: Option<String>,
+    pub fields: Option<String>,
     pub filter_text: String,
     pub sort: String,
     pub descending: bool,
@@ -128,10 +129,12 @@ pub struct State {
     pub mode: Mode,
     pub status: String,
     pub error: Option<String>,
+    pub input_error: Option<String>,
     pub synced: bool,
     pub dirty: bool,
     pub quit: bool,
     pub watch_errors: u64,
+    pub filter_unknown: usize,
     pub page_size: usize,
     prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
@@ -157,10 +160,12 @@ impl State {
             mode: Mode::Table,
             status: "Starting".into(),
             error: None,
+            input_error: None,
             synced: false,
             dirty: true,
             quit: false,
             watch_errors: 0,
+            filter_unknown: 0,
             page_size: 20,
             prepared: None,
         })
@@ -187,6 +192,14 @@ impl State {
         columns.push("AGE".into());
         columns
     }
+    pub fn set_filter(&mut self, text: &str) -> anyhow::Result<()> {
+        let expression = Expr::parse(text)?;
+        self.filter = expression;
+        self.filter_text = text.to_owned();
+        self.input_error = None;
+        self.dirty = true;
+        Ok(())
+    }
     pub fn selected_object(&self) -> Option<SharedObject> {
         self.selected
             .as_ref()
@@ -196,11 +209,19 @@ impl State {
     pub fn rebuild(&mut self) {
         let now = Utc::now();
         let was_empty = self.rows.is_empty();
+        self.filter_unknown = 0;
         self.rows = self
             .store
             .objects
             .values()
-            .filter(|o| self.filter.matches(o, now))
+            .filter(|o| match self.filter.evaluate(o, now) {
+                Truth::Yes => true,
+                Truth::No => false,
+                Truth::Unknown => {
+                    self.filter_unknown += 1;
+                    false
+                }
+            })
             .cloned()
             .collect();
         let column = &self.sort;
@@ -326,6 +347,18 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repaired_filter_clears_input_error_but_preserves_transport_error() {
+        let mut state = State::new(Query::default(), &Settings::default()).expect("state");
+        state.set_filter("name=api").expect("valid");
+        state.error = Some("Forbidden API".into());
+        state.input_error = state.set_filter("/[/").err().map(|e| e.to_string());
+        assert!(state.input_error.is_some());
+        assert_eq!(state.filter_text, "name=api");
+        state.set_filter("/^api/").expect("repaired");
+        assert!(state.input_error.is_none());
+        assert_eq!(state.error.as_deref(), Some("Forbidden API"));
+    }
     #[test]
     fn selection_is_uid_not_row_index() {
         let mut s = State::new(Query::default(), &Settings::default()).expect("state");

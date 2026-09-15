@@ -8,13 +8,13 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 
 | Area | Sofka capability | SAURON equivalent | Priority | Status | Test | Notes |
 | ---- | ---------------- | ----------------- | -------- | ------ | ---- | ----- |
-| Navigation | Kubeconfig / exec credentials / explicit context | Native config/client | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Navigation | Context picker, switching, remembered namespaces | Epoch-scoped context navigation | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Navigation | Namespace picker, all namespaces, active/default labels | Namespace scope and restricted-list fallback | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Navigation | Kubeconfig / exec credentials / explicit context | Native config/client | P0 | ACCEPTED | M1/M2 live kind; RUNBOOK | Credential plugins delegated to kube; not independently acceptance-tested |
+| Navigation | Context picker, switching, remembered namespaces | Epoch-scoped context navigation | P0 | ACCEPTED | M2 items 1/6 live | Session-local memory |
+| Navigation | Namespace picker, all namespaces, active/default labels | Namespace scope | P0 | ACCEPTED | M2 items 2/6 live | Restricted-list fallback is still a gap |
 | Navigation | Favorites 1–9, recents, selected-row namespace | Config favorites/session history | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Navigation | Shortnames, aliases, API groups, precedence | Discovered GVR catalog and deterministic aliases | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Navigation | CRDs, custom resources, arbitrary discovered kinds | Dynamic resource watch/render | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Navigation | Drill-down, breadcrumbs, history, resource cycling | Structured navigation stack | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Navigation | Shortnames, aliases, API groups, precedence | Discovered GVR catalog and aliases | P0 | ACCEPTED | M2 item 3 live + resolve regressions | M3 tightens selector/history identity boundaries |
+| Navigation | CRDs, custom resources, arbitrary discovered kinds | Dynamic resource watch/render | P0 | ACCEPTED | M2 item 3/6 live | Rich printer columns remain M3 work |
+| Navigation | Drill-down, breadcrumbs, history, resource cycling | Bounded back/forward + breadcrumbs | P1 | IMPLEMENTING | M2 item 4/6 accepted live | Drill-down/resource cycling not delivered; M3 adds selector history |
 | Navigation | Wide columns, horizontal scroll with pinned identity | Typed column layout | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Navigation | Compact mode, hidden header, terminal title | Responsive terminal chrome | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Navigation | Global fuzzy object finder with partial RBAC results | Bounded cross-kind finder | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
@@ -46,11 +46,11 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Views | CRD printer columns including condition selectors | Validated printer expression subset | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Views | Server Tables, watch/poll fallback, UID/RV cell validity | Negotiated Table adapter | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Views | Custom columns, types, image tags, quantities, namespaces | Declarative typed views | P2 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Filtering | Fuzzy, quoted substring, regex, inverse | Bounded AST text predicates | P0 | DESIGNED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
-| Filtering | Label key/value local search | Label predicates | P1 | DESIGNED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
-| Filtering | Server label/field selectors, combined scopes | Separate query selector fields | P0 | DESIGNED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
-| Filtering | Typed comparisons: CPU/memory/age/count/percent | Typed values with explicit unknown | P0 | DESIGNED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
-| Filtering | AND/OR/parentheses/negation, invalid-input errors | Lexer + recursive descent AST | P0 | DESIGNED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
+| Filtering | Fuzzy, quoted substring, regex, inverse | Bounded AST text predicates | P0 | ACCEPTED | M3 item 1 unit + live accept-m3.py filters | FILTERS.md |
+| Filtering | Label key/value local search | Case-sensitive labels + existence AST | P1 | ACCEPTED | M3 item 1 unit + live | Missing comparisons UNKNOWN |
+| Filtering | Server label/field selectors, combined scopes | Separate query selector fields + history | P0 | ACCEPTED | Fake HTTP list/watch; M3 live selector/history flow | No automatic pushdown |
+| Filtering | Typed comparisons: CPU/memory/age/count/percent | Typed scalar values with explicit unknown | P0 | ACCEPTED | M3 unit + live CRD/Pod comparisons | Metrics collection unavailable; finite f64 quantities |
+| Filtering | AND/OR/parentheses/negation, invalid-input errors | Lexer + recursive descent AST | P0 | ACCEPTED | M3 unit + live recovery including regression replay | Strong Kleene; unknown count visible |
 | Filtering | Faults-only pod toggle | Health predicate | P1 | RESEARCHED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
 | Sorting | Column picker, ascending/descending, age shortcut | Typed stable ordering | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Sorting | Configured defaults and remembered per-kind sort | Config/session persistence | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
@@ -137,9 +137,13 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Gap review at baseline
+## Current gap review — M3 start, 2026-09-15
 
-Everything executable is still a gap. Highest-risk journeys: stale-object actions, scope
-switch races, UI starvation, missing evidence disguised as health, and unrestricted Secret
-export. Build discovery/watch/table first, prove recovery and cancellation, then navigation
-and diagnostics. No comparative performance claims before equivalent measured workloads.
+M1 and M2 accepted checkpoints exist; navigation is not a gap. Basic live watch/store,
+curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config
+are implemented (see HANDBOOK/RUNBOOK for actual live scope). Remaining composite rows
+above describe full parity: DESIGNED does not imply every sub-capability is absent.
+Full M3 filtering/sorting/documents/Events/Tables acceptance is still outstanding.
+Highest risks: selector history widening, missing values coerced to zero, stale async
+completion and cells on replaced objects. Prioritize M3_ACCEPTANCE.md in order; no
+comparative performance claims or later-milestone expansion.

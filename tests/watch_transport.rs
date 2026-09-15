@@ -92,7 +92,7 @@ fn connection(client: Client) -> Connection {
     }
 }
 fn pod(uid: &str, version: &str, name: &str) -> Value {
-    json!({"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":name,"uid":uid,"resourceVersion":version},"spec":{"containers":[]},"status":{"phase":"Pending"}})
+    json!({"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":name,"uid":uid,"resourceVersion":version},"spec":{"containers":[{"name":"c"}]},"status":{"phase":"Pending"}})
 }
 
 #[tokio::test]
@@ -198,4 +198,58 @@ async fn discovery_preserves_core_when_extension_is_forbidden() {
         .expect("partial discovery");
     assert_eq!(catalog.warnings.len(), 1);
     assert!(catalog.resolve("pods", &BTreeMap::new()).is_ok());
+}
+
+#[tokio::test]
+async fn server_selectors_are_preserved_on_list_and_watch_with_local_filter() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    let server = Server::new(move |path| {
+        observed.lock().expect("paths").push(path.to_owned());
+        assert!(path.contains("labelSelector=app%3Dapi"), "{path}");
+        assert!(path.contains("fieldSelector=status.phase%3DRunning"), "{path}");
+        assert!(!path.contains("restarts"), "local AST must never be pushed to server");
+        if path.contains("watch=true") || path.contains("watch=1") {
+            (200, format!("{}\n", json!({"type":"MODIFIED","object":pod("a","2","api")})))
+        } else {
+            (200, json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"1"},"items":[pod("a","1","api")]}).to_string())
+        }
+    }).await;
+    let (tx, mut rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(watch::run(
+        connection(server.client()),
+        resource(),
+        Query {
+            resource: "v1/pods".into(),
+            namespace: Some("default".into()),
+            labels: Some("app=api".into()),
+            fields: Some("status.phase=Running".into()),
+        },
+        1,
+        tx,
+        cancel.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match rx.recv().await.expect("event").payload {
+                Payload::Apply(object, false) => {
+                    assert_eq!(
+                        sauron::filters::Expr::parse("name=api AND restarts>1")
+                            .expect("filter")
+                            .evaluate(&object, chrono::Utc::now()),
+                        sauron::filters::Truth::Unknown
+                    );
+                    break;
+                }
+                Payload::WatchError(error) => panic!("{error}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("watch delivered");
+    cancel.cancel();
+    task.await.expect("joined");
+    assert!(seen.lock().expect("paths").len() >= 2);
 }

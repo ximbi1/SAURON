@@ -127,10 +127,13 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Slice | State | Evidence / outstanding |
 | --- | --- | --- |
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
-| Build, CLI, tracing | IMPLEMENTING | next slice |
+| Build, CLI, tracing | TESTED | working CLI/headless diagnostics; M1/M2 check suites |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED | context picker (1), namespace picker (2), canonical-GVK resolution (3), navigation history + breadcrumb (4), command palette unified on the action registry (5) all observed live; M2 item 6 (whole-M2 acceptance) next |
-| Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
+| Context/namespace/generic discovery/commands | ACCEPTED | entire M2 including combined adversarial flows; annotated local m2-accepted at 675567d |
+| Basic filters/sort/documents/events (M1 scope only) | ACCEPTED | basic flows observed live; NOT acceptance of the fuller M3 requirements |
+| M3 filter completion | ACCEPTED | 41 unit + 4 fake HTTP checks; reproducible live snapshots/PTY `scripts/accept-m3.py filters`; stale input-error regression fixed and replayed |
+| M3 sorting | IMPLEMENTING | shared scalar types available; stable/unknown-last ordering next |
+| M3 documents/events/Tables/CRD columns | DESIGNED | ordered slices, not accepted; see docs/M3_ACCEPTANCE.md |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
@@ -198,10 +201,11 @@ Checks: `cargo fmt --check`, `cargo check --all-targets`,
 Bench harness: 100/1,000/5,000 Pods, generic objects, filter/sort/update/render. Record
 environment, build mode, counts, repetitions, timings and limitations. Startup and API
 latency are separate from in-memory throughput.
-As of 2026-09-15: `cargo fmt --check` clean, `cargo check --all-targets` clean,
-`cargo clippy --all-targets -- -D warnings` clean (0 lints), `cargo test --all-targets`
-18/18 passing (15 unit, 3 fake-HTTP integration in `tests/watch_transport.rs`; the live
-`tests/cluster.rs` acceptance test is `#[ignore]`d pending an explicit isolated-cluster run).
+M2 checkpoint records green fmt/check/clippy/tests and live acceptance. M3 baseline
+re-run: `cargo test --locked --lib` 34/34 passed; three additional fake-HTTP tests
+live in `tests/watch_transport.rs`. Live `tests/cluster.rs` is opt-in (`#[ignore]`),
+previously passed against isolated kind; this attribute does not mean untested.
+New M3 full-suite/live results will be recorded per slice, not inferred from M2.
 Debug-profile bench sample on the development machine: 100 objects 11.5ms build /
 0.5ms filter+sort / 4.4ms render; 1,000 objects 107ms / 5.4ms / 14.6ms; 5,000 objects
 472ms / 24.8ms / 53.0ms. Debug build, single run, no release-profile or repeated-sample
@@ -213,8 +217,7 @@ Initial implementation exists; the checks above are green. Broad parity is a lon
 backlog. Existing machine: rustc/cargo 1.95, 15 GiB RAM with other workloads; keep build
 parallelism modest. Docker available. Existing production API `/version` read succeeded
 (Kubernetes v1.33.4). No sensitive resource contents collected in research.
-Visual/TUI acceptance against the live isolated cluster is still pending — green checks
-are unit/fake-HTTP evidence, not a demonstrated interactive session. Log reader caps
+M1 and M2 visual/TUI acceptance is recorded below; M3 acceptance is pending. Log reader caps
 allocation before clipping (16 KiB per line, 4 KiB read chunks); covered by the fake-HTTP
 watch tests but not yet by a dedicated log-clipping regression test. Row rebuild is gated
 by a `prepare()` memo keyed on store revision/filter/sort/descending, plus the current
@@ -222,26 +225,63 @@ second only when the filter has an `age` comparison (see journal entry below —
 version included the clock unconditionally and resorted every tick regardless of scope). Other open concerns: document wrap
 scroll semantics, scope selection during empty filters. Watch list synchronization is
 labeled separately from an established watch; no header-level connection probe yet.
-No in-cluster config fallback, context/namespace pickers, server Tables, CRD printer columns,
+No in-cluster config fallback, server Tables, CRD printer columns,
 multi-container log fanout, metrics, graph, or mutations yet. Core Event reads cap at 200
 and report truncation. Describe is SAURON's contextual native report, not kubectl parity.
 
 ## Current milestone / continuation instructions
 
-M1 implementation is FUNCTIONAL and TESTED against fake HTTP + unit coverage, but not yet
-ACCEPTED: no demonstrated interactive TUI session against the live isolated cluster has
-been recorded in this handbook. M2/M3 inspection code is also present but not accepted.
-The regex cell-matching bug and the 8 original Clippy lints are fixed; all checks listed
-above are currently green. `tests/cluster.rs` (live kind-sauron-test acceptance) exists
-but has not been executed and run to completion in this handbook's record.
-Next: run `bash scripts/test-cluster.sh fixtures` then `bash scripts/test-cluster.sh test`
-against `kind-sauron-test`; drive the real TUI interactively (watch/recovery, namespace and
-context switching, terminal restore on exit/resize, Pod logs follow/previous) and record
-what was actually observed. Only mark a slice ACCEPTED after that direct observation.
+M1 and M2 are ACCEPTED. Verified local annotated `m2-accepted` points to
+`675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; initial M3 worktree was clean.
+This is a reference/rollback checkpoint, not permission to discard user changes.
+Current: M3 item 2, typed sorting, then shared document UX,
+Events, server Tables/CRD columns, combined adversarial live acceptance. Contract and
+case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
+No `m3-accepted` until every required slice and combined live flow is demonstrated.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
 isolated unit tests alone. Keep buildable handoffs.
 
 ## Journal
+
+### 2026-09-15 — M3 item 1 accepted (query/filter slice)
+Full fmt/check/clippy clean; 41 unit + 4 fake-HTTP tests pass; fake servers require
+loopback permission outside sandbox (initial denied-bind run recorded, rerun passed).
+Rebuilt binary and repeated exact regex-repair live failure successfully, then completed
+`python3 scripts/accept-m3.py filters`: snapshots for fuzzy/substring/regex/Boolean,
+case-sensitive labels, native CRD scalars and quantity casts; unavailable metrics stay
+UNKNOWN; live Pod age/restarts; server label+field selectors and local filter together;
+history/back/forward/Refresh selectors; three rapid namespace rounds and three context
+rounds; all-namespaces; ambiguous alias rejection; terminal return. All PASS against
+isolated kind only. No new dependencies, no production requests.
+Added `filters/value.rs` shared scalar access: exact integer/count and finite f64 quantities,
+native JSON Pointer scalar types, typed validation; docs/FILTERS.md records limits.
+Explicit equality is now case-sensitive; fuzzy/substring/regex remain insensitive.
+History carries resolved Resource metadata and selectors, no same-catalog re-resolution.
+Watch runtime query text becomes canonical version/plural; no alias retained after resolve.
+Stricter current AGENTS ambiguity invariant overrides historical M2 built-in-shadow policy:
+`po` colliding with a CRD now errors in every case; `v1/pods` is explicit. Existing M2
+historical entries remain historical, not the current alias contract.
+Benchmark harness ran as part of all-target tests: 100/1000/5000 filter-sort medians
+1.038/9.855/31.534ms, render 8.730/31.584/66.793ms (debug, five samples, concurrent
+build contention; not suitable for cross-version performance comparison).
+
+### 2026-09-15 — M3 filter live bug: stale syntax error after repair
+Reproduced with live Eye table → `/` → Ctrl-U → `/[/` → Enter → Ctrl-U →
+`/^observ/` → Enter. Rows matched but old "invalid or oversized regex" still displayed.
+Root cause: filter errors reused transport `State.error`; success never cleared it.
+Added separate input-error state and atomic `State::set_filter`, preserving transport
+errors on correction. Regression asserts previous AST survives invalid input and corrected
+input clears only its error. Full checks and exact fresh-binary live replay pending.
+Other M3 tasks paused until replay succeeds, per AGENTS.md.
+
+### 2026-09-15 — M3 baseline reconciliation
+Read AGENTS, handbook, runbook, parity and code; verified clean HEAD and annotated M2
+checkpoint. Fixed stale current sections contradicting recorded M1/M2 acceptance;
+historical entries retain their original time-specific claims. Isolated cluster identity
+check passed (Docker access required sandbox approval). Baseline 34 unit tests passed.
+Inspection found selector fields absent from history, fallback-to-All on history parse
+failure, lowercased label keys, missing label-existence AST, and display-string numeric
+coercion. These are M3 item 1 work, not accepted functionality. No production requests.
 
 ### 2026-09-15 — investigation and design
 Inspected website, README, features, architecture, keys/keybindings, configuration,

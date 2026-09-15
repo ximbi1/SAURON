@@ -32,10 +32,7 @@ impl Resource {
         }
     }
 }
-/// Aliases resolved before consulting live discovery at all, matching kubectl
-/// precedent: these always win over a CRD declaring the same shortname. Shared
-/// between `resolve` and `discover` (the latter warns on a live collision) so the
-/// two stay in sync.
+/// Convenience spellings, never permission to shadow another discovered identity.
 const BUILTIN_ALIASES: &[(&str, &str)] = &[
     ("po", "pods"),
     ("dp", "deployments"),
@@ -83,6 +80,11 @@ impl Catalog {
             .map(|(_, target)| *target)
             .unwrap_or(query);
         let q = aliases.get(query).map(String::as_str).unwrap_or(builtin);
+        let original = if aliases.contains_key(query) {
+            q
+        } else {
+            query
+        };
         // Explicit qualification (id form "version/plural" or "plural.group") is how a
         // user resolves ambiguity themselves; it always wins outright. Only actually
         // qualified input takes this path: a bare word like "widgets" must NOT match a
@@ -101,7 +103,11 @@ impl Catalog {
             self.resources
                 .iter()
                 .filter(|r| {
-                    r.api.plural.eq_ignore_ascii_case(q) || r.api.kind.eq_ignore_ascii_case(q)
+                    r.api.plural.eq_ignore_ascii_case(q)
+                        || r.api.kind.eq_ignore_ascii_case(q)
+                        || r.short_names
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case(q) || s.eq_ignore_ascii_case(original))
                 })
                 .collect(),
         );
@@ -110,28 +116,6 @@ impl Catalog {
             n if n > 1 => bail!(
                 "{q:?} is ambiguous across API groups; qualify explicitly as plural.group: {}",
                 by_plural_or_kind
-                    .iter()
-                    .map(|r| r.qualified())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            _ => {}
-        }
-        // Shortnames last, matching kubectl precedent: the small built-in alias table
-        // above always wins for its 12 entries even if a CRD declares the same
-        // shortname (discovery records that collision as a warning, not silently).
-        // Among live discovery shortnames, case-insensitive and ambiguity-checked too.
-        let by_shortname = dedup_by_id(
-            self.resources
-                .iter()
-                .filter(|r| r.short_names.iter().any(|s| s.eq_ignore_ascii_case(q)))
-                .collect(),
-        );
-        match by_shortname.len() {
-            1 => return Ok(by_shortname[0].clone()),
-            n if n > 1 => bail!(
-                "shortname {q:?} is ambiguous across API groups; qualify explicitly as plural.group: {}",
-                by_shortname
                     .iter()
                     .map(|r| r.qualified())
                     .collect::<Vec<_>>()
@@ -239,7 +223,7 @@ pub async fn discover(client: &Client, timeout: Duration) -> Result<Catalog> {
         .retain(|r| seen.insert((r.api.group.clone(), r.api.plural.clone())));
     catalog.resources.sort_by_key(Resource::qualified);
     // A CRD (or any discovered resource) can declare a shortname that collides with the
-    // small built-in alias table `resolve` always checks first; the built-in wins
+    // convenience alias table. Ambiguous input is rejected by `resolve`;
     // deterministically (kubectl precedent), but that must be a visible warning, not a
     // silent dead end for whoever typed the CRD's own shortname expecting it to work.
     for (alias, target) in BUILTIN_ALIASES {
@@ -248,7 +232,7 @@ pub async fn discover(client: &Client, timeout: Duration) -> Result<Catalog> {
                 && !r.api.plural.eq_ignore_ascii_case(target)
             {
                 catalog.warnings.push(format!(
-                    "shortname {alias:?} on {} is shadowed by the built-in alias to {target}; use plural.group to reach it",
+                    "shortname {alias:?} on {} collides with {target}; use a qualified resource identity",
                     r.qualified()
                 ));
             }
@@ -340,11 +324,8 @@ mod tests {
         );
     }
     #[test]
-    fn builtin_alias_wins_over_a_colliding_crd_shortname_regardless_of_case() {
-        // Found live: a CRD declaring its own "po" shortname makes "PO" (but not "po")
-        // fall through to genuine discovery-based ambiguity between it and pods, because
-        // the built-in alias table was matched case-sensitively. The built-in must win
-        // deterministically for any case, exactly like the lowercase form already does.
+    fn builtin_alias_collision_is_ambiguous_regardless_of_case() {
+        // M3 enforces the stricter AGENTS invariant: even built-ins cannot shadow CRDs.
         let c = Catalog {
             resources: vec![
                 resource("", "pods", "Pod", &["po"]),
@@ -354,15 +335,17 @@ mod tests {
         };
         let empty = BTreeMap::new();
         for query in ["po", "PO", "Po", "pO"] {
-            assert_eq!(
+            assert!(
                 c.resolve(query, &empty)
-                    .unwrap_or_else(|e| panic!("{query}: {e}"))
-                    .api
-                    .plural,
-                "pods",
-                "{query}"
+                    .expect_err("ambiguous")
+                    .to_string()
+                    .contains("ambiguous")
             );
         }
+        assert_eq!(
+            c.resolve("v1/pods", &empty).expect("explicit").id(),
+            "v1/pods"
+        );
     }
     #[test]
     fn cross_group_plural_collision_is_rejected_even_though_one_is_core() {

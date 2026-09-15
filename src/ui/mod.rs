@@ -161,7 +161,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                 })
                 .collect();
             let title = format!(
-                " {} [{} / {}] · {} {} {} ",
+                " {} [{} / {}; ?{}] · {} {} {} ",
                 state
                     .resource
                     .as_ref()
@@ -169,6 +169,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                     .unwrap_or_else(|| state.query.resource.clone()),
                 state.rows.len(),
                 state.store.objects.len(),
+                state.filter_unknown,
                 state.sort,
                 if state.descending { "↓" } else { "↑" },
                 if state.store.incomplete {
@@ -199,7 +200,9 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                     height: 1,
                 };
                 frame.render_widget(
-                    Paragraph::new(if state.synced {
+                    Paragraph::new(if state.synced && state.filter_unknown > 0 {
+                        "No TRUE matches; some rows UNKNOWN (missing or invalid fields)"
+                    } else if state.synced {
                         "No matching resources"
                     } else {
                         "Waiting for resource list…"
@@ -209,10 +212,19 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
             }
         }
     }
-    let status = state.error.as_ref().unwrap_or(&state.status);
+    let query_status = format!(
+        "{} · unknown excluded: {} · -l {} · -f {} · /{}",
+        state.status,
+        state.filter_unknown,
+        state.query.labels.as_deref().unwrap_or("<none>"),
+        state.query.fields.as_deref().unwrap_or("<none>"),
+        state.filter_text
+    );
+    let error = state.input_error.as_ref().or(state.error.as_ref());
+    let status = error.unwrap_or(&query_status);
     frame.render_widget(
         Paragraph::new(crate::safety::text(status)).style(Style::default().fg(
-            if state.error.is_some() {
+            if error.is_some() {
                 theme.critical
             } else {
                 theme.muted

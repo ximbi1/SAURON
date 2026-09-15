@@ -41,26 +41,46 @@ fn is_sidecar(v: &Value, name: &str) -> bool {
         .any(|c| c["name"] == name && c["restartPolicy"] == "Always")
 }
 
-pub fn pod_counts(v: &Value) -> (usize, usize, i64) {
+pub fn pod_counts(v: &Value) -> (Option<usize>, Option<usize>, Option<i64>) {
     let regular = array(v, "/status/containerStatuses");
     let init = array(v, "/status/initContainerStatuses");
-    let total = array(v, "/spec/containers").len()
+    let Some(containers) = v.pointer("/spec/containers").and_then(Value::as_array) else {
+        return (None, None, None);
+    };
+    let total = containers.len()
         + array(v, "/spec/initContainers")
             .iter()
             .filter(|c| c["restartPolicy"] == "Always")
             .count();
-    let mut ready = regular.iter().filter(|c| c["ready"] == true).count();
-    let mut restarts = regular.iter().map(|c| number(c, "/restartCount")).sum();
-    for c in init {
-        let sidecar = is_sidecar(v, c["name"].as_str().unwrap_or_default());
-        if sidecar && c["ready"] == true {
-            ready += 1;
-        }
-        if sidecar || !cond(v, "Initialized", "True") {
-            restarts += number(c, "/restartCount");
-        }
-    }
-    (ready, total, restarts)
+    let statuses = containers
+        .iter()
+        .map(|c| (c, regular))
+        .chain(array(v, "/spec/initContainers").iter().map(|c| (c, init)))
+        .map(|(spec, observed)| {
+            let name = spec.get("name")?.as_str()?;
+            let status = observed
+                .iter()
+                .find(|s| s.get("name").and_then(Value::as_str) == Some(name))?;
+            Some((spec, status))
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(statuses) = statuses else {
+        return (None, Some(total), None);
+    };
+    let ready = statuses
+        .iter()
+        .filter(|(spec, _)| {
+            containers.iter().any(|c| c["name"] == spec["name"])
+                || spec["restartPolicy"] == "Always"
+        })
+        .try_fold(0usize, |n, (_, s)| {
+            s.get("ready")?.as_bool().map(|r| n + usize::from(r))
+        });
+    let restarts = statuses.iter().try_fold(0i64, |n, (_, s)| {
+        let count = s.get("restartCount")?.as_i64().filter(|n| *n >= 0)?;
+        n.checked_add(count)
+    });
+    (ready, Some(total), restarts)
 }
 
 fn failure(c: &Value) -> Option<Health> {

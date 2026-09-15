@@ -72,6 +72,8 @@ impl Runtime {
     /// if this session has visited it before, instead of always resetting to the
     /// kubeconfig default. Remembers the outgoing context's current namespace first.
     fn switch_context(&mut self, context: String) {
+        self.pending = None;
+        self.pending_history = None;
         self.push_history();
         if let Some(current) = self.connection.as_ref().map(|c| c.context.clone()) {
             self.namespace_by_context
@@ -112,7 +114,9 @@ impl Runtime {
         Some(state::HistoryEntry {
             context: connection.context.clone(),
             namespace: self.state.query.namespace.clone(),
-            resource: resource.qualified(),
+            resource: resource.clone(),
+            labels: self.state.query.labels.clone(),
+            fields: self.state.query.fields.clone(),
             filter_text: self.state.filter_text.clone(),
             sort: self.state.sort.clone(),
             descending: self.state.descending,
@@ -126,34 +130,42 @@ impl Runtime {
     /// the existing UID-not-found-clears-selection invariant in `rebuild()` handles a
     /// selection that no longer exists (or was replaced by a same-named different UID).
     fn apply_history(&mut self, entry: state::HistoryEntry) {
+        self.pending = None;
+        self.pending_history = None;
         if self
             .connection
             .as_ref()
             .is_some_and(|c| c.context == entry.context)
         {
-            self.finish_history(entry);
+            self.finish_history(entry, false);
         } else {
             let context = entry.context.clone();
             self.pending_history = Some(entry);
             self.connect(Some(context));
         }
     }
-    fn finish_history(&mut self, entry: state::HistoryEntry) {
+    fn finish_history(&mut self, entry: state::HistoryEntry, crossed_catalog: bool) {
         let result = (|| -> Result<()> {
             let connection = self.connection.as_ref().context("Not connected")?;
-            let resource = connection
-                .catalog
-                .resolve(&entry.resource, &connection.settings.aliases)?;
+            let resource = if crossed_catalog {
+                connection
+                    .catalog
+                    .resolve(&entry.resource.id(), &connection.settings.aliases)?
+            } else {
+                entry.resource.clone()
+            };
+            let filter = crate::filters::Expr::parse(&entry.filter_text)?;
             // Keep query.resource (the text rewatch()/a later context switch re-resolves)
             // in sync with what was actually just restored -- otherwise it would still
             // hold whatever was typed before this restore, and a subsequent context
             // switch would re-resolve THAT stale text instead of the resource just
             // returned to.
-            self.state.query.resource = entry.resource.clone();
+            self.state.query.resource = resource.id();
             self.state.query.namespace = entry.namespace;
+            self.state.query.labels = entry.labels;
+            self.state.query.fields = entry.fields;
             self.state.filter_text = entry.filter_text;
-            self.state.filter = crate::filters::Expr::parse(&self.state.filter_text)
-                .unwrap_or(crate::filters::Expr::All);
+            self.state.filter = filter;
             self.state.sort = entry.sort;
             self.state.descending = entry.descending;
             self.watch_resource(resource)?;
@@ -240,6 +252,7 @@ impl Runtime {
         self.state.request += 1;
         self.state.selected = None;
         self.state.rows.clear();
+        self.state.filter_unknown = 0;
         self.state.store = Store::new(
             self.state.settings.max_objects,
             self.state.settings.max_bytes,
@@ -260,6 +273,7 @@ impl Runtime {
         );
         let connection = self.connection.clone().context("Not connected")?;
         self.cancel_scope();
+        self.state.query.resource = resource.id();
         self.state.resource = Some(resource.clone());
         self.state.status = format!("Listing {}…", resource.qualified());
         let epoch = self.state.epoch;
@@ -314,7 +328,7 @@ impl Runtime {
                 }
                 self.connection = Some(*connection);
                 if let Some(entry) = self.pending_history.take() {
-                    self.finish_history(entry);
+                    self.finish_history(entry, true);
                 } else if let Some(query) = self.pending.take() {
                     if let Err(e) = self.navigate(query) {
                         self.state.error = Some(e.to_string());
@@ -407,12 +421,14 @@ impl Runtime {
         }
     }
     fn navigate(&mut self, query: ResourceCommand) -> Result<()> {
+        let filter = crate::filters::Expr::parse(query.filter.as_deref().unwrap_or(""))?;
         if let Some(context) = &query.context
             && self
                 .connection
                 .as_ref()
                 .is_none_or(|c| &c.context != context)
         {
+            self.push_history();
             self.state.query.namespace = Some("".into());
             self.pending = Some(query.clone());
             self.connect(Some(context.clone()));
@@ -427,7 +443,11 @@ impl Runtime {
         let resource = connection
             .catalog
             .resolve(&query.resource, &connection.settings.aliases)?;
-        let filter = crate::filters::Expr::parse(query.filter.as_deref().unwrap_or(""))?;
+        anyhow::ensure!(
+            resource.verbs.iter().any(|v| v == "watch"),
+            "Resource does not advertise watch"
+        );
+        self.push_history();
         if query.all {
             self.state.query.namespace = None;
         } else if let Some(ns) = query.namespace {
@@ -437,7 +457,7 @@ impl Runtime {
                 Some(ns)
             };
         }
-        self.state.query.resource = query.resource;
+        self.state.query.resource = resource.id();
         self.state.query.labels = query.labels;
         self.state.query.fields = query.fields;
         self.state.filter_text = query.filter.unwrap_or_default();
@@ -475,7 +495,8 @@ impl Runtime {
                 self.action(action)
             }
             Command::Resource(query) => {
-                self.push_history();
+                self.pending_history = None;
+                self.pending = None;
                 self.navigate(query)
             }
             Command::Namespace(Some(ns)) => self.switch_namespace(if ns == "all" || ns == "*" {
@@ -794,10 +815,10 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                             Mode::Command(mut text)|Mode::Filter(mut text)=>{
                                 let command=command_mode;
                                 match key.code {
-                                    KeyCode::Esc=>{},
+                                    KeyCode::Esc=>{runtime.state.input_error=None;},
                                     KeyCode::Enter=>{
-                                        let result=if command{runtime.command(&text)}else{crate::filters::Expr::parse(&text).map(|expr|{runtime.state.filter=expr;runtime.state.filter_text=text.clone();})};
-                                        if let Err(e)=result {runtime.state.error=Some(e.to_string());runtime.state.mode=if command{Mode::Command(text)}else{Mode::Filter(text)};}
+                                        let result=if command{runtime.command(&text)}else{runtime.state.set_filter(&text)};
+                                        if let Err(e)=result {if command{runtime.state.error=Some(e.to_string());}else{runtime.state.input_error=Some(e.to_string());}runtime.state.mode=if command{Mode::Command(text)}else{Mode::Filter(text)};}
                                     },
                                     KeyCode::Tab if command=>{if let Some(s)=runtime.suggestions(&text).first(){text=s.clone();}runtime.state.mode=Mode::Command(text);},
                                     _=>{edit(&mut text,key);runtime.state.mode=if command{Mode::Command(text)}else{Mode::Filter(text)};},
@@ -898,6 +919,97 @@ fn edit(text: &mut String, key: crossterm::event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn runtime() -> Runtime {
+        let resource = entry("pods").resource;
+        let (mut rt, _) = Runtime::new(
+            ConnectOptions::default(),
+            Config::default(),
+            None,
+            Query {
+                resource: "pods".into(),
+                namespace: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .expect("runtime");
+        rt.state.resource = Some(resource.clone());
+        rt.connection = Some(Connection {
+            client: ::kube::Client::try_from(::kube::Config::new(
+                "http://127.0.0.1:1".parse().expect("uri"),
+            ))
+            .expect("client"),
+            context: "test".into(),
+            cluster: "test".into(),
+            namespace: "test".into(),
+            contexts: vec![],
+            catalog: crate::kube::discovery::Catalog {
+                resources: vec![resource],
+                warnings: vec![],
+            },
+            settings: crate::config::Settings::default(),
+            version: "test".into(),
+        });
+        rt
+    }
+    #[tokio::test]
+    async fn history_keeps_selectors_and_resolved_identity_without_catalog_lookup() {
+        let mut rt = runtime();
+        rt.state.query.labels = Some("app=api".into());
+        rt.state.query.fields = Some("status.phase=Running".into());
+        rt.state.filter_text = "restarts>2".into();
+        let entry = rt.current_history_entry().expect("entry");
+        rt.connection
+            .as_mut()
+            .expect("connected")
+            .catalog
+            .resources
+            .clear();
+        rt.state.query.labels = None;
+        rt.state.query.fields = Some("metadata.name=other".into());
+        rt.finish_history(entry, false);
+        assert!(rt.state.error.is_none());
+        assert_eq!(rt.state.query.resource, "v1/pods");
+        assert_eq!(rt.state.query.labels.as_deref(), Some("app=api"));
+        assert_eq!(
+            rt.state.query.fields.as_deref(),
+            Some("status.phase=Running")
+        );
+        assert_eq!(rt.state.filter_text, "restarts>2");
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn invalid_navigation_is_transactional_and_old_epoch_is_ignored() {
+        let mut rt = runtime();
+        rt.state.query.labels = Some("app=api".into());
+        for command in ["pods / /[/", "missing-resource", "pods / restarts>oops"] {
+            assert!(rt.command(command).is_err(), "{command}");
+            assert!(rt.history.is_empty());
+            assert_eq!(rt.state.query.labels.as_deref(), Some("app=api"));
+            assert_eq!(rt.state.epoch, 0);
+        }
+        let mut invalid_entry = rt.current_history_entry().expect("entry");
+        invalid_entry.filter_text = "cpu>".into();
+        rt.finish_history(invalid_entry, false);
+        assert_eq!(rt.state.query.labels.as_deref(), Some("app=api"));
+        assert_eq!(rt.state.epoch, 0);
+        rt.watch().expect("watch");
+        rt.reduce(Event {
+            epoch: 0,
+            payload: Payload::Apply(
+                crate::resources::Object::new(
+                    serde_json::json!({"metadata":{"uid":"stale","name":"old"}}),
+                ),
+                false,
+            ),
+        });
+        rt.reduce(Event {
+            epoch: 0,
+            payload: Payload::Ready,
+        });
+        assert!(rt.state.store.objects.is_empty());
+        assert!(!rt.state.synced);
+        rt.shutdown().await;
+    }
     #[test]
     fn namespace_for_context_defers_to_kubeconfig_default_on_first_visit() {
         let memory = std::collections::HashMap::new();
@@ -926,7 +1038,20 @@ mod tests {
         state::HistoryEntry {
             context: "kind-sauron-test".into(),
             namespace: Some("sauron-fixtures".into()),
-            resource: resource.into(),
+            resource: Resource {
+                api: ::kube::core::ApiResource {
+                    group: String::new(),
+                    version: "v1".into(),
+                    api_version: "v1".into(),
+                    kind: resource.into(),
+                    plural: resource.into(),
+                },
+                namespaced: true,
+                short_names: vec![],
+                verbs: vec!["watch".into()],
+            },
+            labels: None,
+            fields: None,
             filter_text: String::new(),
             sort: "NAME".into(),
             descending: false,
@@ -945,7 +1070,7 @@ mod tests {
         assert_eq!(
             stack
                 .iter()
-                .map(|e| e.resource.as_str())
+                .map(|e| e.resource.api.plural.as_str())
                 .collect::<Vec<_>>(),
             vec!["r2", "r3", "r4"]
         );
@@ -956,6 +1081,6 @@ mod tests {
         push_capped(&mut stack, entry("a"), 1);
         push_capped(&mut stack, entry("b"), 1);
         assert_eq!(stack.len(), 1);
-        assert_eq!(stack[0].resource, "b");
+        assert_eq!(stack[0].resource.api.plural, "b");
     }
 }

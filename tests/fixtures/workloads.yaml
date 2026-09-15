@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sauron-fixtures
+  labels:
+    app.kubernetes.io/part-of: sauron-tests
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: healthy
+  namespace: sauron-fixtures
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: healthy
+  template:
+    metadata:
+      labels:
+        app: healthy
+    spec:
+      containers:
+        - name: worker
+          image: busybox:1.37
+          command: [sh, -c, 'while true; do echo "healthy test workload"; sleep 2; done']
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {cpu: 100m, memory: 32Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crashloop
+  namespace: sauron-fixtures
+spec:
+  containers:
+    - name: worker
+      image: busybox:1.37
+      command: [sh, -c, 'echo "fixture: deliberate exit 1"; exit 1']
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unschedulable
+  namespace: sauron-fixtures
+spec:
+  nodeSelector:
+    sauron.invalid/fixture-node: absent
+  containers:
+    - name: worker
+      image: busybox:1.37
+      command: [sleep, '3600']
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: missing-image
+  namespace: sauron-fixtures
+spec:
+  containers:
+    - name: worker
+      image: registry.invalid/sauron-fixture:missing
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redaction-sentinel
+  namespace: sauron-fixtures
+type: Opaque
+stringData:
+  test: SAURON_TEST_SENTINEL_NEVER_DISPLAY
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: healthy
+  namespace: sauron-fixtures
+spec:
+  selector:
+    app: healthy
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: eyes.testing.sauron.local
+spec:
+  group: testing.sauron.local
+  scope: Namespaced
+  names:
+    plural: eyes
+    singular: eye
+    kind: Eye
+    shortNames: [ey]
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                focus: {type: string}
+      additionalPrinterColumns:
+        - name: Focus
+          type: string
+          jsonPath: .spec.focus

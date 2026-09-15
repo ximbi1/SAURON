@@ -1,0 +1,7 @@
+apiVersion: testing.sauron.local/v1
+kind: Eye
+metadata:
+  name: observatory
+  namespace: sauron-fixtures
+spec:
+  focus: deterministic-evidence

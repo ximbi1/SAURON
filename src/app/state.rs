@@ -1,0 +1,303 @@
+use crate::{
+    command::{Action, Keymap},
+    config::Settings,
+    filters::{Expr, quantity},
+    kube::{discovery::Resource, watch::Query},
+    resources::{SharedObject, store::Store},
+};
+use chrono::Utc;
+use std::collections::VecDeque;
+
+pub enum Mode {
+    Table,
+    Command(String),
+    Filter(String),
+    Document(Document),
+    Search(Document, String),
+    Loading,
+}
+pub struct Document {
+    pub title: String,
+    pub lines: VecDeque<String>,
+    pub scroll: usize,
+    pub horizontal: u16,
+    pub wrap: bool,
+    pub fullscreen: bool,
+    pub search: String,
+    pub streaming: bool,
+    pub follow: bool,
+    bytes: usize,
+}
+impl Document {
+    pub fn new(title: String, text: String) -> Self {
+        let bytes = text.len();
+        Self {
+            title,
+            lines: text.lines().map(str::to_owned).collect(),
+            scroll: 0,
+            horizontal: 0,
+            wrap: true,
+            fullscreen: false,
+            search: String::new(),
+            streaming: false,
+            follow: false,
+            bytes,
+        }
+    }
+    pub fn append(&mut self, line: String) {
+        self.bytes += line.len();
+        self.lines.push_back(line);
+        while self.lines.len() > 5000 || self.bytes > 4 * 1024 * 1024 {
+            if let Some(old) = self.lines.pop_front() {
+                self.bytes = self.bytes.saturating_sub(old.len());
+                self.scroll = self.scroll.saturating_sub(1);
+            } else {
+                break;
+            }
+        }
+    }
+    pub fn search_next(&mut self, reverse: bool) {
+        if self.search.is_empty() || self.lines.is_empty() {
+            return;
+        }
+        let len = self.lines.len();
+        let query = self.search.to_lowercase();
+        for i in 1..=len {
+            let at = if reverse {
+                (self.scroll + len - (i % len)) % len
+            } else {
+                (self.scroll + i) % len
+            };
+            if self.lines[at].to_lowercase().contains(&query) {
+                self.scroll = at;
+                self.follow = false;
+                break;
+            }
+        }
+    }
+}
+pub struct State {
+    pub epoch: u64,
+    pub request: u64,
+    pub context: String,
+    pub query: Query,
+    pub resource: Option<Resource>,
+    pub settings: Settings,
+    pub keymap: Keymap,
+    pub store: Store,
+    pub rows: Vec<SharedObject>,
+    pub selected: Option<String>,
+    pub table: ratatui::widgets::TableState,
+    pub filter: Expr,
+    pub filter_text: String,
+    pub sort: String,
+    pub descending: bool,
+    pub wide: bool,
+    pub mode: Mode,
+    pub status: String,
+    pub error: Option<String>,
+    pub synced: bool,
+    pub dirty: bool,
+    pub quit: bool,
+    pub watch_errors: u64,
+    pub page_size: usize,
+    prepared: Option<(u64, String, String, bool, i64)>,
+}
+impl State {
+    pub fn new(query: Query, settings: &Settings) -> anyhow::Result<Self> {
+        Ok(Self {
+            epoch: 0,
+            request: 0,
+            context: "Connecting".into(),
+            query,
+            resource: None,
+            settings: settings.clone(),
+            keymap: Keymap::compile(&settings.keys)?,
+            store: Store::new(settings.max_objects, settings.max_bytes),
+            rows: vec![],
+            selected: None,
+            table: Default::default(),
+            filter: Expr::All,
+            filter_text: String::new(),
+            sort: "NAME".into(),
+            descending: false,
+            wide: false,
+            mode: Mode::Table,
+            status: "Starting".into(),
+            error: None,
+            synced: false,
+            dirty: true,
+            quit: false,
+            watch_errors: 0,
+            page_size: 20,
+            prepared: None,
+        })
+    }
+    pub fn columns(&self) -> Vec<String> {
+        let mut columns = vec!["NAME".into()];
+        if self.query.namespace.is_none() {
+            columns.insert(0, "NAMESPACE".into());
+        }
+        if let Some(object) = self
+            .rows
+            .first()
+            .or_else(|| self.store.objects.values().next())
+        {
+            columns.extend(
+                object
+                    .cells
+                    .iter()
+                    .filter(|(k, _)| self.wide || k != "NODE")
+                    .map(|(k, _)| k.clone()),
+            );
+        }
+        columns.push("AGE".into());
+        columns
+    }
+    pub fn selected_object(&self) -> Option<SharedObject> {
+        self.selected
+            .as_ref()
+            .and_then(|uid| self.rows.iter().find(|o| &o.uid == uid))
+            .cloned()
+    }
+    pub fn rebuild(&mut self) {
+        let now = Utc::now();
+        let was_empty = self.rows.is_empty();
+        self.rows = self
+            .store
+            .objects
+            .values()
+            .filter(|o| self.filter.matches(o, now))
+            .cloned()
+            .collect();
+        let column = &self.sort;
+        let desc = self.descending;
+        self.rows.sort_by_cached_key(|o| {
+            let value = o.field(column, now);
+            let numeric = if column == "AGE"
+                || [
+                    "RESTARTS",
+                    "UPDATED",
+                    "AVAILABLE",
+                    "FAILED",
+                    "SUCCEEDED",
+                    "ACTIVE",
+                    "DATA",
+                    "SUBSETS",
+                ]
+                .contains(&column.as_str())
+            {
+                value.as_deref().and_then(quantity).map(|n| n.to_bits())
+            } else {
+                None
+            };
+            (
+                numeric,
+                value,
+                o.namespace.clone(),
+                o.name.clone(),
+                o.uid.clone(),
+            )
+        });
+        if desc {
+            self.rows.reverse();
+        }
+        if let Some(uid) = &self.selected {
+            if !self.rows.iter().any(|o| &o.uid == uid) {
+                self.selected = None;
+            }
+        } else if was_empty && !self.rows.is_empty() {
+            self.selected = Some(self.rows[0].uid.clone());
+        }
+        self.table.select(
+            self.selected
+                .as_ref()
+                .and_then(|uid| self.rows.iter().position(|o| &o.uid == uid)),
+        );
+    }
+    /// Recompute row order only when inputs change. Cursor/log/prompt redraws do not sort.
+    pub fn prepare(&mut self) {
+        let key = (
+            self.store.revision,
+            self.filter_text.clone(),
+            self.sort.clone(),
+            self.descending,
+            Utc::now().timestamp(),
+        );
+        if self.prepared.as_ref() != Some(&key) {
+            self.rebuild();
+            self.prepared = Some(key);
+        } else {
+            self.table.select(
+                self.selected
+                    .as_ref()
+                    .and_then(|uid| self.rows.iter().position(|o| &o.uid == uid)),
+            );
+        }
+    }
+    pub fn move_selection(&mut self, action: Action) {
+        use Action::*;
+        if let Mode::Document(doc) = &mut self.mode {
+            doc.follow = false;
+            doc.scroll = match action {
+                Down => doc.scroll.saturating_add(1),
+                Up => doc.scroll.saturating_sub(1),
+                First => 0,
+                Last => {
+                    doc.follow = doc.streaming;
+                    doc.lines.len().saturating_sub(self.page_size)
+                }
+                PageDown => doc.scroll.saturating_add(self.page_size),
+                PageUp => doc.scroll.saturating_sub(self.page_size),
+                _ => doc.scroll,
+            }
+            .min(doc.lines.len().saturating_sub(1));
+            return;
+        }
+        if self.rows.is_empty() {
+            self.selected = None;
+            return;
+        }
+        let position = self
+            .selected
+            .as_ref()
+            .and_then(|uid| self.rows.iter().position(|o| &o.uid == uid))
+            .unwrap_or(0);
+        let next = match action {
+            Down => position + 1,
+            Up => position.saturating_sub(1),
+            First => 0,
+            Last => self.rows.len() - 1,
+            PageDown => position.saturating_add(self.page_size),
+            PageUp => position.saturating_sub(self.page_size),
+            _ => position,
+        }
+        .min(self.rows.len() - 1);
+        self.selected = Some(self.rows[next].uid.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn selection_is_uid_not_row_index() {
+        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        s.store.apply(
+            crate::resources::Object::new(
+                serde_json::json!({"metadata":{"name":"a","uid":"old","resourceVersion":"1"}}),
+            ),
+            false,
+        );
+        s.rebuild();
+        assert_eq!(s.selected.as_deref(), Some("old"));
+        s.store.apply(
+            crate::resources::Object::new(
+                serde_json::json!({"metadata":{"name":"a","uid":"new","resourceVersion":"2"}}),
+            ),
+            false,
+        );
+        s.rebuild();
+        assert!(s.selected.is_none());
+    }
+}

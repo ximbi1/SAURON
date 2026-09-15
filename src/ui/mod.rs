@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Clear, Paragraph, Row, Table, Wrap},
 };
 
 #[derive(Clone, Copy)]
@@ -76,14 +76,16 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         frame.render_widget(Paragraph::new("Terminal too small\nCtrl-C quits"), area);
         return;
     }
-    if let Mode::Document(doc) = &mut state.mode
-        && doc.fullscreen
-    {
-        render_document(frame, area, doc, theme);
-        return;
-    }
+    let fullscreen =
+        matches!(&state.mode, Mode::Document(doc) | Mode::Search(doc, _) if doc.fullscreen);
     let parts = Layout::vertical([
-        Constraint::Length(if area.height < 16 { 2 } else { 4 }),
+        Constraint::Length(if fullscreen {
+            0
+        } else if area.height < 16 {
+            2
+        } else {
+            4
+        }),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -220,8 +222,12 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         state.query.fields.as_deref().unwrap_or("<none>"),
         state.filter_text
     );
+    let document_status = match &state.mode {
+        Mode::Document(doc) | Mode::Search(doc, _) => Some(doc.status()),
+        _ => None,
+    };
     let error = state.input_error.as_ref().or(state.error.as_ref());
-    let status = error.unwrap_or(&query_status);
+    let status = error.or(document_status.as_ref()).unwrap_or(&query_status);
     frame.render_widget(
         Paragraph::new(crate::safety::text(status)).style(Style::default().fg(
             if error.is_some() {
@@ -237,7 +243,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Mode::Filter(text) => format!("/{text}▏"),
         Mode::Search(_, text) => format!("search /{text}▏"),
         Mode::Picker(_) => " ↑↓ move   enter switch   esc cancel ".into(),
-        _ => hint_bar(&state.keymap),
+        _ => hint_bar(&state.keymap, matches!(state.mode, Mode::Document(_))),
     };
     frame.render_widget(
         Paragraph::new(prompt).style(Style::default().fg(theme.accent)),
@@ -263,20 +269,31 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
 /// The idle-mode hint bar, built from whatever the effective keymap actually binds --
 /// never a hardcoded string of default keys, which would silently lie once a user
 /// overrides a binding in config. Actions with no bound key are simply omitted.
-fn hint_bar(keymap: &Keymap) -> String {
+fn hint_bar(keymap: &Keymap, document: bool) -> String {
     let hint = |action: Action, label: &str| {
         keymap
             .primary_key(action)
             .map(|key| format!("{key} {label}"))
     };
-    let parts = [
-        hint(Action::Palette, "commands"),
-        hint(Action::Filter, "filter/search"),
-        hint(Action::Explain, "explain"),
-        hint(Action::Yaml, "YAML"),
-        hint(Action::Logs, "logs"),
-        hint(Action::Help, "help"),
-    ];
+    let parts = if document {
+        [
+            hint(Action::Back, "return"),
+            hint(Action::Filter, "search"),
+            hint(Action::SearchNext, "next"),
+            hint(Action::Wrap, "wrap"),
+            hint(Action::Refresh, "refresh"),
+            hint(Action::Help, "help"),
+        ]
+    } else {
+        [
+            hint(Action::Palette, "commands"),
+            hint(Action::Filter, "filter/search"),
+            hint(Action::Explain, "explain"),
+            hint(Action::Yaml, "YAML"),
+            hint(Action::Logs, "logs"),
+            hint(Action::Help, "help"),
+        ]
+    };
     format!(
         " {} ",
         parts.into_iter().flatten().collect::<Vec<_>>().join("   ")
@@ -301,41 +318,44 @@ fn render_picker(frame: &mut Frame, area: Rect, picker: &crate::app::state::Pick
 }
 fn render_document(frame: &mut Frame, area: Rect, doc: &mut Document, theme: Theme) {
     let height = area.height.saturating_sub(2) as usize;
-    if doc.follow {
-        doc.scroll = doc.lines.len().saturating_sub(height);
+    doc.layout(area.width.saturating_sub(2) as usize, height);
+    let block = Block::bordered().title(crate::safety::text(&doc.title));
+    if let crate::app::document::Freshness::Error(error) = &doc.freshness {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "NOT CURRENT\n{error}\nReturn to the table to select a current object."
+            ))
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(theme.critical))
+            .block(block),
+            area,
+        );
+        return;
     }
     let text: Vec<Line> = doc
-        .lines
-        .iter()
+        .visible_lines()
         .map(|line| {
-            Line::from(Span::styled(
-                line,
-                Style::default().fg(
-                    if !doc.search.is_empty()
-                        && line.to_lowercase().contains(&doc.search.to_lowercase())
-                    {
-                        theme.accent
-                    } else {
-                        theme.foreground
-                    },
-                ),
-            ))
+            let mut spans = Vec::new();
+            let mut start = 0;
+            if let Some(regex) = &doc.search_regex {
+                for m in regex.find_iter(line) {
+                    spans.push(Span::raw(&line[start..m.start()]));
+                    spans.push(Span::styled(
+                        m.as_str(),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::REVERSED),
+                    ));
+                    start = m.end();
+                }
+            }
+            spans.push(Span::raw(&line[start..]));
+            Line::from(spans)
         })
         .collect();
-    let mut paragraph =
-        Paragraph::new(text).scroll((doc.scroll.min(u16::MAX as usize) as u16, doc.horizontal));
-    paragraph = paragraph.block(
-        Block::default()
-            .borders(if doc.fullscreen {
-                Borders::TOP
-            } else {
-                Borders::ALL
-            })
-            .title(crate::safety::text(&doc.title)),
-    );
-    if doc.wrap {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-    }
+    let paragraph = Paragraph::new(text)
+        .scroll((0, if doc.wrap { 0 } else { doc.horizontal }))
+        .block(block);
     frame.render_widget(paragraph, area);
 }
 

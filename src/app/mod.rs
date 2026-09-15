@@ -1,3 +1,4 @@
+pub mod document;
 pub mod event;
 pub mod state;
 
@@ -28,6 +29,7 @@ pub struct Runtime {
     document: CancellationToken,
     pending: Option<ResourceCommand>,
     pending_history: Option<state::HistoryEntry>,
+    palette_document: Option<Document>,
     namespace_by_context: std::collections::HashMap<String, Option<String>>,
     recent_namespaces: std::collections::VecDeque<String>,
     history: std::collections::VecDeque<state::HistoryEntry>,
@@ -60,6 +62,7 @@ impl Runtime {
                 document: CancellationToken::new(),
                 pending: None,
                 pending_history: None,
+                palette_document: None,
                 namespace_by_context: std::collections::HashMap::new(),
                 recent_namespaces: std::collections::VecDeque::new(),
                 history: std::collections::VecDeque::new(),
@@ -244,6 +247,7 @@ impl Runtime {
         });
     }
     fn cancel_scope(&mut self) {
+        self.palette_document = None;
         self.scope.cancel();
         self.document.cancel();
         self.scope = CancellationToken::new();
@@ -368,15 +372,23 @@ impl Runtime {
                 title,
                 text,
             } if request == self.state.request => {
-                self.state.mode = Mode::Document(Document::new(title, text));
-                self.state.status = "Document snapshot · Esc returns".into();
+                if let Some(doc) = self.active_document_mut() {
+                    doc.title = title;
+                    doc.replace(text);
+                    doc.freshness = document::Freshness::Snapshot(chrono::Utc::now());
+                }
             }
             Payload::DocumentError { request, error } if request == self.state.request => {
-                self.state.error = Some(error);
-                self.state.mode = Mode::Table;
+                if let Some(doc) = self.active_document_mut() {
+                    doc.replace(String::new());
+                    doc.freshness = document::Freshness::Error(error);
+                } else {
+                    self.state.error = Some(error);
+                    self.state.mode = Mode::Table;
+                }
             }
             Payload::LogLine { request, line } if request == self.state.request => {
-                if let Mode::Document(doc) = &mut self.state.mode {
+                if let Some(doc) = self.active_document_mut() {
                     doc.append(line);
                 }
             }
@@ -589,6 +601,7 @@ impl Runtime {
                     self.document.cancel();
                     self.state.request += 1;
                     self.state.mode = Mode::Table;
+                    self.palette_document = None;
                 } else if !self.state.filter_text.is_empty() {
                     self.state.filter_text.clear();
                     self.state.filter = crate::filters::Expr::All;
@@ -597,9 +610,7 @@ impl Runtime {
                 }
             }
             Palette => {
-                self.document.cancel();
-                self.state.request += 1;
-                self.state.mode = Mode::Command(String::new());
+                self.open_palette(String::new());
             }
             Filter => {
                 self.state.mode = if let Mode::Document(doc) =
@@ -620,7 +631,11 @@ impl Runtime {
             Logs => self.open_logs(None, false)?,
             PreviousLogs => self.open_logs(None, true)?,
             Refresh => {
-                self.watch()?;
+                if matches!(self.state.mode, Mode::Document(_)) {
+                    self.refresh_document()?;
+                } else {
+                    self.watch()?;
+                }
             }
             AllNamespaces => self.switch_namespace(None)?,
             Namespaces => self.open_namespace_picker()?,
@@ -639,6 +654,16 @@ impl Runtime {
             Wrap => {
                 if let Mode::Document(d) = &mut self.state.mode {
                     d.wrap = !d.wrap;
+                }
+            }
+            ScrollLeft | ScrollRight => {
+                if let Mode::Document(d) = &mut self.state.mode {
+                    anyhow::ensure!(!d.wrap, "Turn wrapping off before horizontal scrolling");
+                    d.horizontal = if action == ScrollLeft {
+                        d.horizontal.saturating_sub(4)
+                    } else {
+                        d.horizontal.saturating_add(4)
+                    };
                 }
             }
             Fullscreen => {
@@ -677,14 +702,50 @@ impl Runtime {
         self.state.mode = Mode::Document(Document::new(title.into(), crate::safety::text(&text)));
         self.state.dirty = true;
     }
+    fn active_document_mut(&mut self) -> Option<&mut Document> {
+        match &mut self.state.mode {
+            Mode::Document(doc) | Mode::Search(doc, _) => Some(doc),
+            Mode::Command(_) => self.palette_document.as_mut(),
+            _ => None,
+        }
+    }
+    fn open_palette(&mut self, text: String) {
+        let previous = std::mem::replace(&mut self.state.mode, Mode::Command(text));
+        if let Mode::Document(doc) = previous {
+            self.palette_document = Some(doc);
+        }
+    }
+    fn close_palette(&mut self) {
+        self.state.mode = self
+            .palette_document
+            .take()
+            .map(Mode::Document)
+            .unwrap_or(Mode::Table);
+    }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
-        let connection = self.connection.clone().context("Not connected")?;
         let resource = self
             .state
             .resource
             .clone()
             .context("No resource selected")?;
+        let mut doc = Document::new(format!("{action:?}: {}", object.name), String::new());
+        doc.source = Some(document::Source {
+            resource,
+            selected: object,
+            action,
+        });
+        self.state.mode = Mode::Document(doc);
+        self.refresh_document()
+    }
+    fn refresh_document(&mut self) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected")?;
+        let doc = self.active_document_mut().context("No document open")?;
+        let source = doc
+            .source
+            .clone()
+            .context("This local document or log has no refresh source; reopen it")?;
+        doc.freshness = document::Freshness::Refreshing;
         self.document.cancel();
         self.document = self.scope.child_token();
         self.state.request += 1;
@@ -692,9 +753,8 @@ impl Runtime {
         let epoch = self.state.epoch;
         let tx = self.tx.clone();
         let cancel = self.document.clone();
-        self.state.mode = Mode::Loading;
-        self.state.status = "Gathering fresh evidence · Esc cancels".into();
         self.tasks.spawn(async move {
+            let document::Source { resource, selected:object, action } = source;
             let result=tokio::select!{biased;_=cancel.cancelled()=>return,result=crate::kube::evidence::document(&connection,&resource,&object,action)=>result};
             let payload=match result{Ok(text)=>Payload::Document{request,title:format!("{action:?}: {}",object.name),text},Err(e)=>Payload::DocumentError{request,error:e.to_string()}};
             tokio::select!{_=cancel.cancelled()=>{},_=tx.send(Event{epoch,payload})=>{}}
@@ -822,10 +882,11 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                             Mode::Command(mut text)|Mode::Filter(mut text)=>{
                                 let command=command_mode;
                                 match key.code {
-                                    KeyCode::Esc=>{runtime.state.input_error=None;},
+                                    KeyCode::Esc=>{runtime.state.input_error=None;if command{runtime.close_palette();}},
                                     KeyCode::Enter=>{
+                                        if command{runtime.close_palette();}
                                         let result=if command{runtime.command(&text)}else{runtime.state.set_filter(&text)};
-                                        if let Err(e)=result {if command{runtime.state.error=Some(e.to_string());}else{runtime.state.input_error=Some(e.to_string());}runtime.state.mode=if command{Mode::Command(text)}else{Mode::Filter(text)};}
+                                        if let Err(e)=result {if command{runtime.state.error=Some(e.to_string());runtime.open_palette(text);}else{runtime.state.input_error=Some(e.to_string());runtime.state.mode=Mode::Filter(text);}}
                                     },
                                     KeyCode::Tab if command=>{if let Some(s)=runtime.suggestions(&text).first(){text=s.clone();}runtime.state.mode=Mode::Command(text);},
                                     _=>{edit(&mut text,key);runtime.state.mode=if command{Mode::Command(text)}else{Mode::Filter(text)};},
@@ -842,14 +903,14 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                                                 state::PickerKind::Context=>{runtime.switch_context(item);Ok(())},
                                                 state::PickerKind::Namespace=>runtime.switch_namespace((item!="<all>").then_some(item)),
                                             };
-                                            if let Err(e)=result{runtime.state.error=Some(e.to_string());}
+                                            runtime.state.input_error=result.err().map(|e|e.to_string());
                                         }
                                     },
                                     _=>{runtime.state.mode=Mode::Picker(picker);},
                                 }
                             },
                             Mode::Search(mut doc,mut text)=>{
-                                match key.code{KeyCode::Esc=>runtime.state.mode=Mode::Document(doc),KeyCode::Enter=>{doc.search=text;doc.search_next(false);runtime.state.mode=Mode::Document(doc);},_=>{edit(&mut text,key);runtime.state.mode=Mode::Search(doc,text);}}
+                                match key.code{KeyCode::Esc=>runtime.state.mode=Mode::Document(doc),KeyCode::Enter=>{doc.set_search(text);runtime.state.mode=Mode::Document(doc);},_=>{edit(&mut text,key);runtime.state.mode=Mode::Search(doc,text);}}
                             },
                             // A key pressed while an async fetch (connect/watch/namespace list) is
                             // still in flight must never fall through to table-action dispatch: the
@@ -867,7 +928,18 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                             mode=>{
                                 runtime.state.mode=mode;
                                 let mode_name=if matches!(runtime.state.mode,Mode::Document(_)){"document"}else{"table"};
-                                if let Some(action)=runtime.state.keymap.action(key,mode_name)&& let Err(e)=runtime.action(action){runtime.state.error=Some(e.to_string());}
+                                // A per-action validation error (e.g. "select a row first",
+                                // "turn wrapping off before horizontal scrolling") is transient
+                                // input feedback, not a backend/transport problem -- it must not
+                                // reuse state.error, which a real WatchError/ConnectError also
+                                // sets and which must keep surviving unrelated successful key
+                                // presses until the watch actually recovers. Clearing on success
+                                // here (mirroring State::set_filter for input_error) ensures a
+                                // one-off rejection doesn't linger and mask this key's own status
+                                // (e.g. a document's line/search status) after later succeeding.
+                                if let Some(action)=runtime.state.keymap.action(key,mode_name){
+                                    runtime.state.input_error=runtime.action(action).err().map(|e|e.to_string());
+                                }
                             },
                         }
                         runtime.state.dirty=true;

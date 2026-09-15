@@ -27,7 +27,10 @@ pub async fn document(
                 &format!("reading {}/{}", resource.qualified(), selected.name)
             ))
         })?;
-    let object = Object::new(serde_json::to_value(fresh)?);
+    let mut value = serde_json::to_value(fresh)?;
+    value["kind"] = resource.api.kind.clone().into();
+    value["apiVersion"] = resource.api.api_version.clone().into();
+    let object = Object::new(value);
     ensure!(
         !selected.uid.is_empty() && object.uid == selected.uid,
         "Object was replaced or has no UID; return to the table and select it again"

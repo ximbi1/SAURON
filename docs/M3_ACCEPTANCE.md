@@ -47,12 +47,60 @@ age, restart/count/quantity/percent/bool and generic fields; duplicate ties rema
 selected UID preserved, disappearance clears it. Filter/scope/history/rapid-watch
 compositions live; no additional history, alias resolution or tick-only sort rebuilds.
 
-## 3. Documents — IMPLEMENTING
+## 3. Documents — ACCEPTED
 
-Shared vertical/page/home/end/horizontal/wrap/fullscreen/search/next/previous/refresh
-actions. Live long YAML, 32x9, resize/search, no matches, wrap, update then refresh,
-delete then refresh, same-name replacement, exit/terminal restoration, unchanged history.
-Fresh GET and pinned UID; cancellation/request/epoch gates. Secret redaction retained.
+Evidence: `cargo fmt --check`, locked all-target check/clippy/test pass (49 unit + 4
+fake HTTP). Live acceptance against `kind-sauron-test` with a freshly rebuilt binary,
+manual tmux session (no `accept-m3.py documents` mode was written for this item; the
+same live-flow discipline was applied by hand):
+
+| Case | Evidence | Status |
+| --- | --- | --- |
+| Vertical nav: down/up/page/home/end | Live YAML, line counter tracked correctly | PASS |
+| Horizontal scroll, wrap on/off | Wrap off enables `←`/`→`; wrap on rejects with a real error, not a silent no-op | PASS |
+| Search: match, next, no-match | `matches i/N` tracked correctly; 0/0 for an absent term, no crash | PASS |
+| Update then refresh (same UID) | External label change via kubectl, `r` while doc open updated content + snapshot time in place | PASS |
+| Delete then refresh | External delete, `r` → "NOT CURRENT" + real 404, not a crash | PASS |
+| Same-name replacement (different UID) | Recreated same name, `r` → "Object was replaced or has no UID", the existing UID-pin invariant, not silently showing the new object under the old title | PASS |
+| Palette over an open document | `:` shows the table underneath (unchanged from before); Esc or an unrelated failed command restores the SAME document; a successful navigation command correctly replaces it — no extra history entry from the palette/document juggling | PASS |
+| History unchanged by opening/closing documents or logs | Confirmed via one `[` after a document-then-navigate sequence | PASS |
+| 32x9 with document + fullscreen | Both clip/expand without panicking | PASS |
+| Logs share the same Document model | Live follow stream; `r` (no refresh source) errors clearly without interrupting the stream | PASS |
+| Exit/terminal restoration | Clean `q` from within a document, terminal restored | PASS |
+
+Found and fixed two real bugs during this pass:
+1. **Startup-crashing key chord**: `ScrollLeft`/`ScrollRight`'s registry keys (`"left,h"`/
+   `"right,L"`) used the plain word `"left"`/`"right"`, which `command::parse_key` didn't
+   recognize as named keys (only `up`/`down`/`home`/`end`/`pageup`/`pagedown`/`enter`/`esc`/
+   `tab`/`backtab`); it only accepted single characters otherwise, so bare `"left"`/`"right"`
+   panicked with "Unsupported key chord" -- and since `Keymap::compile` runs at every
+   `State::new()`, this crashed 12 unrelated unit tests and would have crashed the app at
+   startup. Fixed by adding `"left"`/`"right"` to `parse_key`'s named-key table.
+2. **Stale action error masking document status**: a per-action validation error (e.g.
+   "turn wrapping off before horizontal scrolling") was written to `state.error`, the SAME
+   field a real transport/watch error uses -- so it never cleared on a later successful,
+   unrelated key press (e.g. a search), permanently hiding the document's own status line
+   (line/col, search matches) behind a one-off rejection. Found live while testing search
+   right after a rejected scroll attempt. Fixed by routing key-dispatched and
+   picker-dispatched action errors through the existing `input_error` field (already used
+   for filter-input rejections, already correctly cleared on the next successful action and
+   already prioritized correctly against a real transport `error` in the status line), not
+   `state.error`. No unit test added (the mechanism lives in the async terminal-input loop,
+   not a pure function); verified by rebuilding and repeating the exact live sequence that
+   found it, which now shows the search result instead of the stale rejection.
+
+Contract: one `Document` model (`src/app/document.rs`) backs YAML, describe, explain,
+events, static help, and logs -- grapheme-aware wrapping via `unicode-segmentation`/
+`unicode-width`, a cached visual-line layout keyed on `(revision, width, wrap)`, bounded
+lines/bytes/visual-segments/search-matches, and a `Freshness` state (`Local`/`Snapshot`/
+`Refreshing`/`Error`) shown in the status line. `refresh_document()` reuses the exact
+`kube::evidence::document()` UID-pin check that originally protected only Yaml/Describe/
+Explain/Events, extended here to the interactive Refresh action. Logs have no `source`
+(streaming, not a point-in-time GET) and refreshing them errors clearly rather than
+attempting a GET. Opening the palette from a document no longer discards it (`palette_document`
+holds it while the palette is open); this supersedes the M2 finding that documented the
+old discard-on-palette behavior as intentional -- it was a limitation worth removing once a
+correct restore mechanism existed, not a permanent design choice.
 
 ## 4. Events — DESIGNED
 

@@ -235,14 +235,52 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 M1 and M2 are ACCEPTED. Verified local annotated `m2-accepted` points to
 `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; initial M3 worktree was clean.
 This is a reference/rollback checkpoint, not permission to discard user changes.
-Current: M3 item 3, shared document UX, then Events, server Tables/CRD columns,
-combined adversarial live acceptance. Contract and
-case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
+Items 1-3 (filters, sorting, documents) are ACCEPTED. Current: M3 item 4, Events, then
+item 5 (server Tables/CRD columns), item 6 (combined adversarial live acceptance).
+Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
 No `m3-accepted` until every required slice and combined live flow is demonstrated.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
 isolated unit tests alone. Keep buildable handoffs.
 
 ## Journal
+
+### 2026-09-15 — M3 item 3 accepted (shared document viewer)
+Picked up mid-implementation (`src/app/document.rs`, unicode-aware wrap/layout/search,
+`Freshness`, palette-preserving-document, horizontal scroll) with `cargo fmt/check/
+clippy` already clean but `cargo test --all-targets` failing 12/49 tests with
+"Unsupported key chord" panics. Root cause: the new `ScrollLeft`/`ScrollRight` bindings
+used `"left"`/`"right"` as key names, which `command::parse_key` never learned (only
+named `up`/`down`/`home`/`end`/`pageup`/`pagedown`/`enter`/`esc`/`tab`/`backtab`, else a
+single char); since `Keymap::compile` runs in every `State::new()`, this broke nearly
+every test that constructs one and would have crashed the app at startup. Fixed by
+adding the two names to `parse_key`; full suite back to 49/49 (+4 fake-HTTP).
+Rebuilt and ran the full M3 item 3 live checklist by hand against `kind-sauron-test`
+(vertical/page/home/end nav, horizontal scroll with wrap on/off, search incl. no-match,
+update-then-refresh, delete-then-refresh, same-name-different-UID-then-refresh, palette
+opened over a document, 32x9, fullscreen, logs sharing the same model, clean exit).
+Found a second real bug live: a per-action validation error (e.g. the wrap-off-required
+rejection) was written to `state.error`, the same field a genuine transport/watch error
+uses, so it never cleared on a later successful unrelated key press -- it sat there
+masking the document's own status line (line/col, search matches) after a search that
+had actually succeeded. Routed key- and picker-dispatched action errors through the
+existing `input_error` field instead (already used for filter-input rejections, already
+correctly cleared on success, already prioritized correctly in the status line) --
+`state.error` remains exclusively for backend/transport state that must survive
+unrelated key presses until the watch actually recovers. No unit test (the mechanism is
+in the async terminal-input loop); verified by rebuilding and replaying the exact
+sequence that found it, which now shows the search result instead of the stale error.
+Confirmed the UID-pin check already in `kube::evidence::document()` (previously only
+exercised by the initial Yaml/Describe/Explain/Events open) now also protects the new
+interactive Refresh action correctly: delete-then-refresh and same-name-replacement-
+then-refresh both show a clear "NOT CURRENT" error, never stale or silently-wrong
+content. Opening the palette from a document now restores it afterward instead of
+discarding it (superseding the M2 finding that had recorded the old discard behavior as
+intentional -- it was a limitation worth fixing once `palette_document` existed to make
+restoring correct, not a permanent design choice). Full details and case-by-case
+evidence in `docs/M3_ACCEPTANCE.md` item 3. Re-ran `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings`, `cargo test --all-targets` (49/49) after both fixes.
+Fixture state reconciled (`scripts/test-cluster.sh fixtures`); the crashloop pod was
+deleted and recreated live during testing and came back clean with no leftover label.
 
 ### 2026-09-15 — M3 item 2 accepted
 fmt/check/clippy clean; 46 unit + 4 fake-HTTP tests passed. Fresh binary then

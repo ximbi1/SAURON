@@ -1,3 +1,4 @@
+pub use super::document::Document;
 use crate::{
     command::{Action, Keymap},
     config::Settings,
@@ -6,7 +7,6 @@ use crate::{
     resources::{SharedObject, store::Store},
 };
 use chrono::Utc;
-use std::collections::VecDeque;
 
 pub enum Mode {
     Table,
@@ -48,66 +48,6 @@ pub struct HistoryEntry {
     pub sort: String,
     pub descending: bool,
     pub selected: Option<String>,
-}
-pub struct Document {
-    pub title: String,
-    pub lines: VecDeque<String>,
-    pub scroll: usize,
-    pub horizontal: u16,
-    pub wrap: bool,
-    pub fullscreen: bool,
-    pub search: String,
-    pub streaming: bool,
-    pub follow: bool,
-    bytes: usize,
-}
-impl Document {
-    pub fn new(title: String, text: String) -> Self {
-        let bytes = text.len();
-        Self {
-            title,
-            lines: text.lines().map(str::to_owned).collect(),
-            scroll: 0,
-            horizontal: 0,
-            wrap: true,
-            fullscreen: false,
-            search: String::new(),
-            streaming: false,
-            follow: false,
-            bytes,
-        }
-    }
-    pub fn append(&mut self, line: String) {
-        self.bytes += line.len();
-        self.lines.push_back(line);
-        while self.lines.len() > 5000 || self.bytes > 4 * 1024 * 1024 {
-            if let Some(old) = self.lines.pop_front() {
-                self.bytes = self.bytes.saturating_sub(old.len());
-                self.scroll = self.scroll.saturating_sub(1);
-            } else {
-                break;
-            }
-        }
-    }
-    pub fn search_next(&mut self, reverse: bool) {
-        if self.search.is_empty() || self.lines.is_empty() {
-            return;
-        }
-        let len = self.lines.len();
-        let query = self.search.to_lowercase();
-        for i in 1..=len {
-            let at = if reverse {
-                (self.scroll + len - (i % len)) % len
-            } else {
-                (self.scroll + i) % len
-            };
-            if self.lines[at].to_lowercase().contains(&query) {
-                self.scroll = at;
-                self.follow = false;
-                break;
-            }
-        }
-    }
 }
 pub struct State {
     pub epoch: u64,
@@ -282,20 +222,7 @@ impl State {
     pub fn move_selection(&mut self, action: Action) {
         use Action::*;
         if let Mode::Document(doc) = &mut self.mode {
-            doc.follow = false;
-            doc.scroll = match action {
-                Down => doc.scroll.saturating_add(1),
-                Up => doc.scroll.saturating_sub(1),
-                First => 0,
-                Last => {
-                    doc.follow = doc.streaming;
-                    doc.lines.len().saturating_sub(self.page_size)
-                }
-                PageDown => doc.scroll.saturating_add(self.page_size),
-                PageUp => doc.scroll.saturating_sub(self.page_size),
-                _ => doc.scroll,
-            }
-            .min(doc.lines.len().saturating_sub(1));
+            doc.navigate(action);
             return;
         }
         if self.rows.is_empty() {

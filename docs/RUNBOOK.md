@@ -28,20 +28,38 @@ It never falls back to the default kubeconfig and has no production cleanup path
 ## Current checkpoint
 
 M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
-verified before M3; worktree initially clean. M3 items 1 (filters) and 2 (typed stable
-sorting) are ACCEPTED; item 3 (shared documents) is IMPLEMENTING.
+verified before M3; worktree initially clean. M3 items 1 (filters), 2 (typed stable
+sorting), and 3 (shared document viewer) are ACCEPTED. Item 4 (Events) is next.
 Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 must stay read-only.
-Latest full fmt/check/clippy clean, 46 unit + 4 fake-HTTP tests passed. Fake HTTP needs
+Latest full fmt/check/clippy clean, 49 unit + 4 fake-HTTP tests passed. Fake HTTP needs
 loopback permission outside sandbox. `cargo build --locked` followed by
 `python3 scripts/accept-m3.py filters` PASS, including exact replay of the stale-error
 regex repair bug and rapid scope changes. Full evidence in HANDBOOK journal.
 New filter language: FILTERS.md. `po` with colliding Portal CRD is now ambiguous by
 current AGENTS policy; use `pods` or `v1/pods`. Historical M2 alias behavior below is
-superseded. No M3-wide acceptance/tag yet. Next: shared document UX.
+superseded. No M3-wide acceptance/tag yet.
 `python3 scripts/accept-m3.py sorting` passed after full checks and fresh build. This
 flow applies/patches/deletes ONLY named
 `m3-sort-*` ConfigMaps in isolated `sauron-fixtures`, through `test-cluster.sh` identity
 verification on every operation. It recreates the deleted fixture, never touches production.
+
+Item 3 (shared document viewer, `src/app/document.rs`) is done: one model backs Yaml/
+Describe/Explain/Events/help/logs, with grapheme-aware wrap/layout, bounded search,
+horizontal scroll (wrap off only), a `Freshness` status line, and Refresh reusing the
+existing UID-pin check so a deleted or same-name-replaced object shows a clear
+"NOT CURRENT" error rather than stale or wrong content. Opening the palette from a
+document now restores it afterward instead of discarding it. Picked up with 12/49
+tests failing on "Unsupported key chord" (the new `ScrollLeft`/`ScrollRight` keys used
+`left`/`right`, which `parse_key` didn't recognize, breaking `Keymap::compile` and thus
+every test constructing a `State`) — fixed by name. Live testing then found a second
+bug: a per-action validation error was written to the same field a real transport error
+uses, so it never cleared on a later successful key press, masking the document's own
+status line — fixed by routing it through the existing `input_error` field instead.
+Full live checklist (nav, horizontal scroll, search incl. no-match, update/delete/
+same-name-replace-then-refresh, palette-over-document, 32x9, fullscreen, logs, clean
+exit) passed by hand against `kind-sauron-test`; case-by-case evidence in
+`M3_ACCEPTANCE.md`. Document contract: [DOCUMENTS.md](DOCUMENTS.md). 49/49 tests
+passing. Next: item 4, Events.
 
 ## Historical M1 checkpoint
 

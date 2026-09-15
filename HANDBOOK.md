@@ -213,8 +213,9 @@ Visual/TUI acceptance against the live isolated cluster is still pending — gre
 are unit/fake-HTTP evidence, not a demonstrated interactive session. Log reader caps
 allocation before clipping (16 KiB per line, 4 KiB read chunks); covered by the fake-HTTP
 watch tests but not yet by a dedicated log-clipping regression test. Row rebuild is gated
-by a `prepare()` memo keyed on store revision/filter/sort/descending so cursor-only or
-log-only redraws no longer re-sort every dirty frame. Other open concerns: document wrap
+by a `prepare()` memo keyed on store revision/filter/sort/descending, plus the current
+second only when the filter has an `age` comparison (see journal entry below — an earlier
+version included the clock unconditionally and resorted every tick regardless of scope). Other open concerns: document wrap
 scroll semantics, scope selection during empty filters. Watch list synchronization is
 labeled separately from an established watch; no header-level connection probe yet.
 No in-cluster config fallback, context/namespace pickers, server Tables, CRD printer columns,
@@ -288,3 +289,22 @@ passing (the live `tests/cluster.rs` test remains `#[ignore]`d, not yet run agai
 `kind-sauron-test`). No visual/TUI acceptance against the live cluster recorded yet — that
 remains the next step. Made the first Git commit of the project after confirming no
 kubeconfig, certificate, key, Secret fixture body, or other credential material was staged.
+
+### 2026-09-15 — prepare() memo bug: clock alone forced a resort every tick
+`prepare()`'s cache key included `Utc::now().timestamp()` unconditionally, so it changed
+every second regardless of data/filter/sort, defeating the point of memoizing row rebuilds
+on the dirty-frame tick. Root cause was real but overbroad: only an `age`-based filter
+comparison (e.g. `age>1h`) can change row membership from time alone, since an object can
+cross the threshold with no store update. AGE column values and AGE-based sort order do
+NOT need this: `ui::render` already recomputes `Object::age`/`field` fresh every frame
+straight from `state.rows`, and elapsed time advances every object's age by the same delta,
+so relative sort order is time-invariant. Fix: added `Expr::has_time_predicate()` (true
+only when the filter tree contains an `age` comparison) and made `prepare()` include the
+current second in its key only when that is true, decoupling display freshness and
+sort-order invalidation from filter-membership invalidation. Added regression tests in
+`src/app/state.rs` proving repeated `prepare()` calls across a real ~1.1s clock tick do not
+resort when nothing relevant changed, that an `age`-filtered `prepare()` does reconsider
+membership across a tick, and that `Object::age` keeps advancing independent of the memo.
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (22/22 passing) after the fix; re-ran the 100/1,000/5,000-object
+bench, no regression (debug-profile, single machine, single run).

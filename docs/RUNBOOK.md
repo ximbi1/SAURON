@@ -37,12 +37,17 @@ Completed checks (all green as of 2026-09-15, first commit):
 - `cargo fmt --check` clean.
 - `cargo check --all-targets` clean.
 - `cargo clippy --all-targets -- -D warnings` clean (0 lints; the original 8 are fixed).
-- `cargo test --all-targets`: 18/18 passing — 15 unit tests, 3 fake-HTTP integration tests
+- `cargo test --all-targets`: 22/22 passing — 19 unit tests, 3 fake-HTTP integration tests
   in `tests/watch_transport.rs` (paged list+watch relist, bounded-channel cancellation,
   403 error surfacing without leaking credentials, partial discovery on a forbidden group).
   The live `tests/cluster.rs` test is `#[ignore]`d and has NOT been run against
   `kind-sauron-test` yet — that is a separate, still-pending step (`scripts/test-cluster.sh
   test`).
+- Fixed a `prepare()` memoization bug where the clock was part of the cache key
+  unconditionally, forcing a resort every tick regardless of data/filter/sort changes.
+  Now only an `age`-based filter comparison ticks the cache, since that is the only thing
+  whose membership can change from time alone; AGE display/sort stay correct without it.
+  See HANDBOOK journal for the full analysis; covered by 3 new regression tests.
 - `benches/pipeline.rs` runs and prints real (debug-profile, single-sample) numbers over
   100/1,000/5,000 synthetic objects; no release-profile or repeated-run data yet.
 - Local `sauron-test` fixture node Ready; healthy Pod Running; failure fixtures present.

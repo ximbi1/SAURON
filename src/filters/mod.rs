@@ -89,6 +89,18 @@ impl Expr {
     pub fn matches(&self, obj: &Object, now: DateTime<Utc>) -> bool {
         self.evaluate(obj, now) == Truth::Yes
     }
+    /// True when membership can change purely from the passage of time (an `age`
+    /// comparison), independent of any store update. Sort sequences do not need this:
+    /// elapsed time advances every object's age by the same delta, so relative order
+    /// is invariant even though the displayed value changes every frame regardless.
+    pub fn has_time_predicate(&self) -> bool {
+        match self {
+            Self::All | Self::Text(_) | Self::Exact(_) | Self::Regex(_) => false,
+            Self::Compare(key, ..) => key == "age",
+            Self::Not(a) => a.has_time_predicate(),
+            Self::And(a, b) | Self::Or(a, b) => a.has_time_predicate() || b.has_time_predicate(),
+        }
+    }
     pub fn evaluate(&self, obj: &Object, now: DateTime<Utc>) -> Truth {
         match self {
             Self::All => Truth::Yes,
@@ -403,6 +415,21 @@ mod tests {
         }
         for query in ["(x", "x ||", "/[/", "age>oops", "-l app=api"] {
             assert!(Expr::parse(query).is_err(), "{query}");
+        }
+    }
+    #[test]
+    fn has_time_predicate_detects_only_age_comparisons() {
+        for query in ["age>1h", "status=Running && age<5m", "!(age>=30m)"] {
+            assert!(
+                Expr::parse(query).expect("valid").has_time_predicate(),
+                "{query}"
+            );
+        }
+        for query in ["status=Running", "cpu>0", "/^api/", "name=x || status=y"] {
+            assert!(
+                !Expr::parse(query).expect("valid").has_time_predicate(),
+                "{query}"
+            );
         }
     }
     #[test]

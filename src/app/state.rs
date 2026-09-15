@@ -101,7 +101,7 @@ pub struct State {
     pub quit: bool,
     pub watch_errors: u64,
     pub page_size: usize,
-    prepared: Option<(u64, String, String, bool, i64)>,
+    prepared: Option<(u64, String, String, bool, Option<i64>)>,
 }
 impl State {
     pub fn new(query: Query, settings: &Settings) -> anyhow::Result<Self> {
@@ -215,14 +215,21 @@ impl State {
                 .and_then(|uid| self.rows.iter().position(|o| &o.uid == uid)),
         );
     }
-    /// Recompute row order only when inputs change. Cursor/log/prompt redraws do not sort.
+    /// Recompute row order only when inputs change. Cursor/log/prompt redraws do not resort.
+    /// The current second is only part of the cache key while the filter has an `age`
+    /// comparison, since only that predicate's membership can change from time alone;
+    /// AGE column values and sort order stay correct without it (see `rebuild`/`ui::render`).
     pub fn prepare(&mut self) {
+        let tick = self
+            .filter
+            .has_time_predicate()
+            .then(|| Utc::now().timestamp());
         let key = (
             self.store.revision,
             self.filter_text.clone(),
             self.sort.clone(),
             self.descending,
-            Utc::now().timestamp(),
+            tick,
         );
         if self.prepared.as_ref() != Some(&key) {
             self.rebuild();
@@ -299,5 +306,61 @@ mod tests {
         );
         s.rebuild();
         assert!(s.selected.is_none());
+    }
+    #[test]
+    fn prepare_without_relevant_change_does_not_resort_across_a_clock_tick() {
+        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        s.store.apply(
+            crate::resources::Object::new(
+                serde_json::json!({"metadata":{"name":"a","uid":"1","resourceVersion":"1"}}),
+            ),
+            false,
+        );
+        s.prepare();
+        assert_eq!(s.rows.len(), 1);
+        // A sentinel not present in the store: only rebuild() would strip it back out.
+        s.rows.push(s.rows[0].clone());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        s.prepare();
+        assert_eq!(
+            s.rows.len(),
+            2,
+            "prepare() must not rebuild from the clock alone when there is no age filter"
+        );
+    }
+    #[test]
+    fn prepare_with_age_filter_rechecks_membership_across_a_clock_tick() {
+        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        s.filter = Expr::parse("age>0s").expect("valid filter");
+        s.filter_text = "age>0s".into();
+        s.store.apply(
+            crate::resources::Object::new(serde_json::json!({
+                "metadata": {"name": "a", "uid": "1", "resourceVersion": "1",
+                    "creationTimestamp": Utc::now().to_rfc3339()},
+            })),
+            false,
+        );
+        s.prepare();
+        let before = s.prepared.clone();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        s.prepare();
+        assert_ne!(
+            before, s.prepared,
+            "an age-based filter must be reconsidered as the clock advances"
+        );
+    }
+    #[test]
+    fn age_display_value_is_independent_of_the_prepare_cache() {
+        let object = crate::resources::Object::new(serde_json::json!({
+            "metadata": {"name": "a", "uid": "1", "resourceVersion": "1",
+                "creationTimestamp": (Utc::now() - chrono::Duration::seconds(5)).to_rfc3339()},
+        }));
+        let early = object.age(Utc::now()).expect("age");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let later = object.age(Utc::now()).expect("age");
+        assert!(
+            later > early,
+            "AGE must keep advancing on every render regardless of prepare()'s memo"
+        );
     }
 }

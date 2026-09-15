@@ -129,7 +129,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED | interactive context picker with namespace-per-context memory added and observed live (M2 item 1); namespace picker/history/breadcrumbs still pending (M2 items 2/4) |
+| Context/namespace/generic discovery/commands | ACCEPTED | context picker w/ per-context namespace memory (M2 item 1) and namespace picker w/ recents (M2 item 2) both observed live; history/breadcrumbs still pending (M2 item 4) |
 | Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
@@ -448,3 +448,56 @@ Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 context was removed and the kubeconfig restored before committing, then recreated
 through the updated `scripts/test-cluster.sh fixtures` to confirm the reproducible path
 works too.
+
+### 2026-09-15 — M2 item 2: full namespace navigation, and a fourth bug (stale
+### key dispatch during Mode::Loading)
+Replaced `n` (`Action::Namespaces`)'s old behavior — navigating away to a `namespaces`
+resource table you had to remember names from and retype `:ns NAME` against — with the
+same real-picker treatment as the context picker: a one-shot bounded list call
+(`kube::discovery::list_names`, limit 500, same pattern as related-Events reads) fetches
+the cluster's actual namespace names without disturbing whatever resource was on screen,
+then opens `Mode::Picker(PickerKind::Namespace)`. `<all>` is always first; namespaces
+this session has recently switched to (a `Runtime.recent_namespaces` MRU, capped at 5,
+cleared on context switch since namespaces are context-specific) come next, then the
+rest alphabetically. `:ns` bare now opens the same picker (`Command::Namespace` became
+`Option<String>`, mirroring `Command::Context`); `:ns NAME`/`:ns *`/`0` (all-namespaces)
+still work directly through a new shared `Runtime::switch_namespace`.
+
+Live acceptance against `kind-sauron-test`, attacking the case list from the M2 plan:
+`namespace A → all → namespace B → all` with settle time between each step — correct
+every time. Rapid repeated switching with zero settle time: three rounds of five
+back-to-back `:ns` commands (concrete → all → concrete → concrete → all) — every round
+converged to the correct final namespace and row count, no stale data. Reopening the
+picker after several switches confirmed MRU ordering (`<all>`, most-recently-used
+namespaces in order, then the alphabetical rest) and correct `●` active-marking.
+
+Found and fixed a real bug this way, exactly the kind the new AGENTS.md stale-result
+rule exists to catch: `Mode::Loading` (used while connecting, watching, or — now —
+fetching the namespace list) had no dedicated key handling, so it fell into the generic
+table-action fallback. A key pressed while a fetch was still in flight (e.g. `y` right
+after `n`, before the namespace list arrived) got dispatched as a real table action
+(`Action::Yaml`) against whatever row was selected *before* the fetch started, silently
+cancelling the in-flight fetch's shared cancellation token as a side effect and landing
+the user in an unrelated YAML view instead of the picker they were waiting for. No data
+corruption — the epoch/request system correctly invalidated the superseded fetch — but
+a real, user-visible violation of "a result may only affect the view it was requested
+for," extended here to "an *input* meant for a pending view must not act on the old one
+either." Fixed by giving `Mode::Loading` its own arm: while loading, only Esc acts
+(cancelling the fetch and returning to `Table`, matching the "Esc cancels" text the UI
+already showed); every other key is a no-op. Confirmed with `eprintln!` instrumentation
+that this was a stale key-vs-async-completion race, not a logic error in the picker
+itself, before writing the fix; removed the instrumentation before committing.
+Re-verified live in a **fresh** process (the first re-test after the fix still failed
+because the old tmux pane was running the pre-fix binary — a reminder to always restart
+the process under test, not just rebuild it) — with a fresh binary, `n` immediately
+followed by `y` correctly stays in the picker, and eight rounds of rapid
+reopen-picker-and-select converged to a valid, consistent table every time.
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (25/25) after the fix.
+
+M2 item 2 is ACCEPTED: namespace selector, `<all>`, recents, and rapid-switch resilience
+all observed live. Favorites (persisted, cross-session) were considered and deliberately
+left out — recents already cover the natural, low-risk case, and persistence would need
+config-file changes out of scope for this item. Next: M2 item 3, generic resources/CRDs/
+aliases resolving deterministically, attacking `:po → :pods → ambiguous-alias` and
+`pods → CRD → deployments → back → forward`.

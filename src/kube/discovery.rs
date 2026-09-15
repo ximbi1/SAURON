@@ -93,6 +93,37 @@ impl Catalog {
     }
 }
 
+/// One-shot bounded list of object names for `resource` (e.g. namespaces for a picker),
+/// not a watch. Bounded to 500 like related-Events reads; `truncated` reports whether
+/// the server indicated more exist via a `continue` token.
+pub async fn list_names(
+    connection: &super::Connection,
+    resource: &Resource,
+) -> Result<(Vec<String>, bool)> {
+    let api = resource.api(connection.client.clone(), None);
+    let params = ::kube::api::ListParams::default().limit(500);
+    let list = tokio::time::timeout(connection.timeout(), api.list(&params))
+        .await
+        .context("List timed out")?
+        .map_err(|e| {
+            anyhow::anyhow!(crate::safety::api_error(
+                &e,
+                &format!("listing {}", resource.qualified())
+            ))
+        })?;
+    let truncated = list
+        .metadata
+        .continue_
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    let names = list
+        .items
+        .into_iter()
+        .filter_map(|o| o.metadata.name)
+        .collect();
+    Ok((names, truncated))
+}
+
 pub async fn discover(client: &Client, timeout: Duration) -> Result<Catalog> {
     let core = tokio::time::timeout(timeout, client.list_core_api_resources("v1"))
         .await

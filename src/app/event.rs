@@ -28,4 +28,9 @@ pub enum Payload {
         request: u64,
         message: String,
     },
+    NamespaceList {
+        request: u64,
+        names: Vec<String>,
+        truncated: bool,
+    },
 }

@@ -28,6 +28,7 @@ pub struct Runtime {
     document: CancellationToken,
     pending: Option<ResourceCommand>,
     namespace_by_context: std::collections::HashMap<String, Option<String>>,
+    recent_namespaces: std::collections::VecDeque<String>,
 }
 impl Runtime {
     pub fn new(
@@ -52,6 +53,7 @@ impl Runtime {
                 document: CancellationToken::new(),
                 pending: None,
                 namespace_by_context: std::collections::HashMap::new(),
+                recent_namespaces: std::collections::VecDeque::new(),
             },
             rx,
         ))
@@ -67,7 +69,59 @@ impl Runtime {
         self.state.query.namespace = namespace_for_context(&self.namespace_by_context, &context);
         self.connect(Some(context));
     }
+    /// Switch the visible namespace (`None` is all-namespaces) and remember it in the
+    /// recents list shown at the top of the namespace picker on future opens.
+    fn switch_namespace(&mut self, namespace: Option<String>) -> Result<()> {
+        if let Some(ns) = &namespace {
+            self.recent_namespaces.retain(|n| n != ns);
+            self.recent_namespaces.push_front(ns.clone());
+            self.recent_namespaces.truncate(5);
+        }
+        self.state.query.namespace = namespace;
+        self.state.mode = Mode::Table;
+        self.watch()
+    }
+    /// Fetch the real namespace list from the cluster (bounded to 500, same pattern as
+    /// Events) and open it as a picker, instead of navigating away to a namespaces
+    /// resource table and losing whatever resource was on screen. `<all>` is always
+    /// first; recently-visited namespaces (this context, this session) come next.
+    fn open_namespace_picker(&mut self) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected yet")?;
+        let resource = connection
+            .catalog
+            .resolve("namespaces", &connection.settings.aliases)?;
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        self.state.mode = Mode::Loading;
+        self.state.status = "Listing namespaces…".into();
+        self.tasks.spawn(async move {
+            let result = tokio::select! {
+                biased;
+                _=cancel.cancelled()=>return,
+                result=crate::kube::discovery::list_names(&connection, &resource)=>result,
+            };
+            let payload = match result {
+                Ok((names, truncated)) => Payload::NamespaceList {
+                    request,
+                    names,
+                    truncated,
+                },
+                Err(e) => Payload::DocumentError {
+                    request,
+                    error: e.to_string(),
+                },
+            };
+            tokio::select! {_=cancel.cancelled()=>{},_=tx.send(Event{epoch,payload})=>{}}
+        });
+        Ok(())
+    }
     pub fn connect(&mut self, context: Option<String>) {
+        self.recent_namespaces.clear();
         self.cancel_scope();
         self.connection = None;
         self.state.resource = None;
@@ -204,6 +258,38 @@ impl Runtime {
                     doc.streaming = false;
                 }
             }
+            Payload::NamespaceList {
+                request,
+                names,
+                truncated,
+            } if request == self.state.request => {
+                let mut items = vec!["<all>".to_string()];
+                for recent in &self.recent_namespaces {
+                    if names.contains(recent) && !items.contains(recent) {
+                        items.push(recent.clone());
+                    }
+                }
+                let mut rest: Vec<String> =
+                    names.into_iter().filter(|n| !items.contains(n)).collect();
+                rest.sort();
+                items.extend(rest);
+                let active = match &self.state.query.namespace {
+                    None => Some(0),
+                    Some(ns) => items.iter().position(|i| i == ns),
+                };
+                self.state.status = if truncated {
+                    "PARTIAL: namespace list limited to 500".into()
+                } else {
+                    "Namespace list ready".into()
+                };
+                self.state.mode = Mode::Picker(state::Picker {
+                    kind: state::PickerKind::Namespace,
+                    title: "Namespaces · Enter switches, Esc cancels".into(),
+                    items,
+                    active,
+                    cursor: active.unwrap_or(0),
+                });
+            }
             _ => {}
         }
     }
@@ -247,14 +333,12 @@ impl Runtime {
         match crate::command::parse(text)? {
             Command::Action(action) => self.action(action),
             Command::Resource(query) => self.navigate(query),
-            Command::Namespace(ns) => {
-                self.state.query.namespace = if ns == "all" || ns == "*" {
-                    None
-                } else {
-                    Some(ns)
-                };
-                self.watch()
-            }
+            Command::Namespace(Some(ns)) => self.switch_namespace(if ns == "all" || ns == "*" {
+                None
+            } else {
+                Some(ns)
+            }),
+            Command::Namespace(None) => self.open_namespace_picker(),
             Command::Context(Some(context)) => {
                 self.switch_context(context);
                 Ok(())
@@ -268,6 +352,7 @@ impl Runtime {
                 self.document.cancel();
                 self.state.request += 1;
                 self.state.mode = Mode::Picker(state::Picker {
+                    kind: state::PickerKind::Context,
                     title: "Contexts · Enter switches, Esc cancels".into(),
                     items: connection.contexts.clone(),
                     active,
@@ -364,16 +449,8 @@ impl Runtime {
             Refresh => {
                 self.watch()?;
             }
-            AllNamespaces => {
-                self.state.query.namespace = None;
-                self.watch()?;
-            }
-            Namespaces => {
-                self.navigate(ResourceCommand {
-                    resource: "namespaces".into(),
-                    ..Default::default()
-                })?;
-            }
+            AllNamespaces => self.switch_namespace(None)?,
+            Namespaces => self.open_namespace_picker()?,
             Sort => {
                 let columns = self.state.columns();
                 let i = columns
@@ -557,12 +634,33 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                                     KeyCode::Esc=>{runtime.state.mode=Mode::Table;},
                                     KeyCode::Up=>{picker.cursor=picker.cursor.saturating_sub(1);runtime.state.mode=Mode::Picker(picker);},
                                     KeyCode::Down=>{picker.cursor=(picker.cursor+1).min(picker.items.len().saturating_sub(1));runtime.state.mode=Mode::Picker(picker);},
-                                    KeyCode::Enter=>{if let Some(item)=picker.items.get(picker.cursor).cloned(){runtime.switch_context(item);}},
+                                    KeyCode::Enter=>{
+                                        if let Some(item)=picker.items.get(picker.cursor).cloned(){
+                                            let result=match picker.kind{
+                                                state::PickerKind::Context=>{runtime.switch_context(item);Ok(())},
+                                                state::PickerKind::Namespace=>runtime.switch_namespace((item!="<all>").then_some(item)),
+                                            };
+                                            if let Err(e)=result{runtime.state.error=Some(e.to_string());}
+                                        }
+                                    },
                                     _=>{runtime.state.mode=Mode::Picker(picker);},
                                 }
                             },
                             Mode::Search(mut doc,mut text)=>{
                                 match key.code{KeyCode::Esc=>runtime.state.mode=Mode::Document(doc),KeyCode::Enter=>{doc.search=text;doc.search_next(false);runtime.state.mode=Mode::Document(doc);},_=>{edit(&mut text,key);runtime.state.mode=Mode::Search(doc,text);}}
+                            },
+                            // A key pressed while an async fetch (connect/watch/namespace list) is
+                            // still in flight must never fall through to table-action dispatch: the
+                            // selected row it would act on belongs to whatever was on screen before
+                            // this fetch started, not to what the user is currently waiting for.
+                            // Esc still cancels, matching the "Esc cancels" text shown while loading.
+                            Mode::Loading=>{
+                                runtime.state.mode=Mode::Loading;
+                                if key.code==KeyCode::Esc{
+                                    runtime.document.cancel();
+                                    runtime.state.request+=1;
+                                    runtime.state.mode=Mode::Table;
+                                }
                             },
                             mode=>{
                                 runtime.state.mode=mode;

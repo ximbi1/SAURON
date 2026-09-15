@@ -94,10 +94,23 @@ no stale-epoch leak. `scripts/test-cluster.sh fixtures` now also creates a secon
 context alias (`kind-sauron-test-b`) on the same isolated cluster so this is
 reproducible for future M2 work, not a one-off. 25/25 tests passing (2 new).
 
-Next: M2 item 2, full namespace navigation (selector, `<all>`, rapid repeated switches
-to hunt races the same way). Then item 3 (generic resources/CRDs/aliases), item 4
-(history/breadcrumbs), item 5 (command palette), item 6 (M2 interactive acceptance
-trying to break it).
+Item 2 (full namespace navigation) is also done: `n` / bare `:ns` open a real picker
+fetching the actual namespace list from the cluster (bounded to 500), `<all>` always
+first, a session-local MRU of recently-visited namespaces (capped 5, reset on context
+switch) next, then the rest alphabetically. `:ns NAME`/`:ns *`/`0` still switch directly.
+Stress-tested `namespace A → all → namespace B → all` and rapid repeated `:ns` switching
+(three rounds, five back-to-back commands each, no settling time) — always converged
+correctly. Found and fixed a fourth bug this way: `Mode::Loading` had no dedicated key
+handling and fell through to table-action dispatch, so a key pressed while the namespace
+list (or any fetch) was in flight could fire an unrelated action against a stale
+selection. Fixed by giving `Mode::Loading` its own arm where only Esc acts. Full account,
+including the false-negative re-test caused by testing against a stale tmux pane instead
+of a freshly restarted process, is in the HANDBOOK journal. 25/25 tests passing.
+
+Next: M2 item 3, generic resources/CRDs/aliases resolving deterministically — attack
+`:po → :pods → ambiguous-alias` and `pods → CRD → deployments → back → forward`. Then
+item 4 (history/breadcrumbs), item 5 (command palette), item 6 (M2 interactive
+acceptance trying to break it).
 
 ## Tools
 

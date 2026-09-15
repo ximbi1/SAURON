@@ -17,7 +17,13 @@ pub enum Mode {
     Picker(Picker),
     Loading,
 }
+#[derive(Clone, Copy, PartialEq)]
+pub enum PickerKind {
+    Context,
+    Namespace,
+}
 pub struct Picker {
+    pub kind: PickerKind,
     pub title: String,
     pub items: Vec<String>,
     pub active: Option<usize>,

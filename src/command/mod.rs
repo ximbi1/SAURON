@@ -320,7 +320,7 @@ pub struct ResourceCommand {
 #[derive(Clone, Debug)]
 pub enum Command {
     Resource(ResourceCommand),
-    Namespace(String),
+    Namespace(Option<String>),
     Context(Option<String>),
     Action(Action),
     Info,
@@ -432,7 +432,10 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.len() <= 1, "Use :ctx [context]");
             return Ok(Command::Context(tail.first().cloned()));
         }
-        "ns" | "namespace" if tail.len() == 1 => return Ok(Command::Namespace(tail[0].clone())),
+        "ns" | "namespace" => {
+            ensure!(tail.len() <= 1, "Use :ns [namespace]");
+            return Ok(Command::Namespace(tail.first().cloned()));
+        }
         "info" => {
             ensure!(tail.is_empty(), "Use :info");
             return Ok(Command::Info);

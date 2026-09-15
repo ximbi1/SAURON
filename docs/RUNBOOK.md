@@ -78,10 +78,26 @@ log stream could display stale "Log stream ended" text from a previous, unrelate
 while actively streaming live lines. Fixed in `src/app/mod.rs`.
 
 Remaining gap: the soak was ~150s, not multi-hour/overnight; only one namespace/context
-combination was exercised per feature. Next work: broader combinatorial and endurance
-coverage, then move to M2/M3 acceptance. Update this checkpoint after every verification.
+combination was exercised per feature. Update this checkpoint after every verification.
 Never re-mark ACCEPTED from unit tests alone — only from a directly observed session
 against the isolated cluster.
+
+## M2 checkpoint
+
+Order and adversarial case list for M2 are in the HANDBOOK ("M2 plan and discipline").
+Item 1 (real context picker + namespace-per-context memory) is done: `:ctx` opens a
+navigable list instead of static text, and switching context restores that context's
+last-viewed namespace (including all-namespaces) instead of always resetting to the
+kubeconfig default. Stress-tested against rapid repeated context switching (three
+rounds of 8 back-to-back switches, ten rounds of reopen-and-switch, no settling time) —
+no stale-epoch leak. `scripts/test-cluster.sh fixtures` now also creates a second
+context alias (`kind-sauron-test-b`) on the same isolated cluster so this is
+reproducible for future M2 work, not a one-off. 25/25 tests passing (2 new).
+
+Next: M2 item 2, full namespace navigation (selector, `<all>`, rapid repeated switches
+to hunt races the same way). Then item 3 (generic resources/CRDs/aliases), item 4
+(history/breadcrumbs), item 5 (command palette), item 6 (M2 interactive acceptance
+trying to break it).
 
 ## Tools
 

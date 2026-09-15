@@ -14,7 +14,14 @@ pub enum Mode {
     Filter(String),
     Document(Document),
     Search(Document, String),
+    Picker(Picker),
     Loading,
+}
+pub struct Picker {
+    pub title: String,
+    pub items: Vec<String>,
+    pub active: Option<usize>,
+    pub cursor: usize,
 }
 pub struct Document {
     pub title: String,

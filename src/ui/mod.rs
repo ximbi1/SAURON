@@ -114,6 +114,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
     let columns = state.columns();
     match &mut state.mode {
         Mode::Document(doc) | Mode::Search(doc, _) => render_document(frame, parts[1], doc, theme),
+        Mode::Picker(picker) => render_picker(frame, parts[1], picker, theme),
         Mode::Loading => frame.render_widget(
             Paragraph::new(
                 "Gathering fresh evidence…\nEsc cancels; Kubernetes work runs in the background.",
@@ -208,6 +209,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Mode::Command(text) => format!(":{text}▏"),
         Mode::Filter(text) => format!("/{text}▏"),
         Mode::Search(_, text) => format!("search /{text}▏"),
+        Mode::Picker(_) => " ↑↓ move   enter switch   esc cancel ".into(),
         _ => " : commands   / filter/search   X explain   y YAML   l logs   ? help ".into(),
     };
     frame.render_widget(
@@ -230,6 +232,23 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
             popup,
         );
     }
+}
+fn render_picker(frame: &mut Frame, area: Rect, picker: &crate::app::state::Picker, theme: Theme) {
+    let rows = picker.items.iter().enumerate().map(|(i, item)| {
+        let marker = if Some(i) == picker.active {
+            "● "
+        } else {
+            "  "
+        };
+        Row::new([format!("{marker}{item}")]).style(if i == picker.cursor {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(theme.foreground)
+        })
+    });
+    let table = Table::new(rows, [Constraint::Min(20)])
+        .block(Block::bordered().title(picker.title.as_str()));
+    frame.render_widget(table, area);
 }
 fn render_document(frame: &mut Frame, area: Rect, doc: &mut Document, theme: Theme) {
     let height = area.height.saturating_sub(2) as usize;

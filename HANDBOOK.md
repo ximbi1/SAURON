@@ -29,6 +29,10 @@ Principles: keyboard first; explicit scope at all times; deterministic health; e
 before diagnosis; unknown is distinct from healthy/zero; native APIs; responsive input;
 bounded work; graceful partial results; honest feature status. Color supplements text.
 Narrow terminals must remain usable. Never infer performance from implementation language.
+When live acceptance finds a real bug: find the root cause, add a regression test when
+reasonable, run the full check suite, then repeat the exact live flow that found it against
+the real cluster before moving on. A milestone is done when observed working live under
+the flows most likely to break it — not when it compiles or unit tests pass.
 Non-goals: hosted control plane, telemetry uploads, credential broker, automatic repair,
 required AI, embedded external security scanners, copying Sofka source/artwork/branding.
 Brand constants belong in `src/brand.rs`; manifests/package metadata necessarily repeat
@@ -125,7 +129,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED | namespace, generic/CRD, all-namespaces and context switching all observed live; picker/history pending |
+| Context/namespace/generic discovery/commands | ACCEPTED | interactive context picker with namespace-per-context memory added and observed live (M2 item 1); namespace picker/history/breadcrumbs still pending (M2 items 2/4) |
 | Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
@@ -377,3 +381,70 @@ M1 is now ACCEPTED for all slices listed above, including previous/explicit-cont
 logs, context switching, and all-namespaces mode. Remaining gap: this was a single
 ~150s soak, not a multi-hour/overnight endurance run, and only one namespace/context
 combination was exercised per feature — broader combinatorial coverage is still open.
+
+## M2 plan and discipline
+
+Agreed order, chosen to minimize risk: (1) real context picker with correct per-context
+namespace memory and no state leak; (2) full namespace navigation (selector, `<all>`,
+favorites/recents if in scope, rapid repeated switches to hunt races); (3) generic
+resources + CRDs + aliases/shortnames resolving deterministically, including ambiguous
+names; (4) navigation history/breadcrumbs preserving identity and scope across
+enter/exit; (5) command palette centralized on the action registry, not scattered
+special-cased commands; (6) M2 interactive acceptance against `kind-sauron-test` trying
+to break it, not just demonstrating the happy path.
+
+Deliberate ugly cases to attack for each M2 slice (this is where the next bugs are):
+`namespace A → all → namespace B → all`; `context A → context B → context A`;
+`pods → CRD → deployments → back → forward`; `:po → :pods → ambiguous-alias`; changing
+scope while the previous watch is still settling; rapid repeated context switches;
+select an object → change scope → return.
+
+Two rules added to `AGENTS.md`, both earned by M1: (1) when live acceptance finds a real
+bug, find the root cause, add a regression test when reasonable, run the full suite, and
+repeat the exact discovering flow before moving on; (2) when changing context, namespace,
+resource scope, or another identity boundary, actively test for stale asynchronous
+results from the previous scope — a result may only update visible state when its
+epoch/request identity still matches the current view, and this must be tested under
+rapid repeated switching, not only a single clean transition.
+
+M2 is not done because it compiles. It is done when contexts, namespaces, CRDs/aliases,
+navigation and the command palette have been observed working for real and late-arriving
+results from an abandoned scope never contaminate the current view.
+
+### 2026-09-15 — M2 item 1: real context picker with namespace-per-context memory
+Replaced `:ctx` (no args)'s static text dump with a real interactive picker: a new
+`Mode::Picker(Picker)` (`title`, `items`, `active` index, `cursor`) rendered as a
+selectable list with the current context marked (`●`) and the cursor row reverse-video;
+Up/Down moves, Enter switches, Esc cancels. `:ctx NAME` still works directly for muscle
+memory/scripting; both paths go through a new `Runtime::switch_context`.
+
+Added namespace-per-context memory: `Runtime.namespace_by_context: HashMap<String,
+Option<String>>`. Before switching, the outgoing context's current namespace (including
+`None` for all-namespaces) is remembered; the incoming context's namespace is restored
+from memory if this session has visited it before, otherwise it falls through to the
+existing `Some("")` sentinel that `Payload::Connected` resolves to the connection's
+kubeconfig default. The lookup is a pure function, `namespace_for_context`, unit tested
+for both the unvisited case and the visited-including-all-namespaces case (the two are
+easy to conflate: `HashMap::get` returning `None` means "never visited", `Some(None)`
+means "visited, was in all-namespaces" — collapsing that distinction was the obvious way
+to get this wrong).
+
+Live acceptance against `kind-sauron-test`, attacking the case list above rather than
+just the happy path: added a second context (`kind-sauron-test-b`, same cluster/user,
+different default namespace) via `kubectl config set-context` on the isolated
+kubeconfig — now a permanent, idempotent step in `scripts/test-cluster.sh fixtures`, not
+an ad hoc one-off. Verified: opening the picker lists both contexts with the active one
+marked; switching context A → B → A restores A's `sauron-fixtures` namespace correctly;
+setting B to all-namespaces, going to A, then back to B via the picker restores B's
+all-namespaces view (not B's kubeconfig-default `kube-system`) — the core thing this
+feature exists to get right. Stress-tested rapid repeated switching per the new
+stale-result rule: three rounds of 8 back-to-back `:ctx` commands with no settling time
+between them, plus ten rounds of reopen-picker-and-switch with no delay, all converged
+to a fully consistent final state (correct context, correct namespace, correct row data,
+no partial/mixed rows, no stuck Loading/Picker mode) — no stale-epoch leak found. RSS
+~27MB after the stress run, no crash, clean terminal restore on quit.
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (25/25, two new) after implementing; the temporary second
+context was removed and the kubeconfig restored before committing, then recreated
+through the updated `scripts/test-cluster.sh fixtures` to confirm the reproducible path
+works too.

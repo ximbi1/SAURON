@@ -27,6 +27,7 @@ pub struct Runtime {
     scope: CancellationToken,
     document: CancellationToken,
     pending: Option<ResourceCommand>,
+    namespace_by_context: std::collections::HashMap<String, Option<String>>,
 }
 impl Runtime {
     pub fn new(
@@ -50,9 +51,21 @@ impl Runtime {
                 scope: CancellationToken::new(),
                 document: CancellationToken::new(),
                 pending: None,
+                namespace_by_context: std::collections::HashMap::new(),
             },
             rx,
         ))
+    }
+    /// Switch to a different context, restoring that context's last-viewed namespace
+    /// if this session has visited it before, instead of always resetting to the
+    /// kubeconfig default. Remembers the outgoing context's current namespace first.
+    fn switch_context(&mut self, context: String) {
+        if let Some(current) = self.connection.as_ref().map(|c| c.context.clone()) {
+            self.namespace_by_context
+                .insert(current, self.state.query.namespace.clone());
+        }
+        self.state.query.namespace = namespace_for_context(&self.namespace_by_context, &context);
+        self.connect(Some(context));
     }
     pub fn connect(&mut self, context: Option<String>) {
         self.cancel_scope();
@@ -243,21 +256,23 @@ impl Runtime {
                 self.watch()
             }
             Command::Context(Some(context)) => {
-                self.state.query.namespace = Some("".into());
-                self.connect(Some(context));
+                self.switch_context(context);
                 Ok(())
             }
             Command::Context(None) => {
-                let contexts = self
-                    .connection
-                    .as_ref()
-                    .context("Not connected")?
+                let connection = self.connection.as_ref().context("Not connected")?;
+                let active = connection
                     .contexts
-                    .join("\n");
-                self.open_static(
-                    "Contexts",
-                    format!("Use :ctx NAME to switch (does not edit kubeconfig).\n\n{contexts}"),
-                );
+                    .iter()
+                    .position(|c| c == &connection.context);
+                self.document.cancel();
+                self.state.request += 1;
+                self.state.mode = Mode::Picker(state::Picker {
+                    title: "Contexts · Enter switches, Esc cancels".into(),
+                    items: connection.contexts.clone(),
+                    active,
+                    cursor: active.unwrap_or(0),
+                });
                 Ok(())
             }
             Command::Info => {
@@ -483,6 +498,19 @@ impl Runtime {
     }
 }
 
+/// The namespace to switch to for `context`: whatever this session last viewed there,
+/// or `Some("")` (a sentinel `Payload::Connected` resolves to the connection's kubeconfig
+/// default namespace) the first time this context is visited.
+fn namespace_for_context(
+    memory: &std::collections::HashMap<String, Option<String>>,
+    context: &str,
+) -> Option<String> {
+    memory
+        .get(context)
+        .cloned()
+        .unwrap_or_else(|| Some(String::new()))
+}
+
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
@@ -522,6 +550,15 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                                     },
                                     KeyCode::Tab if command=>{if let Some(s)=runtime.suggestions(&text).first(){text=s.clone();}runtime.state.mode=Mode::Command(text);},
                                     _=>{edit(&mut text,key);runtime.state.mode=if command{Mode::Command(text)}else{Mode::Filter(text)};},
+                                }
+                            },
+                            Mode::Picker(mut picker)=>{
+                                match key.code{
+                                    KeyCode::Esc=>{runtime.state.mode=Mode::Table;},
+                                    KeyCode::Up=>{picker.cursor=picker.cursor.saturating_sub(1);runtime.state.mode=Mode::Picker(picker);},
+                                    KeyCode::Down=>{picker.cursor=(picker.cursor+1).min(picker.items.len().saturating_sub(1));runtime.state.mode=Mode::Picker(picker);},
+                                    KeyCode::Enter=>{if let Some(item)=picker.items.get(picker.cursor).cloned(){runtime.switch_context(item);}},
+                                    _=>{runtime.state.mode=Mode::Picker(picker);},
                                 }
                             },
                             Mode::Search(mut doc,mut text)=>{
@@ -583,5 +620,34 @@ fn edit(text: &mut String, key: crossterm::event::KeyEvent) {
             text.push(c)
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn namespace_for_context_defers_to_kubeconfig_default_on_first_visit() {
+        let memory = std::collections::HashMap::new();
+        assert_eq!(
+            namespace_for_context(&memory, "prod"),
+            Some(String::new()),
+            "an unvisited context has no memory to restore, so it must defer to kubeconfig"
+        );
+    }
+    #[test]
+    fn namespace_for_context_restores_remembered_namespace_including_all_namespaces() {
+        let mut memory = std::collections::HashMap::new();
+        memory.insert("prod".to_string(), Some("billing".to_string()));
+        memory.insert("staging".to_string(), None);
+        assert_eq!(
+            namespace_for_context(&memory, "prod"),
+            Some("billing".into())
+        );
+        assert_eq!(
+            namespace_for_context(&memory, "staging"),
+            None,
+            "None means all-namespaces and must be preserved, not confused with unvisited"
+        );
     }
 }

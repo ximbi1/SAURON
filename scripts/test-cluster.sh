@@ -23,6 +23,10 @@ case "${1:-check}" in
     kube_test apply -f "$repo_dir/tests/fixtures/workloads.yaml"
     kube_test wait --for=condition=Established crd/eyes.testing.sauron.local --timeout=30s
     kube_test apply -f "$repo_dir/tests/fixtures/eye.yaml"
+    # Second context alias on the SAME isolated cluster, for context-switching
+    # acceptance (picker, namespace-per-context memory). Not a second cluster.
+    kubectl --kubeconfig "$test_kubeconfig" config set-context kind-sauron-test-b \
+      --cluster=kind-sauron-test --user=kind-sauron-test --namespace=kube-system >/dev/null
     ;;
   test)
     cd "$repo_dir"

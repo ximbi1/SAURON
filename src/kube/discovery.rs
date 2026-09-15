@@ -32,64 +32,121 @@ impl Resource {
         }
     }
 }
+/// Aliases resolved before consulting live discovery at all, matching kubectl
+/// precedent: these always win over a CRD declaring the same shortname. Shared
+/// between `resolve` and `discover` (the latter warns on a live collision) so the
+/// two stay in sync.
+const BUILTIN_ALIASES: &[(&str, &str)] = &[
+    ("po", "pods"),
+    ("dp", "deployments"),
+    ("deploy", "deployments"),
+    ("svc", "services"),
+    ("no", "nodes"),
+    ("ns", "namespaces"),
+    ("cm", "configmaps"),
+    ("sts", "statefulsets"),
+    ("ds", "daemonsets"),
+    ("rs", "replicasets"),
+    ("pvc", "persistentvolumeclaims"),
+    ("pv", "persistentvolumes"),
+    ("crd", "customresourcedefinitions"),
+];
+
+fn dedup_by_id(candidates: Vec<&Resource>) -> Vec<&Resource> {
+    let mut out: Vec<&Resource> = Vec::new();
+    for r in candidates {
+        if !out.iter().any(|o| o.id() == r.id()) {
+            out.push(r);
+        }
+    }
+    out
+}
+
 #[derive(Clone, Default)]
 pub struct Catalog {
     pub resources: Vec<Resource>,
     pub warnings: Vec<String>,
 }
 impl Catalog {
+    /// Resolve a human-typed name (alias, shortname, plural, kind, or plural.group) to
+    /// exactly one canonical `Resource` (GVK). Never silently prefers one match over
+    /// another when more than one distinct resource matches — including when one of the
+    /// matches happens to be a core/built-in resource — because that would let the same
+    /// typed name quietly mean different things depending on what CRDs are installed.
+    /// Callers must treat the returned `Resource` as the identity from here on and must
+    /// not call `resolve` again against the same catalog to "refresh" it; re-resolving is
+    /// only correct when moving to a genuinely different catalog (a context/cluster switch).
     pub fn resolve(&self, query: &str, aliases: &BTreeMap<String, String>) -> Result<Resource> {
-        let builtin = match query {
-            "po" => "pods",
-            "dp" | "deploy" => "deployments",
-            "svc" => "services",
-            "no" => "nodes",
-            "ns" => "namespaces",
-            "cm" => "configmaps",
-            "sts" => "statefulsets",
-            "ds" => "daemonsets",
-            "rs" => "replicasets",
-            "pvc" => "persistentvolumeclaims",
-            "pv" => "persistentvolumes",
-            "crd" => "customresourcedefinitions",
-            q => q,
-        };
-        let q = aliases.get(query).map(String::as_str).unwrap_or(builtin);
-        let exact = self
-            .resources
+        let builtin = BUILTIN_ALIASES
             .iter()
-            .find(|r| r.id().eq_ignore_ascii_case(q) || r.qualified().eq_ignore_ascii_case(q));
-        if let Some(r) = exact {
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(query))
+            .map(|(_, target)| *target)
+            .unwrap_or(query);
+        let q = aliases.get(query).map(String::as_str).unwrap_or(builtin);
+        // Explicit qualification (id form "version/plural" or "plural.group") is how a
+        // user resolves ambiguity themselves; it always wins outright. Only actually
+        // qualified input takes this path: a bare word like "widgets" must NOT match a
+        // core resource's `qualified()` just because a core resource's qualified form has
+        // no group suffix — that would silently prefer core the same way this function
+        // exists to prevent for plural/kind/shortname matches below.
+        if (q.contains('/') || q.contains('.'))
+            && let Some(r) = self
+                .resources
+                .iter()
+                .find(|r| r.id().eq_ignore_ascii_case(q) || r.qualified().eq_ignore_ascii_case(q))
+        {
             return Ok(r.clone());
         }
-        let matching: Vec<_> = self
-            .resources
-            .iter()
-            .filter(|r| r.api.plural.eq_ignore_ascii_case(q) || r.api.kind.eq_ignore_ascii_case(q))
-            .collect();
-        if let Some(r) = matching.iter().find(|r| r.api.group.is_empty()) {
-            return Ok((*r).clone());
-        }
-        if matching.len() == 1 {
-            return Ok(matching[0].clone());
-        }
-        if matching.len() > 1 {
-            bail!(
-                "Ambiguous resource; use one of: {}",
-                matching
+        let by_plural_or_kind = dedup_by_id(
+            self.resources
+                .iter()
+                .filter(|r| {
+                    r.api.plural.eq_ignore_ascii_case(q) || r.api.kind.eq_ignore_ascii_case(q)
+                })
+                .collect(),
+        );
+        match by_plural_or_kind.len() {
+            1 => return Ok(by_plural_or_kind[0].clone()),
+            n if n > 1 => bail!(
+                "{q:?} is ambiguous across API groups; qualify explicitly as plural.group: {}",
+                by_plural_or_kind
                     .iter()
                     .map(|r| r.qualified())
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            ),
+            _ => {}
         }
-        self.resources
-            .iter()
-            .find(|r| r.short_names.iter().any(|s| s == q))
-            .cloned()
-            .context(
-                "Resource not found in discovery; use a plural, kind, shortname or plural.group",
-            )
+        // Shortnames last, matching kubectl precedent: the small built-in alias table
+        // above always wins for its 12 entries even if a CRD declares the same
+        // shortname (discovery records that collision as a warning, not silently).
+        // Among live discovery shortnames, case-insensitive and ambiguity-checked too.
+        let by_shortname = dedup_by_id(
+            self.resources
+                .iter()
+                .filter(|r| r.short_names.iter().any(|s| s.eq_ignore_ascii_case(q)))
+                .collect(),
+        );
+        match by_shortname.len() {
+            1 => return Ok(by_shortname[0].clone()),
+            n if n > 1 => bail!(
+                "shortname {q:?} is ambiguous across API groups; qualify explicitly as plural.group: {}",
+                by_shortname
+                    .iter()
+                    .map(|r| r.qualified())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => {}
+        }
+        if self.warnings.is_empty() {
+            bail!("Resource not found in discovery; use a plural, kind, shortname or plural.group")
+        }
+        bail!(
+            "Resource not found, but discovery was partial ({} warning(s)) so this is not \
+             proof it doesn't exist; check discovery warnings and try plural.group",
+            self.warnings.len()
+        )
     }
 }
 
@@ -181,6 +238,22 @@ pub async fn discover(client: &Client, timeout: Duration) -> Result<Catalog> {
         .resources
         .retain(|r| seen.insert((r.api.group.clone(), r.api.plural.clone())));
     catalog.resources.sort_by_key(Resource::qualified);
+    // A CRD (or any discovered resource) can declare a shortname that collides with the
+    // small built-in alias table `resolve` always checks first; the built-in wins
+    // deterministically (kubectl precedent), but that must be a visible warning, not a
+    // silent dead end for whoever typed the CRD's own shortname expecting it to work.
+    for (alias, target) in BUILTIN_ALIASES {
+        for r in &catalog.resources {
+            if r.short_names.iter().any(|s| s.eq_ignore_ascii_case(alias))
+                && !r.api.plural.eq_ignore_ascii_case(target)
+            {
+                catalog.warnings.push(format!(
+                    "shortname {alias:?} on {} is shadowed by the built-in alias to {target}; use plural.group to reach it",
+                    r.qualified()
+                ));
+            }
+        }
+    }
     Ok(catalog)
 }
 fn append(out: &mut Vec<Resource>, list: APIResourceList) -> Result<()> {
@@ -235,5 +308,127 @@ mod tests {
             c.resolve("po", &BTreeMap::new()).expect("pod").id(),
             "v1/pods"
         );
+    }
+    fn resource(group: &str, plural: &str, kind: &str, short_names: &[&str]) -> Resource {
+        Resource {
+            api: ApiResource {
+                group: group.into(),
+                version: "v1".into(),
+                api_version: if group.is_empty() {
+                    "v1".into()
+                } else {
+                    format!("{group}/v1")
+                },
+                kind: kind.into(),
+                plural: plural.into(),
+            },
+            namespaced: true,
+            short_names: short_names.iter().map(|s| s.to_string()).collect(),
+            verbs: vec!["list".into()],
+        }
+    }
+    #[test]
+    fn po_and_pods_resolve_to_the_identical_resource() {
+        let c = Catalog {
+            resources: vec![resource("", "pods", "Pod", &["po"])],
+            warnings: vec![],
+        };
+        let empty = BTreeMap::new();
+        assert_eq!(
+            c.resolve("po", &empty).expect("po").id(),
+            c.resolve("pods", &empty).expect("pods").id()
+        );
+    }
+    #[test]
+    fn builtin_alias_wins_over_a_colliding_crd_shortname_regardless_of_case() {
+        // Found live: a CRD declaring its own "po" shortname makes "PO" (but not "po")
+        // fall through to genuine discovery-based ambiguity between it and pods, because
+        // the built-in alias table was matched case-sensitively. The built-in must win
+        // deterministically for any case, exactly like the lowercase form already does.
+        let c = Catalog {
+            resources: vec![
+                resource("", "pods", "Pod", &["po"]),
+                resource("custom.io", "portals", "Portal", &["po"]),
+            ],
+            warnings: vec![],
+        };
+        let empty = BTreeMap::new();
+        for query in ["po", "PO", "Po", "pO"] {
+            assert_eq!(
+                c.resolve(query, &empty)
+                    .unwrap_or_else(|e| panic!("{query}: {e}"))
+                    .api
+                    .plural,
+                "pods",
+                "{query}"
+            );
+        }
+    }
+    #[test]
+    fn cross_group_plural_collision_is_rejected_even_though_one_is_core() {
+        // A CRD that happens to also use the plural "widgets" as some core-ish resource
+        // would previously be silently shadowed by a `group.is_empty()` preference.
+        let c = Catalog {
+            resources: vec![
+                resource("", "widgets", "Widget", &[]),
+                resource("custom.io", "widgets", "Widget", &[]),
+            ],
+            warnings: vec![],
+        };
+        let error = c.resolve("widgets", &BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+        assert!(error.to_string().contains("widgets.custom.io"), "{error}");
+    }
+    #[test]
+    fn qualified_plural_group_disambiguates_a_cross_group_collision() {
+        let c = Catalog {
+            resources: vec![
+                resource("", "widgets", "Widget", &[]),
+                resource("custom.io", "widgets", "Widget", &[]),
+            ],
+            warnings: vec![],
+        };
+        assert_eq!(
+            c.resolve("widgets.custom.io", &BTreeMap::new())
+                .expect("qualified")
+                .api
+                .group,
+            "custom.io"
+        );
+    }
+    #[test]
+    fn shortname_matching_is_case_insensitive() {
+        let c = Catalog {
+            resources: vec![resource("custom.io", "widgets", "Widget", &["wd"])],
+            warnings: vec![],
+        };
+        assert_eq!(
+            c.resolve("WD", &BTreeMap::new())
+                .expect("uppercase shortname")
+                .api
+                .plural,
+            "widgets"
+        );
+    }
+    #[test]
+    fn cross_group_shortname_collision_is_rejected() {
+        let c = Catalog {
+            resources: vec![
+                resource("a.io", "widgets", "Widget", &["wd"]),
+                resource("b.io", "wardens", "Warden", &["wd"]),
+            ],
+            warnings: vec![],
+        };
+        let error = c.resolve("wd", &BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+    }
+    #[test]
+    fn not_found_error_mentions_partial_discovery_when_warnings_exist() {
+        let c = Catalog {
+            resources: vec![],
+            warnings: vec!["some group timed out".into()],
+        };
+        let error = c.resolve("nope", &BTreeMap::new()).unwrap_err();
+        assert!(error.to_string().contains("partial"), "{error}");
     }
 }

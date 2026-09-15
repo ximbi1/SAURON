@@ -4,7 +4,7 @@ pub mod state;
 use crate::{
     command::{Action, Command, Keymap, ResourceCommand},
     config::Config,
-    kube::{ConnectOptions, Connection, watch::Query},
+    kube::{ConnectOptions, Connection, discovery::Resource, watch::Query},
     resources::store::Store,
 };
 use anyhow::{Context, Result};
@@ -162,15 +162,17 @@ impl Runtime {
         self.state.synced = false;
         self.state.dirty = true;
     }
-    pub fn watch(&mut self) -> Result<()> {
-        let connection = self.connection.clone().context("Not connected")?;
-        let resource = connection
-            .catalog
-            .resolve(&self.state.query.resource, &connection.settings.aliases)?;
+    /// Start (or restart) the watch for an already-resolved canonical `resource` (GVK).
+    /// Callers must supply the identity explicitly rather than have it re-derived from a
+    /// human alias here, so that a name disambiguated once (e.g. an ambiguous shortname,
+    /// or one that collided with a CRD) cannot silently re-resolve to something else on a
+    /// later Refresh/namespace switch just because the catalog changed in between.
+    fn watch_resource(&mut self, resource: Resource) -> Result<()> {
         anyhow::ensure!(
             resource.verbs.iter().any(|v| v == "watch"),
             "Resource API does not advertise watch; snapshot polling is not implemented"
         );
+        let connection = self.connection.clone().context("Not connected")?;
         self.cancel_scope();
         self.state.resource = Some(resource.clone());
         self.state.status = format!("Listing {}…", resource.qualified());
@@ -182,6 +184,29 @@ impl Runtime {
             connection, resource, query, epoch, tx, cancel,
         ));
         Ok(())
+    }
+    /// Re-run the watch for whatever resource is already active (Refresh, namespace and
+    /// all-namespaces switches) by reusing its resolved identity, never by re-resolving
+    /// `state.query.resource`'s human text against the catalog again.
+    pub fn watch(&mut self) -> Result<()> {
+        let resource = self
+            .state
+            .resource
+            .clone()
+            .context("No resource selected yet")?;
+        self.watch_resource(resource)
+    }
+    /// After a context switch with no explicit pending navigation, the previously
+    /// resolved `state.resource` belongs to the OLD cluster's catalog and must not be
+    /// reused: crossing to a different cluster is exactly the case where re-resolving
+    /// the same human name is correct, since its GVK metadata (verbs, scope,
+    /// shortnames) can legitimately differ there.
+    fn rewatch(&mut self) -> Result<()> {
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let resource = connection
+            .catalog
+            .resolve(&self.state.query.resource, &connection.settings.aliases)?;
+        self.watch_resource(resource)
     }
     pub fn reduce(&mut self, event: Event) {
         if event.epoch != self.state.epoch {
@@ -206,7 +231,7 @@ impl Runtime {
                     if let Err(e) = self.navigate(query) {
                         self.state.error = Some(e.to_string());
                     }
-                } else if let Err(e) = self.watch() {
+                } else if let Err(e) = self.rewatch() {
                     self.state.error = Some(e.to_string());
                 }
             }
@@ -306,7 +331,12 @@ impl Runtime {
             return Ok(());
         }
         let connection = self.connection.as_ref().context("Not connected yet")?;
-        connection
+        // Resolve once, here, from the human-typed name. This is the ONLY point that
+        // should turn an alias/shortname into a canonical GVK: everything downstream
+        // (Refresh, namespace switches) must reuse this resolved `Resource`, not the
+        // string, so a name that was disambiguated once stays stable for this session
+        // even if the catalog changes later (a CRD colliding with it appears/disappears).
+        let resource = connection
             .catalog
             .resolve(&query.resource, &connection.settings.aliases)?;
         let filter = crate::filters::Expr::parse(query.filter.as_deref().unwrap_or(""))?;
@@ -326,7 +356,7 @@ impl Runtime {
         self.state.filter = filter;
         self.state.sort = "NAME".into();
         self.state.descending = false;
-        self.watch()
+        self.watch_resource(resource)
     }
     pub fn command(&mut self, text: &str) -> Result<()> {
         self.state.error = None;

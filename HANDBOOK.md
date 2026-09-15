@@ -129,7 +129,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Research and architecture | DESIGNED | sources inspected; docs created before code |
 | Build, CLI, tracing | IMPLEMENTING | next slice |
 | Kubeconfig/discovery/live resource store/table | ACCEPTED | observed live against kind-sauron-test; Refresh-after-refresh table-emptying bug found and fixed (see journal) |
-| Context/namespace/generic discovery/commands | ACCEPTED | context picker w/ per-context namespace memory (M2 item 1) and namespace picker w/ recents (M2 item 2) both observed live; history/breadcrumbs still pending (M2 item 4) |
+| Context/namespace/generic discovery/commands | ACCEPTED | context picker (M2 item 1), namespace picker (item 2), canonical-GVK resolution with deterministic non-silent alias/CRD ambiguity handling (item 3) all observed live; history/breadcrumbs still pending (item 4) |
 | Filters/sort/documents/events | ACCEPTED | regex fix, text filter, YAML, Explain, Events all observed live; sort cycling observed, not exhaustively |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
 | Exec/port-forward | RESEARCHED | M4; no actions exposed |
@@ -498,6 +498,95 @@ Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 M2 item 2 is ACCEPTED: namespace selector, `<all>`, recents, and rapid-switch resilience
 all observed live. Favorites (persisted, cross-session) were considered and deliberately
 left out — recents already cover the natural, low-risk case, and persistence would need
-config-file changes out of scope for this item. Next: M2 item 3, generic resources/CRDs/
-aliases resolving deterministically, attacking `:po → :pods → ambiguous-alias` and
-`pods → CRD → deployments → back → forward`.
+config-file changes out of scope for this item. ### 2026-09-15 — M2 item 3: canonical resource identity, deterministic alias/CRD
+### resolution, and a false-alarm crash investigation
+Structural fix first, requested explicitly: resource resolution must produce a
+canonical GVK identity before any watch starts, and nothing downstream may re-derive
+that identity from a human alias against a catalog that might have changed. Concretely,
+`Runtime::watch()` used to re-call `catalog.resolve(&state.query.resource, ...)` on
+every Refresh, namespace switch, and post-reconnect rewatch — meaning a name
+disambiguated once was never actually "locked in." Split into three methods:
+`watch_resource(resource: Resource)` (the only place that starts a watch, always given
+an already-resolved identity), `watch()` (reuses `state.resource`, for Refresh/
+namespace/all-namespaces — same catalog, must not re-resolve), and `rewatch()`
+(re-resolves `state.query.resource`'s text against the *current* connection's catalog,
+used only right after a context switch with no pending explicit navigation, since
+crossing to a different cluster is exactly when re-resolving the same name is correct).
+`navigate()` now resolves once and calls `watch_resource` directly. Also fixed two
+UI spots that displayed the raw alias/text instead of the resolved canonical name: the
+top header ("Resource: po" → "Resource: pods") and the table border title, both now
+read `state.resource.map(Resource::qualified)`.
+
+Rewrote `Catalog::resolve` for deterministic, non-silent ambiguity: it used to prefer
+a core (empty-group) match silently over other candidates, and matched shortnames
+case-sensitively with no ambiguity check at all. Now: explicit qualification (id form
+or `plural.group`) always wins outright, but only when the input is *actually*
+qualified (contains `/` or `.`) — a bare word like "widgets" must not accidentally
+match a core resource's `qualified()` just because a core resource's qualified form
+happens to have no group suffix (this was a second silent-preference bug introduced
+while fixing the first one, caught by the very unit test written to catch the first
+one). Plural/kind matches and shortname matches are each deduplicated by GVK id and
+bail with the full list of `plural.group` options whenever more than one distinct
+resource matches — never a silent pick, even when one candidate is core. The 12
+built-in aliases (`po`, `dp`/`deploy`, `svc`, ...) are now a shared `BUILTIN_ALIASES`
+table consulted case-insensitively before live discovery, matching kubectl precedent
+that they always win over a colliding CRD shortname; `discover()` now emits a
+`catalog.warnings` entry when a live CRD's shortname is shadowed this way, visible via
+`:info`, so the shadowing is never silent. A not-found error now says "discovery was
+partial, this is not proof it doesn't exist" instead of a flat not-found when
+`catalog.warnings` is non-empty. 6 new unit tests, including one that specifically
+encodes case-insensitivity for the built-in table (see the bug below).
+
+Added `tests/fixtures/ambiguous.yaml` + `ambiguous-instances.yaml`, applied by
+`scripts/test-cluster.sh fixtures`: `portals.a.sauron.test` (shortname `po`, colliding
+with the built-in), two CRDs both named `widgets`/kind `Widget` in different groups (a
+genuine cross-group collision), and a cluster-scoped `probes.a.sauron.test` CRD.
+
+Live acceptance against `kind-sauron-test`, attacking the case list given for this item:
+`:po`/`:pods` resolve to the identical GVK; `:widgets` (ambiguous) is rejected with both
+`plural.group` options listed, never silently picked, and `:widgets.a.sauron.test`
+disambiguates correctly to only that group's object; `:probes` shows
+"Namespace: n/a (cluster-scoped)" with no NAMESPACE column, confirming the
+cluster-scoped-vs-namespaced UI fix; the `po` shortname collision warning is visible via
+`:info`; deleting a CRD while actively watching it produces a visible WatchError, not a
+crash, and rows go to 0; deleting a CRD and then navigating to it for the first time
+(discovery cache still lists it, live API doesn't) produces a clean "404 Not Found"
+`WatchError`, not a crash; rapid repeated resource switching between `pods`/`eyes`/
+`probes`/`widgets.a.sauron.test` with zero settle time (three rounds) always converged
+to the correct final resource with no stale rows.
+
+Found and fixed a real bug this way: `BUILTIN_ALIASES` was matched case-sensitively
+(`*alias == query`), so `po` deterministically won (matching kubectl), but `PO` missed
+the built-in table entirely and fell through to genuine, *correct* discovery-based
+ambiguity detection against the new `portals` fixture (which also declares shortname
+`po`) — reporting an ambiguity error for `PO` that `po` never hit. Inconsistent:
+case-insensitivity has to be uniform or the built-in table's "always wins" guarantee
+silently stops applying depending on how you capitalize. Fixed by matching
+`BUILTIN_ALIASES` with `eq_ignore_ascii_case`. Regression test added with all four
+casings against a catalog that includes the colliding CRD.
+
+Spent real effort chasing what looked like a crash: after a successful `:PO`, pressing
+Escape "defensively" between commands, then typing a new command, would sometimes land
+in a shell prompt instead of the app, with the typed text executed as a shell command.
+No panic ever appeared in stderr across several `eprintln!`-instrumented repro attempts.
+Root cause, once isolated to the minimal sequence: `Action::Back` is bound to `esc,q`,
+and its fallback branch (`Mode::Table`, no active filter) sets `state.quit = true` —
+intentional "Esc at the root quits" behavior, the same pattern k9s and similar TUIs use.
+It was never a crash; it was the app correctly quitting because Escape was pressed while
+already at the top level with nothing left to back out of, and the test script's own
+"press Escape between commands to be safe" habit is exactly the input pattern that
+triggers it. No code change; noted here because it cost real time and is worth knowing
+before the next round of adversarial live testing: don't press Escape reflexively at
+Table with an empty filter unless you mean to quit.
+
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (29/29, six new) after all the above.
+
+M2 item 3 is ACCEPTED: canonical GVK identity end-to-end, deterministic non-silent
+alias/shortname/CRD resolution (case-insensitive, ambiguity-checked, cross-group-safe),
+cluster-scoped-vs-namespaced UI correctness, and graceful handling of a CRD deleted
+mid-session — all observed live, not inferred from unit tests. `pods → CRD →
+deployments → back → forward` restoring resource+namespace+context+selection is
+explicitly NOT covered here: there is no resource-level navigation history yet
+(`Action::Back` only leaves document mode, clears a filter, or quits) — that is M2 item
+4, next.

@@ -107,10 +107,33 @@ selection. Fixed by giving `Mode::Loading` its own arm where only Esc acts. Full
 including the false-negative re-test caused by testing against a stale tmux pane instead
 of a freshly restarted process, is in the HANDBOOK journal. 25/25 tests passing.
 
-Next: M2 item 3, generic resources/CRDs/aliases resolving deterministically — attack
-`:po → :pods → ambiguous-alias` and `pods → CRD → deployments → back → forward`. Then
-item 4 (history/breadcrumbs), item 5 (command palette), item 6 (M2 interactive
-acceptance trying to break it).
+Item 3 (generic resources/CRDs/aliases) is also done. `Runtime::watch()` no longer
+re-resolves `state.query.resource` on every Refresh/namespace switch — it reuses the
+already-resolved `Resource` (canonical GVK); only a context switch (`rewatch()`) or an
+explicit new navigation re-resolves by name. `Catalog::resolve` no longer silently
+prefers a core match or picks a shortname arbitrarily: any genuine cross-group
+ambiguity (plural, kind, or shortname) now errors with the `plural.group` options
+listed, and the 12 built-in aliases are matched case-insensitively (found live: they
+weren't, letting `PO` fall through to real ambiguity that `po` never hit — see
+HANDBOOK). `scripts/test-cluster.sh fixtures` now also applies
+`tests/fixtures/ambiguous.yaml`/`ambiguous-instances.yaml`: a CRD shortname colliding
+with a built-in, two CRDs sharing a plural/kind in different groups, and a
+cluster-scoped CRD. Verified live: `:po`/`:pods` identical, ambiguous `:widgets`
+rejected with both options listed, `plural.group` disambiguates, cluster-scoped
+`:probes` shows no NAMESPACE column and "n/a (cluster-scoped)", the shortname-collision
+warning is visible via `:info`, deleting a CRD mid-watch or navigating to one already
+deleted both produce a clean error (not a crash), and rapid resource switching
+(`pods`/`eyes`/`probes`/`widgets.a.sauron.test`, zero settle time, three rounds) always
+converged correctly. Also fixed the header/table-title UI to show the resolved
+canonical name instead of the raw typed alias. 29/29 tests passing (6 new).
+`pods → CRD → deployments → back → forward` restoring resource+namespace+context+
+selection is explicitly deferred to item 4 — there is no resource-navigation history
+yet. A suspected crash chased at length during this item turned out to be intentional
+`Esc`-at-root-quits behavior (see AGENTS.md), not a bug; no code change from it.
+
+Next: M2 item 4 (navigation history/breadcrumbs — `pods → CRD → deployments → back →
+forward`), item 5 (command palette centralized on the action registry), item 6 (M2
+interactive acceptance trying to break it).
 
 ## Tools
 

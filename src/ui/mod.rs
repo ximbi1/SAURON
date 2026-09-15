@@ -1,5 +1,6 @@
 use crate::{
     app::state::{Document, Mode, State},
+    kube::discovery::Resource,
     resources::{age_text, health::Severity},
 };
 use chrono::Utc;
@@ -93,10 +94,22 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         crate::brand::NAME,
         crate::safety::text(&state.context)
     );
+    let namespace_label = if state.resource.as_ref().is_some_and(|r| !r.namespaced) {
+        "n/a (cluster-scoped)".to_string()
+    } else {
+        state
+            .query
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "<all>".into())
+    };
     let scope = format!(
-        "Namespace: {}   Resource: {}",
-        state.query.namespace.as_deref().unwrap_or("<all>"),
-        state.query.resource
+        "Namespace: {namespace_label}   Resource: {}",
+        state
+            .resource
+            .as_ref()
+            .map(Resource::qualified)
+            .unwrap_or_else(|| state.query.resource.clone())
     );
     frame.render_widget(
         Paragraph::new(vec![
@@ -151,7 +164,11 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                 .collect();
             let title = format!(
                 " {} [{} / {}] · {} {} {} ",
-                state.query.resource,
+                state
+                    .resource
+                    .as_ref()
+                    .map(Resource::qualified)
+                    .unwrap_or_else(|| state.query.resource.clone()),
                 state.rows.len(),
                 state.store.objects.len(),
                 state.sort,

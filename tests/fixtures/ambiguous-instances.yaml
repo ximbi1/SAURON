@@ -1,0 +1,31 @@
+# Instances of the CRDs in ambiguous.yaml; apply only after they are Established.
+apiVersion: a.sauron.test/v1
+kind: Portal
+metadata:
+  name: gateway
+  namespace: sauron-fixtures
+spec:
+  destination: elsewhere
+---
+apiVersion: a.sauron.test/v1
+kind: Widget
+metadata:
+  name: gadget-a
+  namespace: sauron-fixtures
+spec:
+  color: blue
+---
+apiVersion: b.sauron.test/v1
+kind: Widget
+metadata:
+  name: gadget-b
+  namespace: sauron-fixtures
+spec:
+  color: red
+---
+apiVersion: a.sauron.test/v1
+kind: Probe
+metadata:
+  name: sensor
+spec:
+  target: cluster

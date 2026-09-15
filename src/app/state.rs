@@ -148,7 +148,8 @@ impl State {
     }
     pub fn columns(&self) -> Vec<String> {
         let mut columns = vec!["NAME".into()];
-        if self.query.namespace.is_none() {
+        let namespaced = self.resource.as_ref().is_none_or(|r| r.namespaced);
+        if self.query.namespace.is_none() && namespaced {
             columns.insert(0, "NAMESPACE".into());
         }
         if let Some(object) = self

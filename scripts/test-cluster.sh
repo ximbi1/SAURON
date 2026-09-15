@@ -23,6 +23,12 @@ case "${1:-check}" in
     kube_test apply -f "$repo_dir/tests/fixtures/workloads.yaml"
     kube_test wait --for=condition=Established crd/eyes.testing.sauron.local --timeout=30s
     kube_test apply -f "$repo_dir/tests/fixtures/eye.yaml"
+    # Deliberately ambiguous/colliding CRDs for resource-resolution acceptance.
+    kube_test apply -f "$repo_dir/tests/fixtures/ambiguous.yaml"
+    for crd in portals.a.sauron.test widgets.a.sauron.test widgets.b.sauron.test probes.a.sauron.test; do
+      kube_test wait --for=condition=Established "crd/$crd" --timeout=30s
+    done
+    kube_test apply -f "$repo_dir/tests/fixtures/ambiguous-instances.yaml"
     # Second context alias on the SAME isolated cluster, for context-switching
     # acceptance (picker, namespace-per-context memory). Not a second cluster.
     kubectl --kubeconfig "$test_kubeconfig" config set-context kind-sauron-test-b \

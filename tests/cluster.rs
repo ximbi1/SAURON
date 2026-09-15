@@ -26,7 +26,7 @@ async fn discovery_documents_explain_and_secrets() {
     let api = resource.api(connection.client.clone(), Some("sauron-fixtures"));
     let pod = api.get("unschedulable").await.expect("fixture pod");
     let object = Object::new(serde_json::to_value(pod).expect("serialize"));
-    let report = kube::evidence::document(&connection, &resource, &object, Action::Explain)
+    let report = kube::evidence::document(&connection, &resource, &object, Action::Explain, false)
         .await
         .expect("report");
     assert!(
@@ -43,7 +43,7 @@ async fn discovery_documents_explain_and_secrets() {
         .await
         .expect("secret fixture");
     let secret_object = Object::new(serde_json::to_value(secret_object).expect("serialize"));
-    let yaml = kube::evidence::document(&connection, &secret, &secret_object, Action::Yaml)
+    let yaml = kube::evidence::document(&connection, &secret, &secret_object, Action::Yaml, false)
         .await
         .expect("yaml");
     assert!(!yaml.contains("SAURON_TEST_SENTINEL_NEVER_DISPLAY"));

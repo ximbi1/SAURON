@@ -676,6 +676,18 @@ impl Runtime {
                     d.search_next(action == SearchPrevious);
                 }
             }
+            ToggleWarnings => {
+                let source = self
+                    .active_document_mut()
+                    .and_then(|d| d.source.as_mut())
+                    .context("No document open")?;
+                anyhow::ensure!(
+                    source.action == Action::Events,
+                    "Warning-only filtering only applies to the Events view"
+                );
+                source.warning_only = !source.warning_only;
+                self.refresh_document()?;
+            }
             HistoryBack => {
                 if let Some(entry) = self.history.pop_back() {
                     if let Some(current) = self.current_history_entry() {
@@ -734,6 +746,7 @@ impl Runtime {
             resource,
             selected: object,
             action,
+            warning_only: false,
         });
         self.state.mode = Mode::Document(doc);
         self.refresh_document()
@@ -754,8 +767,8 @@ impl Runtime {
         let tx = self.tx.clone();
         let cancel = self.document.clone();
         self.tasks.spawn(async move {
-            let document::Source { resource, selected:object, action } = source;
-            let result=tokio::select!{biased;_=cancel.cancelled()=>return,result=crate::kube::evidence::document(&connection,&resource,&object,action)=>result};
+            let document::Source { resource, selected:object, action, warning_only } = source;
+            let result=tokio::select!{biased;_=cancel.cancelled()=>return,result=crate::kube::evidence::document(&connection,&resource,&object,action,warning_only)=>result};
             let payload=match result{Ok(text)=>Payload::Document{request,title:format!("{action:?}: {}",object.name),text},Err(e)=>Payload::DocumentError{request,error:e.to_string()}};
             tokio::select!{_=cancel.cancelled()=>{},_=tx.send(Event{epoch,payload})=>{}}
         });

@@ -2,13 +2,15 @@
 use kube::{Client, Config, core::ApiResource};
 use sauron::{
     app::event::Payload,
+    command::Action,
     config::Settings,
     kube::{
         Connection,
         discovery::{Catalog, Resource},
-        watch::{self, Query},
+        evidence, watch,
+        watch::Query,
     },
-    resources::store::Store,
+    resources::{Object, store::Store},
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -252,4 +254,119 @@ async fn server_selectors_are_preserved_on_list_and_watch_with_local_filter() {
     cancel.cancel();
     task.await.expect("joined");
     assert!(seen.lock().expect("paths").len() >= 2);
+}
+
+fn selected_pod() -> Object {
+    Object::new(pod("u1", "1", "api"))
+}
+
+#[tokio::test]
+async fn events_403_is_visible_and_never_leaks_secrets() {
+    let server = Server::new(|path| {
+        if path.contains("/events") {
+            (403,json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","message":"Bearer TOP_SECRET","code":403}).to_string())
+        } else {
+            (200, pod("u1", "1", "api").to_string())
+        }
+    })
+    .await;
+    let text = evidence::document(
+        &connection(server.client()),
+        &resource(),
+        &selected_pod(),
+        Action::Events,
+        false,
+    )
+    .await
+    .expect("Events document still succeeds when related Events are forbidden");
+    assert!(text.contains("Forbidden"), "{text}");
+    assert!(!text.contains("TOP_SECRET"), "{text}");
+    assert!(text.contains("No Events returned"), "{text}");
+}
+
+#[tokio::test]
+async fn events_partial_continue_token_is_reported() {
+    let server = Server::new(|path| {
+        if path.contains("/events") {
+            (200, json!({"apiVersion":"v1","kind":"EventList","metadata":{"continue":"more"},"items":[
+                {"type":"Normal","reason":"Scheduled","message":"ok","count":1,"lastTimestamp":"2026-09-15T10:00:00Z","involvedObject":{"uid":"u1"}}
+            ]}).to_string())
+        } else {
+            (200, pod("u1", "1", "api").to_string())
+        }
+    })
+    .await;
+    let text = evidence::document(
+        &connection(server.client()),
+        &resource(),
+        &selected_pod(),
+        Action::Events,
+        false,
+    )
+    .await
+    .expect("document");
+    assert!(
+        text.contains("PARTIAL: related Events limited to 200"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn warning_only_filters_events_and_a_null_timestamp_field_falls_through() {
+    let server = Server::new(|path| {
+        if path.contains("/events") {
+            (
+                200,
+                json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[
+                    // A present-but-null lastTimestamp (very common on real core v1 Events)
+                    // must not win over the real eventTime later in the fallback chain.
+                    {"type":"Normal","reason":"Pulled","message":"image pulled","count":1,
+                     "lastTimestamp":null,"eventTime":"2026-09-15T10:05:00.000000Z",
+                     "involvedObject":{"uid":"u1"}},
+                    {"type":"Warning","reason":"BackOff","message":"crash looping","count":9,
+                     "lastTimestamp":"2026-09-15T10:06:00Z",
+                     "involvedObject":{"uid":"u1","fieldPath":"spec.containers{worker}"}},
+                ]})
+                .to_string(),
+            )
+        } else {
+            (200, pod("u1", "1", "api").to_string())
+        }
+    })
+    .await;
+    let all = evidence::document(
+        &connection(server.client()),
+        &resource(),
+        &selected_pod(),
+        Action::Events,
+        false,
+    )
+    .await
+    .expect("document");
+    assert!(all.contains("Pulled") && all.contains("BackOff"), "{all}");
+    assert!(
+        all.contains("2026-09-15T10:05:00"),
+        "null lastTimestamp must fall through to eventTime: {all}"
+    );
+    assert!(
+        !all.contains("null "),
+        "a present-but-null field must never be displayed as a timestamp: {all}"
+    );
+    assert!(
+        all.contains("(spec.containers{worker})"),
+        "fieldPath should be shown: {all}"
+    );
+
+    let warnings_only = evidence::document(
+        &connection(server.client()),
+        &resource(),
+        &selected_pod(),
+        Action::Events,
+        true,
+    )
+    .await
+    .expect("document");
+    assert!(!warnings_only.contains("Pulled"), "{warnings_only}");
+    assert!(warnings_only.contains("BackOff"), "{warnings_only}");
+    assert!(warnings_only.contains("(Warning only)"), "{warnings_only}");
 }

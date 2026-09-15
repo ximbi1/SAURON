@@ -36,6 +36,7 @@ pub enum Action {
     ScrollRight,
     HistoryBack,
     HistoryForward,
+    ToggleWarnings,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -188,6 +189,13 @@ pub fn registry() -> Vec<Binding> {
             "document",
             "Toggle fullscreen",
             "F",
+        ),
+        (
+            Action::ToggleWarnings,
+            "toggle_warnings",
+            "document",
+            "Events: Warning only (toggle)",
+            "W",
         ),
         (
             Action::SearchNext,

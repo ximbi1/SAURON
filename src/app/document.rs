@@ -16,6 +16,10 @@ pub struct Source {
     pub resource: Resource,
     pub selected: SharedObject,
     pub action: Action,
+    /// Events-only display filter (Warning severity); ignored by every other action.
+    /// Lives on the refresh source, not a separate Document field, so toggling it goes
+    /// through the exact same re-fetch-and-UID-check path as a manual Refresh.
+    pub warning_only: bool,
 }
 #[derive(Clone, Debug)]
 pub enum Freshness {

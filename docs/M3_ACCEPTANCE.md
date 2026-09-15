@@ -102,12 +102,53 @@ holds it while the palette is open); this supersedes the M2 finding that documen
 old discard-on-palette behavior as intentional -- it was a limitation worth removing once a
 correct restore mechanism existed, not a permanent design choice.
 
-## 4. Events — DESIGNED
+## 4. Events — ACCEPTED
 
-UID correlation, Warning toggle, explicit timestamp precedence, count/reason/type/message/
-reference, bounded partial notice, no-events retention caveat. Fake 403/timeout/partial;
-live Normal/Warning/empty/refresh/deleted target/context/history/replaced UID. Related-object
-navigation only if it fits canonical identities cleanly; otherwise explicitly defer it.
+Evidence: `cargo fmt --check`, locked all-target check/clippy/test pass (49 unit + 7
+fake HTTP, 3 new for this item). Live acceptance against `kind-sauron-test` with a
+freshly rebuilt binary, manual tmux session.
+
+| Case | Evidence | Status |
+| --- | --- | --- |
+| UID correlation | Server-side `involvedObject.uid=` field selector (pre-existing); reconfirmed live on a freshly recreated Pod with a new UID | PASS |
+| Warning toggle | New `W` / `:toggle_warnings` action, scoped to `Source.warning_only`; live toggle on/off on real mixed Normal/Warning events; errors clearly ("only applies to the Events view") when not viewing Events | PASS |
+| count/reason/type/message/fieldPath | All shown; `involvedObject.fieldPath` (e.g. `spec.containers{worker}`) now appended when present — previously silently dropped | PASS |
+| Bounded partial notice | Existing `limit(200)` + `continue` token check; fake-HTTP test added (`events_partial_continue_token_is_reported`) | PASS |
+| No-events retention caveat | Live on a CRD instance with genuinely zero related Events; wording distinguishes "no events at all" from "no Warning events among N total" when the toggle is active | PASS |
+| Fake 403 | `events_403_is_visible_and_never_leaks_secrets`: Events document still returns Ok with the Forbidden message and the bearer token redacted, never panics | PASS |
+| Fake partial (continue token) | `events_partial_continue_token_is_reported` | PASS |
+| Fake timeout | Not added — the existing per-call `tokio::time::timeout(connection.timeout(), ...)` wrapper is the same mechanism already exercised for the Pod-identity GET elsewhere; a dedicated fake-hang harness for this specific call was judged not worth the test-infrastructure cost this pass. Documented gap, not silently skipped. |
+| Live Normal/Warning/empty/refresh/deleted-target/context/history/replaced-UID | All exercised: mixed real events with the toggle; a CRD instance with no events; `r` refetching in place; deleting the target then `r` → "NOT CURRENT" 404; switching context (returns to the table, matching the existing document-doesn't-survive-context-switch behavior); back/forward after a context switch correctly restores the table, not stale Events state; recreating the same-named Pod and opening Events again shows the NEW UID's fresh (empty) events, never the old UID's | PASS |
+| Related-object navigation | Explicitly DEFERRED, as the ledger permits: every Event already correlates to the single currently-selected object (server-side UID filter), so there is no *different* related object to navigate to from this view without a materially larger feature (arbitrary-object jump from free-text event fields) that doesn't fit the canonical-identity contract cleanly yet. |
+
+Found and fixed one real gap, and investigated one suspected bug that turned out not
+to be reachable:
+- **Real**: `involvedObject.fieldPath` was read nowhere; added it to the rendered line
+  when present, and to the corresponding fake-HTTP test.
+- **Investigated, not a live bug**: considered whether `event.get("lastTimestamp")`
+  returning `Some(Value::Null)` for a present-but-null field could stop the
+  `.or_else()` timestamp fallback chain before reaching a real value (`eventTime`,
+  `creationTimestamp`). Checked `k8s-openapi`'s hand-written `Serialize` impl for
+  `Event` directly (`event.rs`, `last_timestamp`/`event_time`/etc. are only
+  `serialize_field`'d `if let Some(value) = &self.x`): every `Option` field is
+  *omitted* when `None`, never emitted as JSON `null`. Since `events()` always goes
+  through this typed `KubeEvent -> serde_json::Value` round-trip, a field that's
+  absent from the wire response (or explicitly `null`, which deserializes to `None`
+  the same way) always ends up *absent* in the `Value`, not `Value::Null` — so
+  `.or_else()`'s existing behavior was already correct for every reachable case.
+  Hardened the fallback to explicitly skip `Value::Null` anyway (`.find(|v|
+  !v.is_null())`, zero cost, strictly not worse) in case a future dependency version
+  or a different code path changes that serialization behavior, but this is NOT
+  claimed as a fixed live bug — the regression test added for it
+  (`warning_only_filters_events_and_a_null_timestamp_field_falls_through`) verifies
+  the fallback chain and the fieldPath/toggle behavior, not a demonstrated prior
+  failure, since none could be constructed.
+
+Contract: one Events view per selected object (server-filtered by UID), rendered
+through the same `Document`/`Freshness`/UID-pin machinery as Yaml/Describe/Explain.
+`Source.warning_only` is a display filter applied to the already-fetched, already
+bounded (200) event list — toggling it re-fetches (via the normal Refresh path) rather
+than caching raw events on the client, keeping `Document` itself GVK/action-agnostic.
 
 ## 5. Tables / CRD printer columns — DESIGNED
 

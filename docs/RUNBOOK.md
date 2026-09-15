@@ -29,7 +29,8 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
 verified before M3; worktree initially clean. M3 items 1 (filters), 2 (typed stable
-sorting), and 3 (shared document viewer) are ACCEPTED. Item 4 (Events) is next.
+sorting), 3 (shared document viewer), and 4 (Events) are ACCEPTED. Item 5 (server
+Tables/CRD columns) is next.
 Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 must stay read-only.
 Latest full fmt/check/clippy clean, 49 unit + 4 fake-HTTP tests passed. Fake HTTP needs
 loopback permission outside sandbox. `cargo build --locked` followed by
@@ -59,7 +60,27 @@ Full live checklist (nav, horizontal scroll, search incl. no-match, update/delet
 same-name-replace-then-refresh, palette-over-document, 32x9, fullscreen, logs, clean
 exit) passed by hand against `kind-sauron-test`; case-by-case evidence in
 `M3_ACCEPTANCE.md`. Document contract: [DOCUMENTS.md](DOCUMENTS.md). 49/49 tests
-passing. Next: item 4, Events.
+passing.
+
+Item 4 (Events) is done: a Warning-only toggle (`W` / `:toggle_warnings`, scoped to
+`document::Source.warning_only`, re-fetches through the normal Refresh/UID-pin path)
+and `involvedObject.fieldPath` display (previously read nowhere) added to the existing
+UID-correlated Events view. Three new fake-HTTP tests (403 with secret redaction still
+intact, `continue`-token PARTIAL notice, mixed Normal/Warning + toggle + timestamp
+fallback). Investigated but did NOT confirm a suspected null-timestamp bug: traced
+`k8s-openapi`'s `Event` `Serialize` impl directly and found every optional field is
+omitted (never emitted as JSON `null`) when unset, so the theorized failure mode
+cannot occur via the real API round-trip — hardened the fallback chain defensively
+anyway (free, strictly not worse) but recorded honestly as a non-bug, not a fixed live
+one. Live: mixed real events with fieldPath and the toggle; a CRD with zero events;
+refresh; delete-then-refresh (NOT CURRENT); context switch + back/forward (correctly
+returns to the table, no leaked Events/toggle state); same-name Pod recreation with a
+new UID showing fresh events, never stale ones. Related-object navigation explicitly
+deferred (fits the ledger's own escape clause: every Event already correlates to the
+one selected object via the server-side UID filter). A fake-timeout test for
+`events()` was not added — acknowledged gap, not silently skipped; the mechanism is
+the same per-call timeout wrapper already exercised elsewhere. 49 unit + 7 fake-HTTP
+tests passing. Next: item 5, server Tables/CRD printer columns.
 
 ## Historical M1 checkpoint
 

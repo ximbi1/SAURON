@@ -16,6 +16,7 @@ pub async fn document(
     resource: &Resource,
     selected: &Object,
     action: Action,
+    warning_only: bool,
 ) -> Result<String> {
     let api = resource.api(connection.client.clone(), Some(&selected.namespace));
     let fresh = tokio::time::timeout(connection.timeout(), api.get(&selected.name))
@@ -45,22 +46,42 @@ pub async fn document(
         return Ok(crate::explain::report(&object, &events, &warnings));
     }
     if action == Action::Events {
+        let total = events.len();
+        let shown: Vec<&serde_json::Value> = if warning_only {
+            events.iter().filter(|e| e["type"] == "Warning").collect()
+        } else {
+            events.iter().collect()
+        };
         let mut text = format!(
-            "Events for {}/{}; UID={}\n{}\n\n",
+            "Events for {}/{}; UID={}{}\n{}\n\n",
             object.kind,
             object.name,
             object.uid,
+            if warning_only { " (Warning only)" } else { "" },
             warnings.join("\n")
         );
-        for event in &events {
-            let time = event
-                .pointer("/series/lastObservedTime")
-                .or_else(|| event.get("lastTimestamp"))
-                .or_else(|| event.get("eventTime"))
-                .or_else(|| event.pointer("/metadata/creationTimestamp"));
+        for event in &shown {
+            // Present-but-null fields (very common: core v1 Events rarely set every
+            // timestamp field) must not win over a real value later in the chain --
+            // `Option::or_else` alone stops at the first `Some`, even `Some(Value::Null)`.
+            let time = [
+                event.pointer("/series/lastObservedTime"),
+                event.get("eventTime"),
+                event.get("lastTimestamp"),
+                event.pointer("/metadata/creationTimestamp"),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|v| !v.is_null());
+            let field_path = event
+                .pointer("/involvedObject/fieldPath")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
             text.push_str(&format!(
-                "{} {} {} count={}\n{}\n\n",
-                time.map(|v| v.to_string())
+                "{} {} {} count={}{field_path}\n{}\n\n",
+                time.map(ToString::to_string)
                     .unwrap_or_else(|| "unknown time".into()),
                 event["type"].as_str().unwrap_or("?"),
                 event["reason"].as_str().unwrap_or("?"),
@@ -68,10 +89,16 @@ pub async fn document(
                 event["message"].as_str().unwrap_or("")
             ));
         }
-        if events.is_empty() {
-            text.push_str(
-                "No Events returned. Event retention is limited; absence is not proof of health.\n",
-            );
+        if shown.is_empty() {
+            if warning_only && total > 0 {
+                text.push_str(&format!(
+                    "No Warning Events among {total} related Event(s). Event retention is limited; absence is not proof of health.\n"
+                ));
+            } else {
+                text.push_str(
+                    "No Events returned. Event retention is limited; absence is not proof of health.\n",
+                );
+            }
         }
         return Ok(crate::safety::text(&text));
     }

@@ -235,14 +235,64 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 M1 and M2 are ACCEPTED. Verified local annotated `m2-accepted` points to
 `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; initial M3 worktree was clean.
 This is a reference/rollback checkpoint, not permission to discard user changes.
-Items 1-3 (filters, sorting, documents) are ACCEPTED. Current: M3 item 4, Events, then
-item 5 (server Tables/CRD columns), item 6 (combined adversarial live acceptance).
+Items 1-4 (filters, sorting, documents, Events) are ACCEPTED. Current: M3 item 5
+(server Tables/CRD columns), then item 6 (combined adversarial live acceptance).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 remains entirely read-only.
 No `m3-accepted` until every required slice and combined live flow is demonstrated.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
 isolated unit tests alone. Keep buildable handoffs.
 
 ## Journal
+
+### 2026-09-15 — M3 item 4 accepted (Events)
+Added a Warning-only toggle (`W` / `:toggle_warnings`, scoped to the new
+`document::Source.warning_only` field) so the existing UID-correlated Events view can
+show just Warning-severity events; toggling re-fetches through the exact same
+`refresh_document()`/UID-pin path as a manual Refresh, keeping `Document` itself
+action-agnostic (it never caches raw event JSON, only rendered text). Added
+`involvedObject.fieldPath` to the rendered line (e.g. `(spec.containers{worker})`) --
+previously read nowhere despite pinpointing which part of the object an event is
+about. Added three fake-HTTP tests: a 403 on the Events list (still returns Ok with
+the message shown and the bearer token redacted, never panics), a `continue` token
+(the existing PARTIAL notice), and mixed Normal/Warning events exercising both the
+toggle and the timestamp fallback chain.
+
+Investigated, but did NOT confirm, a suspected bug: whether a present-but-`null` JSON
+field (e.g. `lastTimestamp`) could make `.or_else()` stop before reaching a real
+timestamp later in the fallback chain (`eventTime`, then `metadata.creationTimestamp`).
+Checked `k8s-openapi`'s hand-written `Event` `Serialize` impl directly: every optional
+field is `serialize_field`'d only `if let Some(_)`, so a `None` field is always
+*omitted* from the JSON, never emitted as `null` -- and a `null` on the wire
+deserializes to `None` the same way, so it's omitted too on the way back out. Since
+`events()` always round-trips through this typed struct, the "present but null" case
+this theory worried about cannot actually occur via the real API path; the existing
+`.or_else()` chain was already correct for every case that's actually reachable.
+Hardened the chain anyway to skip `Value::Null` explicitly (`.find(|v| !v.is_null())`)
+since it's free and strictly not worse, but this is recorded honestly as a
+non-bug/defensive-hardening, not a fixed live bug -- the discipline of finding root
+cause before claiming a fix cuts both ways: it also means not overclaiming one that
+isn't there once actually traced to source.
+
+Live acceptance against `kind-sauron-test`: mixed real Normal/Warning events on
+`crashloop` with `fieldPath` showing correctly; the Warning toggle on/off, and a clear
+error when tried on a non-Events document; a CRD instance (`observatory`) with
+genuinely zero related Events; Refresh re-fetching in place; deleting the target then
+Refresh showing "NOT CURRENT" with a real 404, not stale content; a context switch
+(returns to the table, matching the existing document-doesn't-survive-a-context-switch
+behavior) and Back/Forward afterward correctly restoring the table rather than leaking
+Events/Warning-only state; recreating the same-named Pod with a new UID and reopening
+Events showing that new UID's fresh (empty) events, never the deleted one's stale
+data. Related-object navigation explicitly deferred (the ledger permits this): every
+Event already correlates to the single selected object via the server-side UID filter,
+so there is no *different* related object to jump to from this view without a
+materially larger feature that doesn't fit the canonical-identity contract yet.
+A fake-timeout test for `events()` was not added -- the mechanism is the same
+per-call `tokio::time::timeout` wrapper already used and exercised elsewhere in this
+file; a dedicated hang-simulation harness for this one call site was judged not worth
+building this pass. Documented as a real, acknowledged gap, not silently skipped.
+Full case-by-case evidence in `docs/M3_ACCEPTANCE.md` item 4.
+Re-ran `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test
+--all-targets` (49 unit + 7 fake-HTTP) after implementing. Fixture state reconciled.
 
 ### 2026-09-15 — M3 item 3 accepted (shared document viewer)
 Picked up mid-implementation (`src/app/document.rs`, unicode-aware wrap/layout/search,

@@ -140,6 +140,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Pod logs | ACCEPTED, incl. M4.1 advanced | multi-source/init/ephemeral/pause/search/filter/eviction live-proven; docs/LOGS.md |
 | M4 session foundation | ACCEPTED | 62 unit + 11 fake HTTP; live scripts/accept-m4.py, exact palette race replay and stty restoration |
 | Exec (one-shot + interactive shell) | ACCEPTED | readonly-gated, UID-pinned, TerminalHandoff-based; live-proven incl. Ctrl-C/Ctrl-D/Pod-death/network-cut/resize; docs/EXEC.md |
+| Attach | ACCEPTED | reuses shell's terminal guard/forwarding loop; requires container stdin+tty; Ctrl-] local-only detach; docs/EXEC.md |
 | Exec/attach/port-forward | RESEARCHED | locked kube-client 4.2.0 APIs inspected; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
@@ -243,13 +244,12 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. M4.0 (session foundation) and
-all of M4.2 (one-shot exec and interactive shell) are ACCEPTED. Current: M4.2b
-(attach, deferred call-site plumbing over the same terminal guard) or M4.3
+isolated unit tests alone. Keep buildable handoffs. M4.0, M4.2 (one-shot exec +
+interactive shell), and M4.2b (attach) are all ACCEPTED. Current: M4.3
 (port-forward manager) next, then M4.4 (combined acceptance + soak). One known,
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
-can occasionally swallow one input chunk right after a shell session ends,
-mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
+can occasionally swallow one input chunk right after a shell/attach session
+ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -273,6 +273,53 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.2b attach accepted; a real hang found and fixed on the first live test
+
+Confirmed the user's own prediction: attach needed no new terminal mechanics,
+only call-site plumbing over M4.2's already-proven guard. Extracted
+`forward_interactive()` (the byte-relay loop, resize polling, and status
+handling) out of `interactive()` so `attach()` -- calling `Api::attach` instead
+of `Api::exec`, no argv, no new process -- could reuse it verbatim. Added
+`ShellRequest`/`AttachRequest` selection sharing the same `resolve_container()`
+helper, and a new `Runtime` field generalized from `pending_shell` to
+`pending_interactive` (an `Interactive::{Shell,Attach}` enum) so `run()`'s one
+terminal-handoff call site serves both. Gated attach on the container's own
+Pod spec advertising `stdin: true, tty: true` (Kubernetes allocates no PTY
+otherwise); refused explicitly, pointing at `:logs`, rather than silently
+degrading to a read-only view nobody asked for.
+
+**Found and fixed a real hang on the very first live attach test.** Attached
+to `m4-sessions`' `worker` container (a `while true; do echo M4_WORKER_LIVE;
+sleep 1; done` loop that never reads stdin -- the realistic case for
+attaching to an already-running process that was not started expecting
+input). Output streamed correctly, but Ctrl-D -- which correctly ends a
+`:shell` session because a real shell explicitly reacts to it -- did nothing
+here, and the forwarding loop's "keep draining remote output until it
+closes" tail waited forever for output that would never stop, freezing the
+whole TUI. Root cause: attach has no guarantee the remote process reads or
+reacts to stdin at all, unlike a shell. Fixed by adding a local-only detach
+key, `Ctrl-]` (`0x1D`, the byte telnet and other terminal tools traditionally
+use for this exact purpose), that ends the session unconditionally without
+ever signaling the remote -- confirmed live via `kubectl get pod`/`logs`
+immediately after detaching that the container was still `Running` with 0
+restarts and output still flowing, i.e. genuinely unaffected. This mirrors
+the "cancellation ends local observation, never remote rollback" distinction
+`docs/SESSIONS.md` already drew for background sessions, applied here to a
+foreground one.
+
+Live-accepted against `kind-sauron-test`, fresh binary: explicit rejection of
+a container without `stdin`+`tty` with zero connection attempts; real output
+from the already-running process; the `Ctrl-]` detach leaving it running and
+unaffected; the target Pod force-deleted mid-session ending cleanly rather
+than hanging; a final quit from SAURON with exact `stty` state preserved
+throughout. Added test fixture change: `m4-sessions`' `worker` container now
+declares `stdin: true, tty: true` (needed for attach to be interactive at
+all; harmless to the existing `:shell`/`:exec`/`:logs` tests against it,
+since those go through `exec`, which starts its own process regardless of
+the container's own stdin/tty flags). 72 unit + 11 fake HTTP tests passing
+throughout (2 new: container stdin+tty gating, attach container-selection
+parity with exec/shell); fmt/check/clippy clean. No production calls.
 
 ### 2026-09-16 — M4.2 interactive shell accepted; crash found+fixed, one limitation bounded+documented
 

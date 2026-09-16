@@ -32,12 +32,13 @@ pub struct Runtime {
     document: CancellationToken,
     pending: Option<ResourceCommand>,
     pending_history: Option<state::HistoryEntry>,
-    /// Set by `open_shell()`, consumed by `run()` right after each key/event
-    /// dispatch. Interactive shell is foreground and blocking -- unlike logs/exec
-    /// output, nothing else in the app runs concurrently with it -- so it does not
-    /// go through `Sessions`; `run()` itself owns suspending/resuming the terminal
-    /// (see `app::terminal::TerminalHandoff`) around the one call that runs it.
-    pending_shell: Option<crate::kube::exec::ShellRequest>,
+    /// Set by `open_shell()`/`open_attach()`, consumed by `run()` right after each
+    /// key/event dispatch. Both are foreground and blocking -- unlike logs/exec
+    /// output, nothing else in the app runs concurrently with either -- so neither
+    /// goes through `Sessions`; `run()` itself owns suspending/resuming the
+    /// terminal (see `app::terminal::TerminalHandoff`) around the one call that
+    /// runs whichever is pending.
+    pending_interactive: Option<Interactive>,
     palette_document: Option<Document>,
     namespace_by_context: std::collections::HashMap<String, Option<String>>,
     recent_namespaces: std::collections::VecDeque<String>,
@@ -48,6 +49,11 @@ pub struct Runtime {
 /// session. 100 is generous for a "how did I get here" trail without being a memory
 /// concern -- each entry is a handful of short strings, never store/rows data.
 const HISTORY_LIMIT: usize = 100;
+/// Either kind of foreground, blocking, terminal-owning session `run()` can run.
+enum Interactive {
+    Shell(crate::kube::exec::ShellRequest),
+    Attach(crate::kube::exec::AttachRequest),
+}
 impl Runtime {
     pub fn new(
         options: ConnectOptions,
@@ -72,7 +78,7 @@ impl Runtime {
                 document: CancellationToken::new(),
                 pending: None,
                 pending_history: None,
-                pending_shell: None,
+                pending_interactive: None,
                 palette_document: None,
                 namespace_by_context: std::collections::HashMap::new(),
                 recent_namespaces: std::collections::VecDeque::new(),
@@ -705,6 +711,13 @@ impl Runtime {
                 );
                 self.open_shell(container, shell)
             }
+            Command::Attach { container } => {
+                anyhow::ensure!(
+                    !self.state.settings.readonly,
+                    "Attach is unavailable in read-only mode"
+                );
+                self.open_attach(container)
+            }
         }
     }
     pub fn action(&mut self, action: Action) -> Result<()> {
@@ -1041,11 +1054,11 @@ impl Runtime {
         self.state.mode = Mode::Document(doc);
         Ok(())
     }
-    /// Queues an interactive shell request; `run()` picks it up right after this
-    /// key/command dispatch returns and does the actual terminal handoff. Does
-    /// nothing to `state.mode`/`connection`/`document` here -- unlike every other
-    /// document-opening action, an interactive shell is not a `Mode::Document` and
-    /// does not touch the table's current view at all while it runs.
+    /// Queues an interactive shell/attach request; `run()` picks it up right after
+    /// this key/command dispatch returns and does the actual terminal handoff.
+    /// Does nothing to `state.mode`/`connection`/`document` here -- unlike every
+    /// other document-opening action, these are not a `Mode::Document` and do not
+    /// touch the table's current view at all while they run.
     fn open_shell(&mut self, container: Option<String>, shell: Option<String>) -> Result<()> {
         let object = self.state.selected_object().context("Select a Pod first")?;
         let request = crate::kube::exec::ShellRequest {
@@ -1054,11 +1067,23 @@ impl Runtime {
             shell,
         };
         crate::kube::exec::shell_container(&request)?;
-        self.pending_shell = Some(request);
+        self.pending_interactive = Some(Interactive::Shell(request));
         Ok(())
     }
-    fn take_pending_shell(&mut self) -> Option<crate::kube::exec::ShellRequest> {
-        self.pending_shell.take()
+    fn open_attach(&mut self, container: Option<String>) -> Result<()> {
+        let object = self.state.selected_object().context("Select a Pod first")?;
+        let request = crate::kube::exec::AttachRequest { object, container };
+        let resolved = crate::kube::exec::attach_container(&request)?;
+        anyhow::ensure!(
+            crate::kube::exec::container_supports_interactive_attach(&request.object, &resolved),
+            "Container {resolved} was not started with stdin+tty (required for an \
+             interactive attach); use :logs to view its output instead"
+        );
+        self.pending_interactive = Some(Interactive::Attach(request));
+        Ok(())
+    }
+    fn take_pending_interactive(&mut self) -> Option<Interactive> {
+        self.pending_interactive.take()
     }
     fn session_finished(&mut self, record: session::Record) {
         if record.scope.epoch != self.state.epoch || record.scope.request != self.state.request {
@@ -1152,16 +1177,17 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
     frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     runtime.connect(None);
-    // Set right after resuming from an interactive shell; cleared on the very
-    // next key regardless. Works around a real, root-caused limitation (see
-    // docs/EXEC.md): whenever `run_shell()`'s forwarding loop ends with a local
-    // stdin read still in flight (the common case: the OTHER select! branch,
-    // remote closure, wins the race -- observed after both a typed "exit" and a
-    // local Ctrl-D, so this is not reliably tied to which side initiates the
-    // close), that read is left orphaned -- tokio::io::Stdin's blocking-pool
-    // read cannot be cancelled on Unix. It silently consumes exactly the next
-    // available chunk of real stdin data (byte-traced live: observed eating an
-    // entire subsequently-typed command) before self-terminating, after which a
+    // Set right after resuming from an interactive shell or attach; cleared on
+    // the very next key regardless. Works around a real, root-caused limitation
+    // (see docs/EXEC.md): whenever `run_interactive()`'s forwarding loop ends
+    // with a local stdin read still in flight (the common case: the OTHER
+    // select! branch, remote closure, wins the race -- observed after both a
+    // typed "exit" and a local Ctrl-D, so this is not reliably tied to which
+    // side initiates the close), that read is left orphaned -- tokio::io::Stdin's
+    // blocking-pool read cannot be cancelled on Unix. It silently consumes
+    // exactly the next available chunk of real stdin data (byte-traced live:
+    // observed eating an entire subsequently-typed command) before
+    // self-terminating, after which a
     // trailing bare Enter is what the fresh EventStream actually sees and
     // delivers. Discarding that one bare Enter converts what would otherwise be
     // a wrong action (opening the wrong document under a misdelivered Enter)
@@ -1263,8 +1289,9 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                 Some(event)=rx.recv()=>{runtime.reduce(event);for _ in 0..63{match rx.try_recv(){Ok(event)=>runtime.reduce(event),Err(_)=>break}}},
                 Some(result)=runtime.tasks.join_next(),if !runtime.tasks.is_empty()=>{if result.is_err(){runtime.state.error=Some("Background task failed; refresh to retry".into());runtime.state.dirty=true;}},
             }
-            if let Some(request) = runtime.take_pending_shell() {
-                let (new_input, status) = run_shell(&mut terminal, input, &runtime, request).await?;
+            if let Some(request) = runtime.take_pending_interactive() {
+                let (new_input, status) =
+                    run_interactive(&mut terminal, input, &runtime, request).await?;
                 input = new_input;
                 runtime.state.status = status;
                 runtime.state.dirty = true;
@@ -1283,31 +1310,46 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
 /// resumes normal key handling regardless of how the shell ended (clean exit,
 /// Ctrl-D, remote disconnect, or a local I/O error -- the `TerminalHandoff` guard
 /// restores the alternate screen even on that last, error, path).
-async fn run_shell(
+async fn run_interactive(
     terminal: &mut ratatui::DefaultTerminal,
     input: EventStream,
     runtime: &Runtime,
-    request: crate::kube::exec::ShellRequest,
+    request: Interactive,
 ) -> Result<(EventStream, String)> {
     drop(input);
+    let label = match &request {
+        Interactive::Shell(_) => "Shell",
+        Interactive::Attach(_) => "Attach",
+    };
     let outcome = {
         let _handoff = terminal::TerminalHandoff::enter()?;
         match &runtime.connection {
             None => Err(anyhow::anyhow!("Not connected")),
-            Some(connection) => {
-                crate::kube::exec::interactive(
-                    connection,
-                    &request,
-                    tokio::io::stdin(),
-                    tokio::io::stdout(),
-                )
-                .await
-            }
+            Some(connection) => match request {
+                Interactive::Shell(request) => {
+                    crate::kube::exec::interactive(
+                        connection,
+                        &request,
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                    )
+                    .await
+                }
+                Interactive::Attach(request) => {
+                    crate::kube::exec::attach(
+                        connection,
+                        &request,
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                    )
+                    .await
+                }
+            },
         }
     };
     // The alternate screen was just re-entered (guard dropped above); Ratatui's
     // own diff buffer does not know that, so force a full repaint next frame
-    // rather than only redrawing what it thinks changed since the shell started.
+    // rather than only redrawing what it thinks changed since the session started.
     // Deliberately `resize()`, not `Terminal::clear()`: for a Fullscreen viewport
     // resize() clears without querying the backend's cursor position, while
     // clear() always does (to restore it afterward) -- that query sends a DSR
@@ -1317,9 +1359,9 @@ async fn run_shell(
     let size = terminal.size()?;
     terminal.resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))?;
     let status = match outcome {
-        Ok(session::Outcome::Completed) => "Shell ended".to_string(),
-        Ok(other) => format!("Shell {}", session::State::Ended(other).label()),
-        Err(e) => format!("Shell failed: {e}"),
+        Ok(session::Outcome::Completed) => format!("{label} ended"),
+        Ok(other) => format!("{label} {}", session::State::Ended(other).label()),
+        Err(e) => format!("{label} failed: {e}"),
     };
     // Root cause (found live, confirmed by tracing every received key event): a
     // byte actually intended for the remote shell can land, mid-session, in

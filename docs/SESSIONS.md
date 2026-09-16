@@ -29,7 +29,13 @@ connections, not transactions performed through them. Logs have no mutation auth
 
 Existing terminal guard restores Ratatui at final exit. `app::terminal::TerminalHandoff`
 (RAII, leaves/re-enters only the alternate screen, never touches raw mode) now
-provides interactive suspension for the shell, exercised centrally in `run()`'s
-loop; attach will reuse it directly. See `docs/EXEC.md` for the one known,
-bounded limitation this uncovered (an uncancellable stdin read can occasionally
-swallow one input chunk right after a session ends).
+provides interactive suspension for both shell and attach, exercised centrally
+in `run()`'s loop via one `Interactive::{Shell,Attach}` pending slot and a
+shared `kube::exec::forward_interactive()` byte-relay loop -- confirmed live
+that attach needed no new terminal mechanics, only call-site plumbing, exactly
+as predicted. See `docs/EXEC.md` for two things this uncovered: an
+uncancellable stdin read that can occasionally swallow one input chunk right
+after a session ends (bounded, documented, not fully closed), and attach's own
+`Ctrl-]` local-only detach key (distinct from Ctrl-D, which only works when the
+remote process actually reads and reacts to stdin -- not guaranteed for an
+already-running process attach connects to).

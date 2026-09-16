@@ -1,4 +1,4 @@
-# Exec (M4.2 contract: one-shot exec and interactive shell both ACCEPTED)
+# Exec (M4.2/M4.2b contract: one-shot exec, interactive shell, and attach all ACCEPTED)
 
 `:exec [container] -- <command...>` runs one native, non-interactive Kubernetes exec
 (no stdin, no TTY) against the currently selected Pod, structured argv only -- never
@@ -94,13 +94,43 @@ Fully closing this gap needs a genuinely cancellation-safe local stdin reader
 readiness rather than a blocking thread-pool read) -- future work, not shipped
 speculatively here.
 
-## Attach
+## Attach (`:attach`)
 
-`Api::attach` (distinct from exec: attaches to an already-running process rather
-than starting a new one) is researched but not implemented. It would reuse the
-exact same `TerminalHandoff` guard and forwarding loop `:shell` uses -- the
-remaining work is call-site plumbing (target selection UX), not new terminal
-mechanics.
+`:attach [container]` attaches to the container's already-running main process
+(`Api::attach`, distinct from exec/shell: no argv, no new process -- there is
+nothing to start). Same container-selection rule as `:exec`/`:shell`; denied
+under `settings.readonly` before any connection attempt, same as both.
+
+Only offered as interactive when the container's own Pod spec was created with
+both `stdin: true` and `tty: true` -- Kubernetes does not allocate a PTY for the
+container otherwise, so a bare attach would be a one-way view with no stdin
+channel to type into. Refused explicitly and immediately (`Container <name> was
+not started with stdin+tty (required for an interactive attach); use :logs to
+view its output instead`) rather than silently degrading to a read-only mode
+nobody asked for -- confirmed live against a container without these fields.
+
+Reuses the identical `TerminalHandoff` guard and `forward_interactive()` byte-
+relay loop `:shell` uses (extracted into a shared function once attach needed
+it too) -- same resize polling, same Ctrl-C-forwarded-raw behavior, same
+terminal restoration guarantees.
+
+### Detaching: Ctrl-] (0x1D), local-only
+
+Found live on the very first attach test: the already-running process an
+attach connects to was very likely **not started expecting stdin at all** (it
+is not a shell waiting to execute what you type) -- Ctrl-D, which works for
+`:shell` because a real shell explicitly reacts to it, does nothing here, and
+the forwarding loop would otherwise wait forever for output that never stops,
+hanging the whole TUI. `Ctrl-]` (a single byte, `0x1D`, chosen for the same
+reason telnet and other terminal tools traditionally use it) ends the local
+session unconditionally, **without ever signaling the remote process** --
+exactly the same "cancellation ends local observation, never remote rollback"
+distinction `docs/SESSIONS.md` already draws for background sessions, just
+needed here too. Confirmed live: detaching this way leaves the attached
+container running, completely unaffected (checked via `kubectl get pod` and
+`kubectl logs` immediately after -- still `Running`, 0 restarts, output
+continuing). This key applies to `:shell` as well (harmless there; Ctrl-D
+already covers the common case).
 
 ## Live-accepted (`kind-sauron-test`, fresh binary)
 
@@ -129,8 +159,17 @@ known limitation above and its safe-no-op/retry mitigation rather than any wrong
 action or corruption; a full quit from SAURON afterward with exact `stty` state
 preserved.
 
-See `docs/M4_ACCEPTANCE.md` for the three real bugs this pass found and fixed: a
+**Attach:** an explicit rejection of a container without `stdin: true, tty: true`
+in its spec, with zero connection attempts; a real attach to an already-running
+process's live output (confirmed distinct from exec: no new process started,
+just observed); the local-only `Ctrl-]` detach leaving the remote container
+running and unaffected (`kubectl get pod`/`logs` checked immediately after);
+the target Pod force-deleted mid-session ending the attach cleanly rather than
+hanging; a final quit from SAURON afterward with exact `stty` state preserved.
+
+See `docs/M4_ACCEPTANCE.md` for the real bugs this pass found and fixed: a
 command-grammar collision between `/`-filter syntax and absolute-path argv,
-readonly being entirely unwired before this slice, and `Terminal::clear()`'s
-internal cursor-position query racing the just-ended session's own stdin reader
-and timing out.
+readonly being entirely unwired before this slice, `Terminal::clear()`'s
+internal cursor-position query racing the just-ended session's own stdin
+reader and timing out, and attach hanging forever against a process that
+never reads stdin (fixed by the `Ctrl-]` local detach above).

@@ -27,11 +27,22 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
-M4.0 and all of M4.2 (one-shot exec + interactive shell) ACCEPTED; M4.2b (attach)
-or M4.3 (port-forward manager) next. Clean baseline verified at annotated
+M4.0, all of M4.2 (one-shot exec + interactive shell), and M4.2b (attach) ACCEPTED;
+M4.3 (port-forward manager) next. Clean baseline verified at annotated
 `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked
-fmt/check/clippy/test now passes 70 unit + 11 fake HTTP = 81; one opt-in live test
+fmt/check/clippy/test now passes 72 unit + 11 fake HTTP = 83; one opt-in live test
 ignored. No tracked credentials found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
+M4.2b attach accepted 2026-09-16: confirmed it needed no new terminal mechanics,
+only call-site plumbing reusing M4.2's guard/forwarding loop exactly. Found and
+fixed a real hang on the first live test: attaching to an already-running
+process that never reads stdin left the loop waiting forever for output that
+would never stop (Ctrl-D, which works for a real shell, does nothing here).
+Fixed with a local-only `Ctrl-]` detach key that never signals the remote --
+confirmed live via `kubectl get pod`/`logs` that detaching left the container
+running, completely unaffected. Live-tested: rejection of a non-interactive
+container, real output from an already-running process, the detach key, the
+target Pod force-deleted mid-session, and a final quit with exact stty state
+preserved. See docs/EXEC.md and HANDBOOK for the full writeup.
 M4.2 interactive shell accepted 2026-09-16, built in the requested order (terminal
 guard designed and live-verified first, shell built on top second): live-tested
 against `kind-sauron-test` across all nine requested endings (clean exit,

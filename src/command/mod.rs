@@ -424,6 +424,9 @@ pub enum Command {
         container: Option<String>,
         shell: Option<String>,
     },
+    Attach {
+        container: Option<String>,
+    },
 }
 
 /// Quoted words have shell-like grouping only. Nothing is executed or expanded.
@@ -595,6 +598,13 @@ pub fn parse(s: &str) -> Result<Command> {
                 shell,
             });
         }
+        // ":attach [container]" -- the already-running process, never a new one.
+        "attach" => {
+            ensure!(tail.len() <= 1, "Use :attach [container]");
+            return Ok(Command::Attach {
+                container: tail.first().cloned(),
+            });
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -655,7 +665,9 @@ pub fn parse(s: &str) -> Result<Command> {
 /// Adding a binding to `registry()` makes it suggestible automatically -- there is no
 /// second list to remember to update.
 pub fn command_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = vec!["ctx", "ns", "info", "reload", "sort", "exec", "shell"];
+    let mut names: Vec<&'static str> = vec![
+        "ctx", "ns", "info", "reload", "sort", "exec", "shell", "attach",
+    ];
     names.extend(registry().iter().map(|b| b.name));
     names
 }

@@ -9,8 +9,8 @@ via bootstrap-test-cluster.sh; node Ready/identity verified. Every fixture write
 | --- | --- | --- | --- | --- |
 | M4.0 | Owned identity, cancellation, startup/running/stopping/final outcomes; prove with logs | ACCEPTED | 62 unit + 11 fake HTTP; live accept-m4.py, opt-in cluster test | Protocol-specific operational sessions still subsequent slices |
 | M4.1 | Bounded advanced logs, explicit container/source, controls, UID and scope integrity | ACCEPTED | 65 unit + 11 fake HTTP; live accept-m4.py logs, twice | Aggregation scope is explicit visible-Pods/all-containers only; see LOGS.md |
-| M4.2 | Native structured exec/shell, readonly boundary, terminal handoff/restore | ACCEPTED | 70 unit + 11 fake HTTP; live one-shot exec + interactive shell, all 9 requested adversarial endings | One known, bounded, documented limitation: an orphaned stdin read can occasionally swallow one input chunk after a session ends; mitigated to a safe no-op/retry, not fully closed -- see EXEC.md |
-| M4.2b | Separate native attach semantics or justified deferral | RESEARCHED | Api::attach exists; terminal/fixture acceptance pending | NOT ACCEPTED |
+| M4.2 | Native structured exec/shell, readonly boundary, terminal handoff/restore | ACCEPTED | 72 unit + 11 fake HTTP; live one-shot exec + interactive shell, all 9 requested adversarial endings | One known, bounded, documented limitation: an orphaned stdin read can occasionally swallow one input chunk after a session ends; mitigated to a safe no-op/retry, not fully closed -- see EXEC.md |
+| M4.2b | Separate native attach semantics or justified deferral | ACCEPTED | 72 unit + 11 fake HTTP; live attach against kind-sauron-test | Reuses M4.2's terminal guard/forwarding loop exactly, no new mechanics -- see EXEC.md |
 | M4.3 | Loopback background forwarding, manager, durable identity, bounded connections | RESEARCHED | Native API inspected; no implementation | NOT ACCEPTED |
 | M4.4 | Combined adversarial flows, old-milestone regressions, measured soak | NOT STARTED | None | NOT ACCEPTED |
 
@@ -60,12 +60,34 @@ remote shell detector" guidance). Foreground and blocking by design: it does not
 go through `Sessions` (see `docs/SESSIONS.md` and `docs/EXEC.md`) since nothing
 else runs concurrently with it.
 
-**Attach** (`Api::attach`, distinct from exec: attaches to an already-running
-process rather than starting a new one) remains researched-only. It would reuse
-the identical `TerminalHandoff` guard and forwarding loop; deferred as pure
-call-site plumbing, not a new mechanics problem.
+**Attach (M4.2b): ACCEPTED.** `:attach [container]` (`Api::attach`, distinct
+from exec: attaches to the already-running process, no argv, no new process)
+reuses the identical `TerminalHandoff` guard and `forward_interactive()` byte-
+relay loop `:shell` uses -- confirming the earlier prediction that this needed
+no new terminal mechanics, only call-site plumbing (container selection,
+readonly gate, the `Api::attach` call itself). Only offered when the
+container's own Pod spec has both `stdin: true` and `tty: true` (Kubernetes
+does not allocate a PTY otherwise); refused explicitly and immediately
+pointing at `:logs` when not, rather than silently degrading to a read-only
+view nobody asked for.
 
-**Three real bugs found and fixed** (see journal for full root-cause writeups):
+**A fourth real bug found and fixed, specific to attach:** attaching to an
+already-running process that was never started expecting stdin at all (the
+realistic common case -- it is not a shell waiting to execute typed input)
+hung forever on the very first live test: Ctrl-D (which correctly ends a
+`:shell` session, since a real shell explicitly reacts to it) did nothing,
+and the forwarding loop's "keep draining remote output until it closes"
+tail waited for output that would never stop, freezing the whole TUI. Fixed
+by adding a local-only detach key, `Ctrl-]` (`0x1D`, the same byte telnet and
+other terminal tools traditionally use for this), that ends the local
+session unconditionally without ever signaling the remote -- confirmed live
+that detaching this way leaves the attached container completely unaffected
+(`kubectl get pod`/`logs` immediately after: still `Running`, 0 restarts,
+output continuing). Matches the "cancellation ends local observation, never
+remote rollback" distinction `docs/SESSIONS.md` already drew for background
+sessions; this is the same distinction applied to a foreground one.
+
+**Four real bugs found and fixed in total** (see journal for full root-cause writeups):
 (1) the `--readonly` CLI flag and `Settings.readonly` existed but were completely
 unwired -- nothing ever read `cli.readonly`, so read-only enforcement for any
 future mutating capability was a no-op regardless of the flag; fixed via a
@@ -120,6 +142,16 @@ limitation above and its safe-retry behavior rather than any wrong action; (9) a
 final quit from SAURON afterward with exact `stty` state preserved. No production
 calls -- exercised only against the isolated test cluster.
 
+**Attach live-accepted against `kind-sauron-test`, fresh binary:** explicit
+rejection of a container without `stdin: true, tty: true` with zero connection
+attempts; real live output from an already-running process (worker container's
+own `while true; do echo; sleep 1; done` loop, distinct from exec -- no new
+process started); the `Ctrl-]` local detach leaving that container running and
+completely unaffected (checked via `kubectl get pod`/`logs` immediately after);
+the target Pod force-deleted mid-session ending the attach cleanly rather than
+hanging; a final quit from SAURON with exact `stty` state preserved. No
+production calls.
+
 ## M4.3 acceptance
 
 Explicit/auto ports, conflicts, real TCP request, navigate/ns/context/logs while active,
@@ -140,6 +172,27 @@ duration/RSS/CPU/session counts/reconnects honestly (target 1–2 hours when pra
 Do not create m4-accepted until combined live acceptance and documentation reconcile.
 
 ## Execution log
+
+- M4.2b (attach) accepted: extracted the shared `forward_interactive()` byte-
+  relay loop out of `interactive()` (shell) so `attach()` could reuse it
+  verbatim against `Api::attach` instead of `Api::exec` -- exactly the
+  "call-site plumbing, not new mechanics" the ledger predicted for this slice.
+  Gated on the container's own Pod spec advertising `stdin: true, tty: true`
+  (Kubernetes allocates no PTY otherwise); refused explicitly rather than
+  degrading to a silent read-only view. Found and fixed a real hang on the
+  very first live test: attaching to a process that never reads stdin (the
+  realistic case) left the forwarding loop waiting forever for output that
+  would never stop, since Ctrl-D -- which correctly ends a real shell -- does
+  nothing to a process that isn't listening for it. Fixed with a local-only
+  detach key, `Ctrl-]` (0x1D), that ends the local session unconditionally
+  without signaling the remote; confirmed live via `kubectl get pod`/`logs`
+  immediately after detaching that the attached container kept running,
+  completely unaffected. Live-accepted against `kind-sauron-test`, fresh
+  binary: explicit rejection of a non-interactive container, real live output
+  from an already-running process, the `Ctrl-]` detach, the target Pod force-
+  deleted mid-session ending cleanly rather than hanging, and a final quit
+  with exact `stty` state preserved. 72 unit + 11 fake HTTP tests passing
+  throughout; fmt/check/clippy clean. No production calls.
 
 - M4.2 (interactive shell) accepted, in the requested order: designed
   `app::terminal::TerminalHandoff` first; live-verified its restore behavior

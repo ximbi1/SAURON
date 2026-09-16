@@ -1,8 +1,9 @@
-//! Native Kubernetes exec: structured argv, explicit container, UID-pinned.
-//! `run()` is one-shot and non-interactive (no stdin/TTY); `interactive()` hands
-//! stdin/stdout to a real remote shell and needs a terminal-handoff guard from the
-//! caller (see `app::terminal::TerminalHandoff`) -- it does not manage the local
-//! terminal itself.
+//! Native Kubernetes exec and attach: structured argv, explicit container,
+//! UID-pinned. `run()` is one-shot and non-interactive (no stdin/TTY);
+//! `interactive()` (exec a shell) and `attach()` (the already-running process)
+//! both hand stdin/stdout to the remote over the shared `forward_interactive()`
+//! loop and need a terminal-handoff guard from the caller (see
+//! `app::terminal::TerminalHandoff`) -- neither manages the local terminal itself.
 use super::Connection;
 use crate::{
     app::{
@@ -16,7 +17,7 @@ use futures_util::SinkExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     Api,
-    api::{AttachParams, TerminalSize},
+    api::{AttachParams, AttachedProcess, TerminalSize},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -97,21 +98,19 @@ pub fn shell_container(request: &ShellRequest) -> Result<String> {
 /// Runs one interactive TTY session, forwarding raw bytes between `stdin`/`stdout`
 /// and the remote shell until either side closes. The caller owns the local
 /// terminal's suspended state (`app::terminal::TerminalHandoff`); this function
-/// only ever touches the streams it's given, never the real terminal directly, so
-/// it stays testable and reusable (attach will need the exact same forwarding
-/// loop against a different subresource call).
+/// only ever touches the streams it's given, never the real terminal directly.
 pub async fn interactive(
     connection: &Connection,
     request: &ShellRequest,
-    mut stdin: impl AsyncRead + Unpin,
-    mut stdout: impl AsyncWrite + Unpin,
+    stdin: impl AsyncRead + Unpin,
+    stdout: impl AsyncWrite + Unpin,
 ) -> Result<Outcome> {
     let container = shell_container(request)?;
     let api: Api<Pod> = Api::namespaced(connection.client.clone(), &request.object.namespace);
     super::check_pod_uid(connection, &api, &request.object.name, &request.object.uid).await?;
     let shell = request.shell.clone().unwrap_or_else(|| "sh".into());
     let params = AttachParams::interactive_tty().container(container);
-    let mut attached = tokio::time::timeout(
+    let attached = tokio::time::timeout(
         connection.timeout(),
         api.exec(&request.object.name, [shell.as_str()], &params),
     )
@@ -119,6 +118,82 @@ pub async fn interactive(
     .context("Exec connection timed out")?
     .map_err(|e| anyhow::anyhow!(crate::safety::api_error(&e, "starting interactive shell")))?;
     super::check_pod_uid(connection, &api, &request.object.name, &request.object.uid).await?;
+    forward_interactive(attached, stdin, stdout, "Shell exited non-zero").await
+}
+
+/// An attach target: the already-running main process, never a new one. Unlike
+/// exec/shell, attach has no argv -- there is nothing to start.
+#[derive(Clone)]
+pub struct AttachRequest {
+    pub object: SharedObject,
+    pub container: Option<String>,
+}
+
+pub fn attach_container(request: &AttachRequest) -> Result<String> {
+    resolve_container(&request.object, &request.container)
+}
+
+/// Attach is only meaningfully interactive if the container's own spec was
+/// created with both `stdin: true` and `tty: true` -- Kubernetes does not
+/// allocate a PTY for the container's process otherwise, so a bare attach
+/// would just be a one-way, no-signal-handling view of raw output with no
+/// stdin channel to type into. Refusing this explicitly (pointing at `:logs`)
+/// is more honest than silently degrading to a read-only mode nobody asked for.
+pub fn container_supports_interactive_attach(object: &SharedObject, container: &str) -> bool {
+    object
+        .value
+        .pointer("/spec/containers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|c| c["name"].as_str() == Some(container))
+        .is_some_and(|c| {
+            c["tty"].as_bool().unwrap_or(false) && c["stdin"].as_bool().unwrap_or(false)
+        })
+}
+
+/// Attaches to the already-running process (`Api::attach`, distinct from
+/// `Api::exec`: no command, no new process). Reuses the exact same terminal-
+/// handoff contract and forwarding loop as `interactive()` -- the caller is
+/// responsible for the same `TerminalHandoff` suspension.
+pub async fn attach(
+    connection: &Connection,
+    request: &AttachRequest,
+    stdin: impl AsyncRead + Unpin,
+    stdout: impl AsyncWrite + Unpin,
+) -> Result<Outcome> {
+    let container = attach_container(request)?;
+    ensure!(
+        container_supports_interactive_attach(&request.object, &container),
+        "Container {container} was not started with stdin+tty (required for an \
+         interactive attach); use :logs to view its output instead"
+    );
+    let api: Api<Pod> = Api::namespaced(connection.client.clone(), &request.object.namespace);
+    super::check_pod_uid(connection, &api, &request.object.name, &request.object.uid).await?;
+    let params = AttachParams::interactive_tty().container(container);
+    let attached = tokio::time::timeout(
+        connection.timeout(),
+        api.attach(&request.object.name, &params),
+    )
+    .await
+    .context("Attach connection timed out")?
+    .map_err(|e| anyhow::anyhow!(crate::safety::api_error(&e, "attaching to container")))?;
+    super::check_pod_uid(connection, &api, &request.object.name, &request.object.uid).await?;
+    forward_interactive(attached, stdin, stdout, "Attached process exited non-zero").await
+}
+
+/// The shared byte-forwarding loop behind both `interactive()` (exec) and
+/// `attach()`: relays local stdin to the remote process and its stdout back to
+/// local stdout, drives the remote resize channel from local terminal size, and
+/// reports a final `Outcome` from the remote exit status. Neither caller reads
+/// stderr separately -- an allocated PTY multiplexes both onto the one stdout
+/// stream, matching how a real terminal session behaves.
+async fn forward_interactive(
+    mut attached: AttachedProcess,
+    mut stdin: impl AsyncRead + Unpin,
+    mut stdout: impl AsyncWrite + Unpin,
+    failure_label: &str,
+) -> Result<Outcome> {
     let mut status_rx = attached.take_status();
     let mut remote_stdin = attached.stdin().context("No stdin stream")?;
     let mut remote_stdout = attached.stdout().context("No stdout stream")?;
@@ -149,6 +224,18 @@ pub async fn interactive(
                     let _ = remote_stdin.shutdown().await;
                     break;
                 }
+                // Ctrl-] (0x1D), alone: a local-only detach, independent of the
+                // remote's cooperation. Ctrl-D only ends a session that reads
+                // and reacts to it (a real shell does); attaching to an
+                // already-running process that never reads stdin at all (the
+                // common case -- it was not started expecting input) would
+                // otherwise hang here forever waiting for output that never
+                // stops. Detaching observes local-only semantics exactly like
+                // ending a background session (see docs/SESSIONS.md): it stops
+                // watching, never touches the remote process.
+                if input_chunk[..count] == [0x1d] {
+                    return Ok(Outcome::Cancelled);
+                }
                 remote_stdin.write_all(&input_chunk[..count]).await.context("Failed to forward stdin")?;
             }
             read = remote_stdout.read(&mut output_chunk) => {
@@ -162,7 +249,7 @@ pub async fn interactive(
         }
     }
     // Keep draining any already-buffered remote output after our side of stdin
-    // closed, so a shell that prints a final message on EOF is not truncated.
+    // closed, so a process that prints a final message on EOF is not truncated.
     loop {
         let count = remote_stdout
             .read(&mut output_chunk)
@@ -196,7 +283,7 @@ pub async fn interactive(
             status
                 .message
                 .or(status.reason)
-                .unwrap_or_else(|| "Shell exited non-zero".into()),
+                .unwrap_or_else(|| failure_label.into()),
         ),
         None => Outcome::Completed,
     })
@@ -402,5 +489,40 @@ mod tests {
         assert!(shell_container(&request).is_err(), "must require a choice");
         request.container = Some("b".into());
         assert_eq!(shell_container(&request).expect("b"), "b");
+    }
+    #[test]
+    fn attach_requires_the_container_to_have_been_started_with_stdin_and_tty() {
+        let object = std::sync::Arc::new(Object::new(json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"name":"p","namespace":"n","uid":"u"},
+            "spec":{"containers":[
+                {"name":"plain"},
+                {"name":"stdin-only","stdin":true},
+                {"name":"interactive","stdin":true,"tty":true}
+            ]}
+        })));
+        assert!(!container_supports_interactive_attach(&object, "plain"));
+        assert!(!container_supports_interactive_attach(
+            &object,
+            "stdin-only"
+        ));
+        assert!(container_supports_interactive_attach(
+            &object,
+            "interactive"
+        ));
+        assert!(!container_supports_interactive_attach(&object, "missing"));
+    }
+    #[test]
+    fn attach_container_selection_matches_exec_and_shell() {
+        let object = std::sync::Arc::new(Object::new(json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"name":"p","namespace":"n","uid":"u"},
+            "spec":{"containers":[{"name":"only","stdin":true,"tty":true}]}
+        })));
+        let request = AttachRequest {
+            object,
+            container: None,
+        };
+        assert_eq!(attach_container(&request).expect("only"), "only");
     }
 }

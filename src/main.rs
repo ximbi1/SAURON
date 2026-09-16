@@ -8,7 +8,7 @@ use sauron::{
 use std::{path::PathBuf, time::Duration};
 
 #[derive(Parser)]
-#[command(name=sauron::brand::BINARY,version=sauron::brand::VERSION,about="One eye over the entire cluster. Inspection-only development release.")]
+#[command(name=sauron::brand::BINARY,version=sauron::brand::VERSION,about="One eye over the entire cluster. Inspection and policy-gated sessions.")]
 struct Cli {
     /// Resource plural/kind/shortname, or info
     resource: Option<String>,
@@ -22,7 +22,7 @@ struct Cli {
     kubeconfig: Option<PathBuf>,
     #[arg(long)]
     config: Option<PathBuf>,
-    /// All operations are read-only in this release
+    /// Force read-only policy, including after config reload (no exec/attach/forward)
     #[arg(long)]
     readonly: bool,
     /// Run discovery and report capabilities, without a TTY

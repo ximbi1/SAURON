@@ -1,0 +1,5 @@
+# Application settings ONLY, never kubeconfig. Default remains read-only.
+# Acceptance scripts additionally verify Docker identity + explicit test kubeconfig.
+readonly = true
+[contexts.kind-sauron-test]
+readonly = false

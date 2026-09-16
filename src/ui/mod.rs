@@ -92,14 +92,15 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
     ])
     .split(area);
     let heading = format!(
-        "{} {}  ·  {}",
+        "{} {}  ·  {} · PF {}",
         crate::brand::MARK,
         crate::brand::NAME,
         if state.settings.readonly {
             "READ ONLY"
         } else {
-            "OPERATIONAL (exec/shell enabled)"
+            "OPERATIONAL (exec/shell/attach/forward enabled)"
         },
+        state.forward_count,
     );
     // Short, canonical breadcrumb for the current scope: ctx:X › ns:Y › resource, or
     // ctx:X › resource with no ns segment for a cluster-scoped resource. Always the
@@ -248,6 +249,21 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Mode::Filter(text) => format!("/{text}▏"),
         Mode::Search(_, text) => format!("search /{text}▏"),
         Mode::Picker(_) => " ↑↓ move   enter switch   esc cancel ".into(),
+        Mode::Document(doc) if doc.forward_manager => [
+            (Action::Back, "return"),
+            (Action::StopForward, "stop ID"),
+            (Action::Refresh, "refresh"),
+            (Action::Help, "help"),
+        ]
+        .into_iter()
+        .filter_map(|(action, label)| {
+            state
+                .keymap
+                .primary_key(action)
+                .map(|key| format!("{key} {label}"))
+        })
+        .collect::<Vec<_>>()
+        .join("   "),
         Mode::Document(doc) if doc.session.is_some() => [
             (Action::Back, "return"),
             (Action::PauseLogs, "pause/resume"),

@@ -105,7 +105,9 @@ never receive kubeconfig credentials at arbitrary external URLs.
 | `src/main.rs` | CLI dispatch and process lifecycle | health rules, widgets |
 | `src/brand.rs` | product metadata | runtime state |
 | `src/app/` | state, reducer, task lifecycle, input routing | raw HTTP in widgets |
+| `src/app/session.rs`, `forwards.rs` | shared task ownership; bounded forward presentation by SessionId/origin | retargeting on foreground navigation |
 | `src/kube/` | config/client, discovery, watch, evidence/log I/O | terminal rendering |
+| `src/kube/forward.rs` | Pod UID verification, loopback listeners, bounded TCP relays, RAII transport abort | local shell execution, view state, automatic reconnect |
 | `src/resources/` | identity, projections, health, bounded store | network or mutations |
 | `src/filters/` | bounded lexer/parser/AST, typed evaluation | implicit API scope widening |
 | `src/command/` | grammar, action registry, effective keymap | networking |
@@ -141,7 +143,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | M4 session foundation | ACCEPTED | 62 unit + 11 fake HTTP; live scripts/accept-m4.py, exact palette race replay and stty restoration |
 | Exec (one-shot + interactive shell) | ACCEPTED | readonly-gated, UID-pinned, TerminalHandoff-based; live-proven incl. Ctrl-C/Ctrl-D/Pod-death/network-cut/resize; docs/EXEC.md |
 | Attach | ACCEPTED | reuses shell's terminal guard/forwarding loop; requires container stdin+tty; Ctrl-] local-only detach; docs/EXEC.md |
-| Exec/attach/port-forward | RESEARCHED | locked kube-client 4.2.0 APIs inspected; no actions exposed |
+| Port-forward manager | ACCEPTED (M4.3 scope) | Pod-only native background lifetime; repeated real TCP/UID/context/cleanup acceptance; docs/PORT_FORWARD.md |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
 | Graph/relationships/Xray | RESEARCHED | M6 |
@@ -185,7 +187,7 @@ Honor configured identity/RBAC; discovery verbs are capabilities, not authorizat
 SelfSubjectAccessReview answers may age; final API responses remain authoritative.
 No implicit shell execution beyond Kubernetes credential plugin behavior. Exec/attach,
 uploads and volume helper creation are potentially mutating and must be policy gated.
-Loopback only for future forwards; no automatic binds to public interfaces. Local exports
+Loopback only for forwards; no automatic binds to public interfaces. Local exports
 need restrictive permissions, explicit destination and overwrite protection. Journals must
 record outcomes/uncertain cancellation, not assert success on request submission.
 Cluster data/logs are untrusted terminal input; strip control sequences. Redaction is
@@ -224,14 +226,15 @@ parallelism modest. Docker available. Existing production API `/version` read su
 (Kubernetes v1.33.4). No sensitive resource contents collected in research.
 M1–M3 visual/TUI acceptance is recorded below. Log reader caps
 allocation before clipping (16 KiB per line, 4 KiB read chunks); covered by the fake-HTTP
-watch tests but not yet by a dedicated log-clipping regression test. Row rebuild is gated
+watch tests including a dedicated clipping/sanitization regression. Row rebuild is gated
 by a `prepare()` memo keyed on store revision/filter/sort/descending, plus the current
 second only when the filter has an `age` comparison (see journal entry below — an earlier
 version included the clock unconditionally and resorted every tick regardless of scope).
 Shared document interactions and selection were accepted in M3. Watch list synchronization is
 labeled separately from an established watch; no header-level connection probe yet.
 No in-cluster config fallback or server Tables;
-multi-container log fanout, metrics, graph, or mutations yet. Core Event reads cap at 200
+metrics, graph or Kubernetes resource mutations yet. Multi-source logs and gated
+exec/shell/attach are accepted. Core Event reads cap at 200
 and report truncation. Describe is SAURON's contextual native report, not kubectl parity.
 
 ## Current milestone / continuation instructions
@@ -244,9 +247,9 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. M4.0, M4.2 (one-shot exec +
-interactive shell), and M4.2b (attach) are all ACCEPTED. Current: M4.3
-(port-forward manager) next, then M4.4 (combined acceptance + soak). One known,
+isolated unit tests alone. Keep buildable handoffs. M4.0, M4.1, M4.2 (one-shot exec +
+interactive shell), M4.2b (attach) and M4.3 (Pod port-forward manager) are ACCEPTED.
+Next: M4.4 (combined acceptance + soak), not accepted and no m4-accepted tag. One known,
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
@@ -273,6 +276,62 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.3 live proof and regression checkpoint
+
+Two complete native forwarding PTY passes now succeeded against verified isolated kind.
+Real HTTP, auto/explicit/conflict, four-forward and eight-client limits, navigation/ns/
+readonly-context/log coexistence, individual stop, 12 repeated cycles, target deletion
+and same-name/new-UID refusal, 32x9, exact stty restore and no listeners after quit.
+Second pass added five immediate start/cancel cycles and an open TCP connection during
+Pod deletion; both passed. First complete run RSS 29904→29904 KiB, fds 15→15,
+threads 4→4; second RSS 29904→29860 KiB, fds 14→15, threads 4→4. Debug short-run
+measurements, not soak or proof of absence of every possible task leak.
+
+Found by inspection and fixed: Reload previously recomputed readonly without the CLI
+override, potentially reopening accepted exec/attach capabilities. Added actual reload
+regression plus live `--readonly` + operational config → reload → deny forward/exec/
+shell/attach. Background policy reload validates original contexts before applying,
+cancels revoked sessions, and is covered independently of the foreground scope.
+Full suite: 76 unit + 14 fake HTTP = 90 passed; fmt/check/clippy clean. Also passed
+live accept-m3.py filters + sorting, accept-m4.py foundation, and the opt-in cluster
+integration test. Fresh final all-in-one forward/policy replay is running before commit.
+No dependencies added, no production calls. Combined all-M4 acceptance and longer
+soak remain separate M4.4 work; no m4-accepted tag.
+
+### 2026-09-16 — M4.3 implementation / first live checkpoint
+
+Follow-up: both failed live assertions were harness assumptions, not transport bugs:
+waiting for any Listening row returned an older session before the new ID started;
+later, the target-death outcome was below the viewport after 12 retained cycle records.
+Harness now waits for a new SessionId and scrolls to the newest ended record. Real
+HTTP, four forwards, explicit/auto/conflict, eight-client cap, navigation/context/logs,
+and twelve cycles have passed. Observed warm RSS 29996→29724 KiB, fd 15→15,
+threads 4→4 (debug, short run, not endurance). Full final replay still pending.
+Added monitor fake-HTTP regression for replacement/403 after bind; terminal-phase Pods
+also stop forwarding. CLI readonly-on-reload now has an actual reload regression.
+
+Native forward transport compiles; session manager and canonical forward/pf/pf_stop
+actions integrated, declared TCP picker, readonly checks, original-scope metadata,
+bounded watch status, 4-session/8-client caps and UID monitoring. Full checks passed
+(76 unit + 13 fake HTTP = 89): forbidden/gone/replaced/terminating targets, automatic
+loopback bind, conflict, cancellation/listener reuse, readonly, independent lifetime.
+First live actual HTTP succeeded, including resource/ns/readonly-context navigation
+and logs while forwarding. Explicit-port harness assertion failed; isolating whether
+it matched an older Listening record while the new one was Starting. Not accepted.
+Inspection also found reload could undo --readonly; force flag now reapplied on reload,
+and policy revocation cancels forwards for their original context. Additional regression
+and live hard-override verification pending. No production calls.
+
+### 2026-09-16 — M4.3 kickoff
+
+Clean baseline 7af4926, M4.0–M4.2b accepted. Re-read handbook/runbook/ledger/code;
+reconciled stale current sections (historical journals retained). Dedicated kind node
+Ready, script Docker label and loopback endpoint verified. Re-read locked kube-client
+Portforwarder: explicit abort/join, no Drop cleanup, one stream per remote port. Design
+in PORT_FORWARD.md: shared session supervisor, independent lifetime/status channel,
+RAII transport abort, loopback-only, 4 forwards × 8 clients, pinned UID and no reconnect.
+No dependency added. No production operation. Baseline full suite running.
 
 ### 2026-09-16 — M4.2b attach accepted; a real hang found and fixed on the first live test
 

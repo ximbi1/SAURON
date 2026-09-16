@@ -10,12 +10,18 @@ use tokio_util::sync::CancellationToken;
 const MAX_ACTIVE: usize = 8;
 const MAX_ENDED: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(u64);
+impl SessionId {
+    pub fn number(self) -> u64 {
+        self.0
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Logs,
     Exec,
+    PortForward,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
@@ -75,6 +81,15 @@ pub struct Sessions {
     ended: VecDeque<Record>,
 }
 impl Sessions {
+    pub fn stop(&mut self, id: SessionId) -> bool {
+        if let Some(record) = self.active.get_mut(&id) {
+            record.state = State::Stopping;
+            record.cancel.cancel();
+            true
+        } else {
+            false
+        }
+    }
     pub fn spawn<F, Fut>(
         &mut self,
         kind: Kind,

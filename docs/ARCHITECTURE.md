@@ -39,6 +39,13 @@ reaped independently of the UI channel, even after navigation. Session status is
 to its document through search/palette overlays. Limits: 8 active tasks, 64 ended
 records, two-second cancellation grace then abort/join. See [SESSIONS.md](SESSIONS.md).
 
+M4.3 background forwards use that supervisor with independent tokens and original
+Connection/context/Pod UID identity. Progress travels through a bounded latest-value
+watch channel; it cannot become foreground rows/document payloads. Four listeners,
+eight client futures each, loopback-only, per-client RAII abort ownership of kube 4.2's
+Portforwarder. Pre/post-upgrade and periodic identity validation stop invalid targets;
+no name-based reconnect. See [PORT_FORWARD.md](PORT_FORWARD.md).
+
 ## Safety design
 
 Inspection first. Mutation service later accepts typed Intent with GVR, namespace, name,

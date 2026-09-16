@@ -27,10 +27,18 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
-M4.0, all of M4.2 (one-shot exec + interactive shell), and M4.2b (attach) ACCEPTED;
-M4.3 (port-forward manager) next. Clean baseline verified at annotated
+M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell), and M4.2b (attach) ACCEPTED;
+M4.3 (port-forward manager) ACCEPTED, implemented from clean 7af4926. Contract PORT_FORWARD.md.
+Latest M4.3 checks: 76 unit + 14 fake HTTP = 90 passed, fmt/check/clippy clean.
+Live `python3 scripts/accept-m4-forward.py` passed real HTTP, navigation/context/logs,
+explicit/conflicting/auto ports, four forwards/eight clients, individual stop, 12 cycles,
+five immediate start/cancel cycles, deletion/new UID, 32x9 and listener/stty cleanup.
+`--policy-only` proved readonly survives reload and still denies all operational actions.
+M3 filter/sort, M4.0 lifecycle and opt-in cluster regression also pass. Next is M4.4
+combined acceptance + soak; not performed/accepted yet. No m4-accepted tag or push.
+Dedicated kind identity checked and node Ready. Clean baseline verified at annotated
 `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked
-fmt/check/clippy/test now passes 72 unit + 11 fake HTTP = 83; one opt-in live test
+fmt/check/clippy/test at M4.2b passed 72 unit + 11 fake HTTP = 83; one opt-in live test
 ignored. No tracked credentials found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
 M4.2b attach accepted 2026-09-16: confirmed it needed no new terminal mechanics,
 only call-site plumbing reusing M4.2's guard/forwarding loop exactly. Found and
@@ -67,8 +75,7 @@ selection, Refresh restarting under a fresh identity, 32x9, exact stty restorati
 Found and fixed a real command-grammar bug along the way: `:exec`'s argv containing
 an absolute path (e.g. `/bin/sh`) collided with the unrelated `resource / filter`
 boundary syntax and silently lost the command -- see docs/EXEC.md and HANDBOOK.
-Attach remains researched, not implemented -- deferred call-site plumbing over
-the now-proven terminal guard, not a new mechanics problem.
+Attach was subsequently implemented and accepted in M4.2b (above).
 M4.1 accepted 2026-09-16: `python3 scripts/accept-m4.py logs` PASS twice in a row
 against `m4-fixtures` (container choice/init/ephemeral/multi-source/pause/search/
 filter/clear/restart/bounded eviction/same-name replacement/32x9/terminal). Two

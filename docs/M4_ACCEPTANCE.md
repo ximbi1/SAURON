@@ -11,7 +11,7 @@ via bootstrap-test-cluster.sh; node Ready/identity verified. Every fixture write
 | M4.1 | Bounded advanced logs, explicit container/source, controls, UID and scope integrity | ACCEPTED | 65 unit + 11 fake HTTP; live accept-m4.py logs, twice | Aggregation scope is explicit visible-Pods/all-containers only; see LOGS.md |
 | M4.2 | Native structured exec/shell, readonly boundary, terminal handoff/restore | ACCEPTED | 72 unit + 11 fake HTTP; live one-shot exec + interactive shell, all 9 requested adversarial endings | One known, bounded, documented limitation: an orphaned stdin read can occasionally swallow one input chunk after a session ends; mitigated to a safe no-op/retry, not fully closed -- see EXEC.md |
 | M4.2b | Separate native attach semantics or justified deferral | ACCEPTED | 72 unit + 11 fake HTTP; live attach against kind-sauron-test | Reuses M4.2's terminal guard/forwarding loop exactly, no new mechanics -- see EXEC.md |
-| M4.3 | Loopback background forwarding, manager, durable identity, bounded connections | RESEARCHED | Native API inspected; no implementation | NOT ACCEPTED |
+| M4.3 | Loopback background forwarding, manager, durable identity, bounded connections | ACCEPTED | 76 unit + 14 fake HTTP; repeated live accept-m4-forward.py; PORT_FORWARD.md | Pod TCP only; no Service resolution/reconnect/autostart; no endurance claim |
 | M4.4 | Combined adversarial flows, old-milestone regressions, measured soak | NOT STARTED | None | NOT ACCEPTED |
 
 ## M4.0 acceptance
@@ -157,6 +157,35 @@ production calls.
 Explicit/auto ports, conflicts, real TCP request, navigate/ns/context/logs while active,
 stop, target deletion/replacement, bounded simultaneous forwards, repeated start/stop,
 shutdown and OS listener cleanup. No implicit retry onto a replacement UID or context.
+
+Accepted 2026-09-16 against explicit `.test-cluster/config`, verified Docker endpoint,
+`kind-sauron-test` and same-cluster readonly alias `kind-sauron-test-b`. Real HTTP response
+`M4_HTTP_OK` verified through each tunnel, not just a successfully bound socket.
+
+| Case | Observed evidence |
+| --- | --- |
+| Declared picker / automatic / explicit | Actual HTTP; automatic nonzero loopback port; requested port exactly matched |
+| Conflict / concurrency limits | Occupied port visibly fails without disturbing owner; four forwards work; fifth refused; eight clients allowed, ninth rejected and counted |
+| Background identity | Resource, namespace, readonly context and logs changes preserve original tunnel; manager retains origin/UID |
+| Individual stop / repeated cycles | Others continue; 12 request/start/stop cycles; warm fd and thread counts return to baseline in complete runs |
+| Startup cancellation | Five no-readiness-pause start/stop cycles converge to zero active |
+| Target deletion / recreation | Listener and open client close; old port remains closed after new UID appears; fresh selection explicitly starts another session |
+| 32x9 / app exit | Narrow manager usable; exact pre/post stty equality; every recorded local port refuses connection after quit |
+| Policy | Default/CLI readonly denial; reload cannot undo CLI override for forward/exec/shell/attach; original-context revocation unit-tested |
+| Fault semantics | Fake HTTP 403/404/replacement/terminating/terminal phase before bind; monitor replacement/403 after bind closes listener |
+
+Two initial assertion failures were isolated harness bugs, not app failures: an old
+Listening row satisfied the new-start wait, and a retained-history outcome was below
+the viewport. Corrected with SessionId-aware readiness and scrolling; exact full flows
+repeated successfully. Review found a real pre-existing readonly-on-reload omission,
+fixed with unit regression and live readonly → reload → denied actions.
+
+Regression after M4.3: live M3 filter/sort harnesses, M4.0 lifecycle/log harness and
+opt-in cluster inspection test pass. This does not replace the full M4.4 matrix.
+Short debug-profile resource samples: RSS 29904→29904 KiB, fds 15→15, threads 4→4;
+another pass RSS 29904→29860 KiB, fds 14→15, threads 4→4. Not a soak or marketing claim.
+Run `python3 scripts/accept-m4-forward.py`; `--policy-only` repeats just the CLI/reload
+denial flow. No production calls, published artifacts or m4-accepted tag.
 
 ## M4.4 combined and regression acceptance
 

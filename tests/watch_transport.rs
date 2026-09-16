@@ -185,6 +185,217 @@ fn resource() -> Resource {
         verbs: vec!["list".into(), "watch".into()],
     }
 }
+
+#[tokio::test]
+async fn forward_rejects_forbidden_gone_replaced_and_terminating_targets() {
+    use sauron::kube::forward::{self, ErrorKind, Ports, Progress};
+    let target = Arc::new(Object::new(
+        json!({"kind":"Pod","apiVersion":"v1","metadata":{"name":"p","namespace":"default","uid":"old"}}),
+    ));
+    for (code, body, expected) in [
+        (
+            403,
+            json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","message":"secret credential sentinel","code":403}),
+            ErrorKind::PermissionDenied,
+        ),
+        (
+            404,
+            json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}),
+            ErrorKind::TargetGone,
+        ),
+        (
+            200,
+            json!({"kind":"Pod","apiVersion":"v1","metadata":{"uid":"new"}}),
+            ErrorKind::TargetReplaced,
+        ),
+        (
+            200,
+            json!({"kind":"Pod","apiVersion":"v1","metadata":{"uid":"old","deletionTimestamp":"2026-09-16T10:00:00Z"}}),
+            ErrorKind::TargetTerminating,
+        ),
+        (
+            200,
+            json!({"kind":"Pod","apiVersion":"v1","metadata":{"uid":"old"},"status":{"phase":"Failed"}}),
+            ErrorKind::TargetEnded,
+        ),
+    ] {
+        let server = Server::new(move |_| (code, body.to_string())).await;
+        let mut connection = connection(server.client());
+        connection.settings.readonly = false;
+        let (tx, rx) = tokio::sync::watch::channel(Progress::default());
+        let error = forward::run(
+            connection,
+            target.clone(),
+            Ports {
+                local: 0,
+                remote: 80,
+            },
+            tx,
+        )
+        .await
+        .expect_err("reject");
+        assert_eq!(error.kind, expected);
+        assert!(!error.message.contains("sentinel"));
+        assert!(rx.borrow().local.is_none());
+    }
+}
+
+#[tokio::test]
+async fn forward_monitor_closes_listener_on_replacement_or_unverifiable_identity() {
+    use sauron::kube::forward::{self, ErrorKind, Ports, Progress};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for (code, changed_body, expected) in [
+        (
+            200,
+            json!({"kind":"Pod","apiVersion":"v1","metadata":{"uid":"new"}}),
+            ErrorKind::TargetReplaced,
+        ),
+        (
+            403,
+            json!({"kind":"Status","apiVersion":"v1","reason":"Forbidden","code":403}),
+            ErrorKind::PermissionDenied,
+        ),
+    ] {
+        let changed = Arc::new(AtomicBool::new(false));
+        let flag = changed.clone();
+        let pod = json!({"kind":"Pod","apiVersion":"v1","metadata":{"name":"p","namespace":"default","uid":"old"}});
+        let initial = pod.to_string();
+        let server = Server::new(move |path| {
+            assert!(!path.contains("portforward"));
+            if flag.load(Ordering::SeqCst) {
+                (code, changed_body.to_string())
+            } else {
+                (200, initial.clone())
+            }
+        })
+        .await;
+        let mut connection = connection(server.client());
+        connection.settings.readonly = false;
+        let (tx, mut rx) = tokio::sync::watch::channel(Progress::default());
+        let worker = forward::run(
+            connection,
+            Arc::new(Object::new(pod)),
+            Ports {
+                local: 0,
+                remote: 80,
+            },
+            tx,
+        );
+        let observer = async {
+            rx.changed().await.expect("listening");
+            let address = rx.borrow().local.expect("bound");
+            changed.store(true, Ordering::SeqCst);
+            address
+        };
+        let (result, address) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(worker, observer)
+        })
+        .await
+        .expect("monitor deadline");
+        assert_eq!(result.expect_err("must stop").kind, expected);
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        let _reusable = TcpListener::bind(address).await.expect("listener released");
+    }
+}
+
+#[tokio::test]
+async fn forward_auto_loopback_conflict_cancellation_and_readonly() {
+    use sauron::{
+        app::session::{Kind, Scope, Sessions},
+        kube::forward::{self, ErrorKind, Ports, Progress},
+    };
+    let pod = json!({"kind":"Pod","apiVersion":"v1","metadata":{"name":"p","namespace":"default","uid":"old"}});
+    let response = pod.to_string();
+    let server = Server::new(move |path| {
+        assert!(!path.contains("portforward"));
+        (200, response.clone())
+    })
+    .await;
+    let target = Arc::new(Object::new(pod));
+    let readonly = connection(server.client());
+    let (tx, rx) = tokio::sync::watch::channel(Progress::default());
+    assert_eq!(
+        forward::run(
+            readonly,
+            target.clone(),
+            Ports {
+                local: 0,
+                remote: 80
+            },
+            tx
+        )
+        .await
+        .expect_err("readonly")
+        .kind,
+        ErrorKind::PermissionDenied
+    );
+    assert!(rx.borrow().local.is_none());
+    let mut connection = connection(server.client());
+    connection.settings.readonly = false;
+    let mut sessions = Sessions::default();
+    let scope = Scope {
+        epoch: 0,
+        request: 0,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/pods".into(),
+        namespace: "default".into(),
+        name: "p".into(),
+        uid: "old".into(),
+    };
+    let (tx, mut rx) = tokio::sync::watch::channel(Progress::default());
+    let c = connection.clone();
+    let object = target.clone();
+    sessions
+        .spawn(
+            Kind::PortForward,
+            scope,
+            CancellationToken::new(),
+            |_| async move {
+                let _ = forward::run(
+                    c,
+                    object,
+                    Ports {
+                        local: 0,
+                        remote: 80,
+                    },
+                    tx,
+                )
+                .await;
+                sauron::app::session::Outcome::Completed
+            },
+        )
+        .expect("spawn");
+    tokio::time::timeout(Duration::from_secs(2), rx.changed())
+        .await
+        .expect("bounded")
+        .expect("listening");
+    let address = rx.borrow().local.expect("bound");
+    assert_eq!(address.ip().to_string(), "127.0.0.1");
+    assert_ne!(address.port(), 0);
+    let (tx, _) = tokio::sync::watch::channel(Progress::default());
+    assert_eq!(
+        forward::run(
+            connection,
+            target,
+            Ports {
+                local: address.port(),
+                remote: 80
+            },
+            tx
+        )
+        .await
+        .expect_err("conflict")
+        .kind,
+        ErrorKind::PortInUse
+    );
+    sessions.shutdown().await;
+    assert_eq!(sessions.active_count(), 0);
+    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    let _listener = TcpListener::bind(address)
+        .await
+        .expect("port immediately reusable");
+}
 fn crd_definitions_resource() -> Resource {
     Resource {
         api: ApiResource {

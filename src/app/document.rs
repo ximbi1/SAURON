@@ -35,6 +35,7 @@ struct Segment {
 }
 
 pub struct Document {
+    pub forward_manager: bool,
     pub title: String,
     pub lines: VecDeque<String>,
     pub scroll: usize,
@@ -72,6 +73,7 @@ pub struct Document {
 impl Document {
     pub fn new(title: String, text: String) -> Self {
         let mut doc = Self {
+            forward_manager: false,
             title: crate::safety::text(&title),
             lines: VecDeque::new(),
             scroll: 0,

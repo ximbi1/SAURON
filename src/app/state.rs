@@ -21,6 +21,7 @@ pub enum Mode {
 pub enum PickerKind {
     Context,
     Namespace,
+    Port,
 }
 pub struct Picker {
     pub kind: PickerKind,
@@ -74,6 +75,7 @@ pub struct State {
     pub dirty: bool,
     pub quit: bool,
     pub watch_errors: u64,
+    pub forward_count: usize,
     pub filter_unknown: usize,
     pub autoselect: bool,
     pub page_size: usize,
@@ -110,6 +112,7 @@ impl State {
             dirty: true,
             quit: false,
             watch_errors: 0,
+            forward_count: 0,
             filter_unknown: 0,
             autoselect: true,
             page_size: 20,

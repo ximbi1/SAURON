@@ -11,7 +11,7 @@ Denied outright under `settings.readonly` (the default), before any connection i
 attempted -- the check runs synchronously in the command dispatcher, so a denial
 never spends a network round-trip. `--readonly` on the CLI is a hard override: it
 forces `readonly = true` regardless of what a cluster/context config layer requests,
-refreshed on every reconnect. Lifting it (`readonly = false` in `config.toml`, no
+refreshed on every reconnect and configuration reload. Lifting it (`readonly = false` in `config.toml`, no
 CLI flag to set it, deliberately) enables both `:exec` and the "OPERATIONAL
 (exec/shell enabled)" heading in place of "READ ONLY". Never exposed for the
 project's production cluster during this development task -- exercised only against

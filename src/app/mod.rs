@@ -1,5 +1,6 @@
 pub mod document;
 pub mod event;
+pub mod forwards;
 pub mod session;
 pub mod state;
 pub mod terminal;
@@ -28,6 +29,8 @@ pub struct Runtime {
     tx: mpsc::Sender<Event>,
     tasks: JoinSet<()>,
     sessions: session::Sessions,
+    forwards: forwards::Forwards,
+    pending_forward: Option<(Connection, crate::resources::SharedObject)>,
     scope: CancellationToken,
     document: CancellationToken,
     pending: Option<ResourceCommand>,
@@ -74,6 +77,8 @@ impl Runtime {
                 tx,
                 tasks: JoinSet::new(),
                 sessions: session::Sessions::default(),
+                forwards: forwards::Forwards::default(),
+                pending_forward: None,
                 scope: CancellationToken::new(),
                 document: CancellationToken::new(),
                 pending: None,
@@ -271,6 +276,7 @@ impl Runtime {
         });
     }
     fn cancel_scope(&mut self) {
+        self.pending_forward = None;
         self.palette_document = None;
         self.scope.cancel();
         self.document.cancel();
@@ -653,13 +659,28 @@ impl Runtime {
             }
             Command::Reload => {
                 let config = Config::load(self.config_path.as_deref())?;
-                let settings = if let Some(c) = &self.connection {
+                let mut settings = if let Some(c) = &self.connection {
                     config.resolve(&c.cluster, &c.context)?
                 } else {
                     config.resolve("", "")?
                 };
+                settings.readonly |= self.options.force_readonly;
                 let keymap = Keymap::compile(&settings.keys)?;
+                // Validate all original scopes before changing any policy or task.
+                let mut revoked = Vec::new();
+                for (id, entry) in &self.forwards.entries {
+                    if self.options.force_readonly
+                        || config
+                            .resolve(&entry.scope.cluster, &entry.scope.context)?
+                            .readonly
+                    {
+                        revoked.push(*id);
+                    }
+                }
                 self.config = config;
+                for id in revoked {
+                    self.sessions.stop(id);
+                }
                 self.state.settings = settings.clone();
                 self.state.keymap = keymap;
                 if let Some(connection) = self.connection.as_mut() {
@@ -718,6 +739,27 @@ impl Runtime {
                 );
                 self.open_attach(container)
             }
+            Command::Forward(ports) => {
+                anyhow::ensure!(
+                    !self.options.force_readonly && !self.state.settings.readonly,
+                    "Port forwarding is unavailable in read-only mode"
+                );
+                let connection = self.connection.clone().context("Not connected")?;
+                let object = self.state.selected_object().context("Select a Pod first")?;
+                self.start_forward(connection, object, ports)
+            }
+            Command::StopForward(number) => {
+                let id = self
+                    .forwards
+                    .entries
+                    .keys()
+                    .find(|id| id.number() == number)
+                    .copied()
+                    .context("Unknown forward session ID")?;
+                anyhow::ensure!(self.sessions.stop(id), "Forward already ended");
+                self.update_forwards();
+                Ok(())
+            }
         }
     }
     pub fn action(&mut self, action: Action) -> Result<()> {
@@ -759,6 +801,15 @@ impl Runtime {
             }
             Logs => self.open_logs(None, false)?,
             PreviousLogs => self.open_logs(None, true)?,
+            Forward => self.pick_forward()?,
+            ForwardManager => {
+                let text = self.forwards.document(&self.sessions);
+                self.open_static("Port forwards · original contexts", text);
+                if let Some(doc) = self.active_document_mut() {
+                    doc.forward_manager = true;
+                }
+            }
+            StopForward => self.open_palette("pf_stop ".into()),
             LogsVisible => {
                 self.state.prepare();
                 let objects = self.state.rows.clone();
@@ -873,6 +924,7 @@ impl Runtime {
     }
     fn mode_name(&self) -> &'static str {
         match &self.state.mode {
+            Mode::Document(doc) if doc.forward_manager => "forwards",
             Mode::Document(doc) if doc.session.is_some() => "logs",
             Mode::Document(_) => "document",
             _ => "table",
@@ -909,6 +961,13 @@ impl Runtime {
         self.refresh_document()
     }
     fn refresh_document(&mut self) -> Result<()> {
+        if self
+            .active_document_mut()
+            .is_some_and(|doc| doc.forward_manager)
+        {
+            self.update_forwards();
+            return Ok(());
+        }
         if let Some(request) = self
             .active_document_mut()
             .and_then(|d| d.log_request.clone())
@@ -1086,6 +1145,19 @@ impl Runtime {
         self.pending_interactive.take()
     }
     fn session_finished(&mut self, record: session::Record) {
+        if record.kind == session::Kind::PortForward {
+            // Durable session identity, never current context/epoch. No forward
+            // event can become row/document data in the foreground view.
+            if self
+                .forwards
+                .entries
+                .get(&record.id)
+                .is_some_and(|entry| entry.scope == record.scope)
+            {
+                self.update_forwards();
+            }
+            return;
+        }
         if record.scope.epoch != self.state.epoch || record.scope.request != self.state.request {
             return;
         }
@@ -1099,9 +1171,10 @@ impl Runtime {
     }
     pub fn info(&self) -> String {
         let mut out = format!(
-            "{} {}\nRead-only: enforced (mutations unavailable)\nContext: {}\nResource: {}\nRows: {}\nCache estimated JSON bytes: {}\nWatch errors: {}\nActive tasks: {}\nQueue capacity: {} / 256\n",
+            "{} {}\nRead-only: {}\nContext: {}\nResource: {}\nRows: {}\nCache estimated JSON bytes: {}\nWatch errors: {}\nActive tasks: {}\nQueue capacity: {} / 256\n",
             crate::brand::NAME,
             crate::brand::VERSION,
+            self.state.settings.readonly,
             self.state.context,
             self.state.query.resource,
             self.state.store.objects.len(),
@@ -1122,6 +1195,10 @@ impl Runtime {
             "Active sessions: {}\n",
             self.sessions.active_count()
         ));
+        out.push_str(&format!(
+            "Active forwards: {}\n",
+            self.forwards.active_count(&self.sessions)
+        ));
         crate::safety::text(&out)
     }
     pub async fn shutdown(&mut self) {
@@ -1130,6 +1207,114 @@ impl Runtime {
         self.sessions.shutdown().await;
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
+    }
+    fn pick_forward(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            !self.options.force_readonly && !self.state.settings.readonly,
+            "Port forwarding is unavailable in read-only mode"
+        );
+        let connection = self.connection.clone().context("Not connected")?;
+        let object = self.state.selected_object().context("Select a Pod first")?;
+        crate::kube::forward::validate_target(&object)?;
+        let ports = crate::kube::forward::declared_ports(&object);
+        anyhow::ensure!(
+            !ports.is_empty(),
+            "No declared TCP ports; use :forward REMOTE or :forward LOCAL:REMOTE"
+        );
+        self.document.cancel();
+        self.state.request += 1;
+        self.pending_forward = Some((connection, object));
+        self.state.mode = Mode::Picker(state::Picker {
+            kind: state::PickerKind::Port,
+            title:
+                "Pod TCP port · Enter uses automatic loopback port · custom: :forward LOCAL:REMOTE"
+                    .into(),
+            items: ports.iter().map(ToString::to_string).collect(),
+            active: None,
+            cursor: 0,
+        });
+        Ok(())
+    }
+    fn start_forward(
+        &mut self,
+        connection: Connection,
+        object: crate::resources::SharedObject,
+        ports: crate::kube::forward::Ports,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.options.force_readonly
+                && !self.state.settings.readonly
+                && !connection.settings.readonly,
+            "Port forwarding is unavailable in read-only mode"
+        );
+        crate::kube::forward::validate_target(&object)?;
+        anyhow::ensure!(
+            self.forwards.active_count(&self.sessions) < crate::kube::forward::MAX_FORWARDS,
+            "Forward limit reached (4); stop one with :pf_stop ID"
+        );
+        let scope = session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: "v1/pods".into(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let (tx, rx) = tokio::sync::watch::channel(crate::kube::forward::Progress::default());
+        // Deliberately independent of scope/document tokens; Sessions owns shutdown.
+        let id = self.sessions.spawn(
+            session::Kind::PortForward,
+            scope.clone(),
+            CancellationToken::new(),
+            |_| async move {
+                let result = crate::kube::forward::run(connection, object, ports, tx.clone()).await;
+                tx.send_modify(|p| {
+                    p.ended = true;
+                    p.clients = 0;
+                    if let Err(error) = &result {
+                        p.last_error = Some(error.clone());
+                    }
+                });
+                match result {
+                    Ok(()) => session::Outcome::Completed,
+                    Err(error) => session::Outcome::Failed(error.to_string()),
+                }
+            },
+        )?;
+        self.forwards.prune(&self.sessions);
+        self.forwards.entries.insert(
+            id,
+            forwards::Entry {
+                scope,
+                ports,
+                started: std::time::Instant::now(),
+                progress: rx,
+            },
+        );
+        self.action(Action::ForwardManager)?;
+        self.update_forwards();
+        Ok(())
+    }
+    fn update_forwards(&mut self) {
+        for (id, entry) in &self.forwards.entries {
+            let progress = entry.progress.borrow();
+            if progress.local.is_some() && !progress.ended {
+                self.sessions.running(*id);
+            }
+        }
+        self.state.forward_count = self.forwards.active_count(&self.sessions);
+        if self
+            .active_document_mut()
+            .is_some_and(|doc| doc.forward_manager)
+        {
+            let text = self.forwards.document(&self.sessions);
+            if let Some(doc) = self.active_document_mut() {
+                doc.replace(text);
+            }
+        }
+        self.state.dirty = true;
     }
 }
 
@@ -1234,6 +1419,12 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                                             let result=match picker.kind{
                                                 state::PickerKind::Context=>{runtime.switch_context(item);Ok(())},
                                                 state::PickerKind::Namespace=>runtime.switch_namespace((item!="<all>").then_some(item)),
+                                                state::PickerKind::Port=>{
+                                                    match runtime.pending_forward.take() {
+                                                        Some((connection, object))=>crate::kube::forward::Ports::parse(&item).and_then(|ports| runtime.start_forward(connection,object,ports)),
+                                                        None=>Err(anyhow::anyhow!("Port selection expired; select the Pod again")),
+                                                    }
+                                                },
                                             };
                                             runtime.state.input_error=result.err().map(|e|e.to_string());
                                         }
@@ -1284,7 +1475,7 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                     terminal.draw(|frame|crate::ui::render(frame,&mut runtime.state,&suggestions))?;
                     runtime.state.dirty=false;
                 },
-                _=clock.tick()=>runtime.state.dirty=true,
+                _=clock.tick()=>runtime.update_forwards(),
                 Some(record)=runtime.sessions.join_next(),if !runtime.sessions.is_empty()=>runtime.session_finished(record),
                 Some(event)=rx.recv()=>{runtime.reduce(event);for _ in 0..63{match rx.try_recv(){Ok(event)=>runtime.reduce(event),Err(_)=>break}}},
                 Some(result)=runtime.tasks.join_next(),if !runtime.tasks.is_empty()=>{if result.is_err(){runtime.state.error=Some("Background task failed; refresh to retry".into());runtime.state.dirty=true;}},
@@ -1421,6 +1612,124 @@ fn edit(text: &mut String, key: crossterm::event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn forwarding_policy_denies_before_target_resolution_and_reload_preserves_cli() {
+        let mut rt = runtime();
+        rt.connection = None;
+        assert!(
+            rt.command("forward 8080")
+                .expect_err("readonly")
+                .to_string()
+                .contains("read-only")
+        );
+        rt.state.settings.readonly = false;
+        rt.options.force_readonly = true;
+        assert!(
+            rt.command("forward 8080")
+                .expect_err("forced readonly")
+                .to_string()
+                .contains("read-only")
+        );
+        assert!(
+            rt.action(Action::Forward)
+                .expect_err("picker gate")
+                .to_string()
+                .contains("read-only")
+        );
+        assert_eq!(rt.sessions.active_count(), 0);
+        rt.config_path = Some("tests/fixtures/operational.toml".into());
+        let mut connection = runtime().connection.take().expect("fixture connection");
+        connection.context = "kind-sauron-test".into();
+        rt.connection = Some(connection);
+        rt.command("reload").expect("reload with CLI override");
+        assert!(rt.state.settings.readonly);
+        assert!(
+            rt.connection
+                .as_ref()
+                .expect("connection")
+                .settings
+                .readonly
+        );
+        rt.options.force_readonly = false;
+        rt.command("reload").expect("explicit operational context");
+        assert!(!rt.state.settings.readonly);
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn background_session_survives_view_cancel_and_completion_cannot_replace_document() {
+        let mut rt = runtime();
+        rt.state.mode = Mode::Document(Document::new("current document".into(), "current".into()));
+        let scope = session::Scope {
+            epoch: rt.state.epoch,
+            request: rt.state.request,
+            context: "origin".into(),
+            cluster: "origin".into(),
+            resource: "v1/pods".into(),
+            namespace: "n".into(),
+            name: "p".into(),
+            uid: "pinned".into(),
+        };
+        let cancel = CancellationToken::new();
+        let id = rt
+            .sessions
+            .spawn(
+                session::Kind::PortForward,
+                scope.clone(),
+                cancel.clone(),
+                |_| std::future::pending(),
+            )
+            .expect("spawn");
+        let (_tx, rx) = tokio::sync::watch::channel(crate::kube::forward::Progress::default());
+        rt.forwards.entries.insert(
+            id,
+            forwards::Entry {
+                scope,
+                ports: crate::kube::forward::Ports {
+                    local: 0,
+                    remote: 80,
+                },
+                started: std::time::Instant::now(),
+                progress: rx,
+            },
+        );
+        for _ in 0..10 {
+            rt.cancel_scope();
+        }
+        assert!(!cancel.is_cancelled());
+        assert_eq!(rt.forwards.active_count(&rt.sessions), 1);
+        rt.state.mode = Mode::Document(Document::new("new scope".into(), "untouched".into()));
+        rt.command(&format!("pf_stop {}", id.number()))
+            .expect("stop from any scope");
+        let record = rt.sessions.join_next().await.expect("completion");
+        rt.session_finished(record);
+        assert_eq!(rt.forwards.active_count(&rt.sessions), 0);
+        let doc = rt.active_document_mut().expect("doc");
+        assert_eq!(doc.title, "new scope");
+        assert_eq!(doc.lines[0], "untouched");
+        // Policy reload evaluates the *original* context, not the operational
+        // context currently displayed. It revokes existing access as well.
+        let old_entry = rt.forwards.entries.remove(&id).expect("entry");
+        let revoked = CancellationToken::new();
+        let id = rt
+            .sessions
+            .spawn(
+                session::Kind::PortForward,
+                old_entry.scope.clone(),
+                revoked.clone(),
+                |_| std::future::pending(),
+            )
+            .expect("new session");
+        rt.forwards.entries.insert(id, old_entry);
+        rt.connection.as_mut().expect("connection").context = "kind-sauron-test".into();
+        rt.config_path = Some("tests/fixtures/operational.toml".into());
+        rt.command("reload").expect("reload");
+        assert!(!rt.state.settings.readonly);
+        assert!(
+            revoked.is_cancelled(),
+            "original context is readonly despite current view opt-in"
+        );
+        rt.shutdown().await;
+    }
     #[tokio::test]
     async fn connection_completion_preserves_palette_opened_during_startup() {
         let mut rt = runtime();

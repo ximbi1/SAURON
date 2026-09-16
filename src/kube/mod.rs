@@ -1,6 +1,7 @@
 pub mod discovery;
 pub mod evidence;
 pub mod exec;
+pub mod forward;
 pub mod logs;
 pub mod printer;
 pub mod watch;

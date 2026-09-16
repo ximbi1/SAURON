@@ -22,6 +22,9 @@ pub enum Action {
     Timeline,
     Logs,
     PreviousLogs,
+    Forward,
+    ForwardManager,
+    StopForward,
     LogsVisible,
     PauseLogs,
     ClearLogs,
@@ -53,6 +56,27 @@ pub struct Binding {
 pub fn registry() -> Vec<Binding> {
     let definitions = [
         (Action::Quit, "quit", "global", "Quit", "ctrl-c"),
+        (
+            Action::Forward,
+            "forward",
+            "table",
+            "Port-forward: choose declared Pod TCP port",
+            "f",
+        ),
+        (
+            Action::ForwardManager,
+            "pf",
+            "navigation",
+            "Background port-forward manager",
+            "P",
+        ),
+        (
+            Action::StopForward,
+            "pf_stop",
+            "forwards",
+            "Stop forward (enter session ID)",
+            "s",
+        ),
         (
             Action::Down,
             "down",
@@ -288,7 +312,7 @@ impl Keymap {
                 entry.keys = keys.clone();
             }
         }
-        for mode in ["table", "document", "logs"] {
+        for mode in ["table", "document", "logs", "forwards"] {
             let mut used = Vec::new();
             for binding in bindings.iter().filter(|b| available(b.mode, mode)) {
                 for key in &binding.keys {
@@ -349,7 +373,7 @@ pub fn available(binding: &str, mode: &str) -> bool {
     binding == "global"
         || binding == mode
         || (mode != "input" && binding == "navigation")
-        || (mode == "logs" && binding == "document")
+        || (matches!(mode, "logs" | "forwards") && binding == "document")
 }
 fn normalize(mut m: KeyModifiers, c: KeyCode) -> KeyModifiers {
     if matches!(c, KeyCode::Char(_)) {
@@ -405,6 +429,8 @@ pub struct ResourceCommand {
 }
 #[derive(Clone, Debug)]
 pub enum Command {
+    Forward(crate::kube::forward::Ports),
+    StopForward(u64),
     Resource(ResourceCommand),
     Namespace(Option<String>),
     Context(Option<String>),
@@ -518,6 +544,19 @@ pub fn parse(s: &str) -> Result<Command> {
     // are handled here, before the registry lookup below, so they're never shadowed
     // by (and never shadow) a same-named registered action.
     match name.as_str() {
+        "forward" if !tail.is_empty() => {
+            ensure!(
+                tail.len() == 1 && filter.is_none(),
+                "Use :forward REMOTE or :forward LOCAL:REMOTE"
+            );
+            return Ok(Command::Forward(crate::kube::forward::Ports::parse(
+                &tail[0],
+            )?));
+        }
+        "pf_stop" if !tail.is_empty() => {
+            ensure!(tail.len() == 1 && filter.is_none(), "Use :pf_stop ID");
+            return Ok(Command::StopForward(tail[0].parse()?));
+        }
         "ctx" | "context" => {
             ensure!(tail.len() <= 1, "Use :ctx [context]");
             return Ok(Command::Context(tail.first().cloned()));
@@ -795,4 +834,29 @@ fn logs_inherit_documents_and_validate_conflicts() {
         BTreeMap::from([("pause_logs".into(), vec!["w".into()])]),
     )]);
     assert!(Keymap::compile(&overrides).is_err());
+}
+#[test]
+fn forwarding_commands_have_canonical_actions_and_structured_ports() {
+    assert!(matches!(
+        parse(":forward"),
+        Ok(Command::Action(Action::Forward))
+    ));
+    assert!(matches!(
+        parse(":pf"),
+        Ok(Command::Action(Action::ForwardManager))
+    ));
+    assert!(matches!(
+        parse(":pf_stop"),
+        Ok(Command::Action(Action::StopForward))
+    ));
+    assert!(matches!(parse(":pf_stop 17"), Ok(Command::StopForward(17))));
+    assert!(matches!(
+        parse(":forward 0:8080"),
+        Ok(Command::Forward(crate::kube::forward::Ports {
+            local: 0,
+            remote: 8080
+        }))
+    ));
+    assert!(parse(":forward 0.0.0.0:8080").is_err());
+    assert!(parse(":pf_stop -1").is_err());
 }

@@ -1,8 +1,8 @@
-# Long-running ownership (M4.0 implementation)
+# Long-running ownership
 
 Current application workers already live in Runtime's JoinSet and use cancellation,
 epoch and request gates. Discovery/watches/documents stay there. `app/session.rs` adds
-a small owner for log sessions, not a universal protocol abstraction.
+a small owner for logs, one-shot exec and background forwards, not a universal protocol abstraction.
 
 Each session has a monotonic ID, kind, immutable scope/target, cancellation token,
 start instant, Starting/Running/Stopping/Ended state and final outcome. Completion is
@@ -12,16 +12,20 @@ Limits: 8 active tasks and 64 completed records. Shutdown cancels, waits two sec
 aborts overdue work and joins it. Dropping the owner cancels tokens and aborts owned tasks.
 Completion/panic/abort is attributed through Tokio task identity, never generic watch
 error text. `:info` includes active sessions. API failures retain safe contextual messages;
-finer error categories for operational protocols remain subsequent M4 work.
+forwarding has structured target/permission/timeout/bind/protocol error categories.
 
 Foreground logs belong to epoch + request + session ID and original Pod UID/context.
 Closing/replacing their document or changing scope cancels them. Search and palette
 over the same document retain ownership. Status belongs to that document/session,
 not persistent watch errors. Connecting is not Streaming; EOF is not failure.
 
-Background forwards will own an immutable connection/target UID plus local/remote port
-and SessionId, independent of foreground navigation. They must not simply bypass every
-identity check. Protocol workers stay separate; exec terminal handoff is foreground.
+Background forwards own an immutable connection/target UID plus local/remote port
+and SessionId, independent of foreground navigation. A bounded latest-value channel
+updates only that session's metadata, never the foreground object/document stream.
+The transport revalidates UID independently; see PORT_FORWARD.md for limits and cleanup.
+Original-context policy revocation on config reload stops the corresponding forwards;
+merely navigating into a readonly context does not migrate or stop them. Interactive
+terminal handoff suspends foreground input/rendering, not the owned background tasks.
 
 Cancellation ends local observation/control, **not remote rollback**. An executed
 command may already have changed application state. Ending a tunnel closes local

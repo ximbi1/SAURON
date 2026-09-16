@@ -41,6 +41,28 @@ case "${1:-check}" in
   m3-sort-fixtures)
     kube_test apply -f "$repo_dir/tests/fixtures/m3-sort.yaml"
     ;;
+  m4-fixtures)
+    kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"
+    kube_test wait --for=condition=Ready pod/m4-sessions pod/m4-logburst -n sauron-fixtures --timeout=60s
+    ;;
+  m4-recreate)
+    kube_test delete pod m4-sessions -n sauron-fixtures --wait=true --timeout=45s
+    kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"
+    kube_test wait --for=condition=Ready pod/m4-sessions -n sauron-fixtures --timeout=60s
+    ;;
+  m4-ephemeral)
+    kube_test patch pod m4-sessions -n sauron-fixtures --subresource=ephemeralcontainers --type=merge \
+      -p '{"spec":{"ephemeralContainers":[{"name":"observer","image":"busybox:1.37","command":["sh","-c","echo M4_EPHEMERAL_READY; sleep 3600"]}]}}'
+    # No condition= wait target exists for ephemeral containers; poll their status
+    # directly so callers never race a log request against a not-yet-running one.
+    for _ in $(seq 1 30); do
+      state="$(kube_test get pod m4-sessions -n sauron-fixtures \
+        -o jsonpath='{.status.ephemeralContainerStatuses[?(@.name=="observer")].state.running}')"
+      [ -n "$state" ] && break
+      sleep 1
+    done
+    [ -n "$state" ] || { echo 'Ephemeral container observer never reached Running.' >&2; exit 1; }
+    ;;
   m3-sort-update)
     kube_test patch configmap m3-sort-a -n sauron-fixtures --type merge -p '{"data":{"rank":"20"}}'
     ;;

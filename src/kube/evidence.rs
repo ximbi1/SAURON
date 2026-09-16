@@ -1,14 +1,9 @@
 use super::{Connection, discovery::Resource};
 use crate::app::session::{Outcome, SessionId};
-use crate::{
-    app::event::{Event, Payload},
-    command::Action,
-    resources::Object,
-};
-use ::kube::api::{ListParams, LogParams};
+use crate::{app::event::Event, command::Action, resources::Object};
+use ::kube::api::ListParams;
 use anyhow::{Context, Result, ensure};
-use futures_util::AsyncReadExt;
-use k8s_openapi::api::core::v1::{Event as KubeEvent, Pod};
+use k8s_openapi::api::core::v1::Event as KubeEvent;
 use tokio::sync::mpsc;
 
 pub async fn document(
@@ -162,10 +157,7 @@ pub async fn events(
     }
 }
 
-pub struct LogOptions {
-    pub container: Option<String>,
-    pub previous: bool,
-}
+pub use super::logs::LogOptions;
 
 pub async fn logs(
     connection: Connection,
@@ -176,115 +168,16 @@ pub async fn logs(
     tx: mpsc::Sender<Event>,
     session: SessionId,
 ) -> Outcome {
-    let LogOptions {
-        container,
-        previous,
-    } = options;
-    let job = async {
-        ensure!(
-            object.kind == "Pod" && object.api_version == "v1",
-            "Logs currently support Pods; choose a Pod first"
-        );
-        let names = object
-            .value
-            .pointer("/spec/containers")
-            .and_then(serde_json::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|c| c["name"].as_str())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        ensure!(
-            container.is_some() || names.len() == 1,
-            "Choose a container with :logs NAME (available: {})",
-            names.join(", ")
-        );
-        let api: ::kube::Api<Pod> =
-            ::kube::Api::namespaced(connection.client.clone(), &object.namespace);
-        let fresh = tokio::time::timeout(connection.timeout(), api.get(&object.name))
-            .await
-            .context("Pod identity check timed out")?
-            .map_err(|e| {
-                anyhow::anyhow!(crate::safety::api_error(&e, "checking Pod UID before logs"))
-            })?;
-        ensure!(
-            !object.uid.is_empty() && fresh.metadata.uid.as_deref() == Some(object.uid.as_str()),
-            "Pod replaced; select its new incarnation"
-        );
-        let params = LogParams {
-            container: container.or_else(|| names.first().map(|s| s.to_string())),
-            follow: !previous,
-            previous,
-            timestamps: true,
-            tail_lines: Some(300),
-            ..Default::default()
-        };
-        let mut stream =
-            tokio::time::timeout(connection.timeout(), api.log_stream(&object.name, &params))
-                .await
-                .context("Log connection timed out")?
-                .map_err(|e| anyhow::anyhow!(crate::safety::api_error(&e, "opening Pod logs")))?;
-        tx.send(Event {
-            epoch,
-            payload: Payload::LogStarted { request, session },
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("Log view closed"))?;
-        let mut chunk = [0u8; 4096];
-        let mut line = Vec::with_capacity(16_384);
-        let mut truncated = false;
-        loop {
-            let count = stream
-                .read(&mut chunk)
-                .await
-                .map_err(|_| anyhow::anyhow!("Log stream interrupted"))?;
-            if count == 0 {
-                if !line.is_empty() {
-                    send_line(&tx, epoch, request, session, &line, truncated).await?;
-                }
-                break;
-            }
-            for byte in &chunk[..count] {
-                if *byte == b'\n' {
-                    send_line(&tx, epoch, request, session, &line, truncated).await?;
-                    line.clear();
-                    truncated = false;
-                } else if line.len() < 16_384 {
-                    line.push(*byte);
-                } else {
-                    truncated = true;
-                }
-            }
-        }
-        Ok::<_, anyhow::Error>(())
-    };
-    match job.await {
-        Ok(()) => Outcome::Completed,
-        Err(e) => Outcome::Failed(e.to_string()),
-    }
-}
-
-async fn send_line(
-    tx: &mpsc::Sender<Event>,
-    epoch: u64,
-    request: u64,
-    session: SessionId,
-    bytes: &[u8],
-    truncated: bool,
-) -> Result<()> {
-    let mut line = crate::safety::text(&String::from_utf8_lossy(bytes));
-    if truncated {
-        line.push_str(" [line truncated at 16 KiB]");
-    }
-    tx.send(Event {
-        epoch,
-        payload: Payload::LogLine {
-            request,
-            session,
-            line,
+    super::logs::run(
+        connection,
+        super::logs::Request {
+            objects: vec![object],
+            options,
         },
-    })
+        epoch,
+        request,
+        tx,
+        session,
+    )
     .await
-    .map_err(|_| anyhow::anyhow!("Log view closed"))
 }

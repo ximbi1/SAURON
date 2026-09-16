@@ -243,6 +243,23 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Mode::Filter(text) => format!("/{text}▏"),
         Mode::Search(_, text) => format!("search /{text}▏"),
         Mode::Picker(_) => " ↑↓ move   enter switch   esc cancel ".into(),
+        Mode::Document(doc) if doc.session.is_some() => [
+            (Action::Back, "return"),
+            (Action::PauseLogs, "pause/resume"),
+            (Action::ClearLogs, "clear"),
+            (Action::Filter, "search"),
+            (Action::FilterLogs, "matching lines"),
+            (Action::Refresh, "restart"),
+        ]
+        .into_iter()
+        .filter_map(|(action, label)| {
+            state
+                .keymap
+                .primary_key(action)
+                .map(|key| format!("{key} {label}"))
+        })
+        .collect::<Vec<_>>()
+        .join("   "),
         _ => hint_bar(&state.keymap, matches!(state.mode, Mode::Document(_))),
     };
     frame.render_widget(

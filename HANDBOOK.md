@@ -137,7 +137,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | M3 documents | ACCEPTED | shared viewer, search, UID-pinned refresh, narrow/resize live acceptance |
 | M3 Events/CRD columns/combined flows | ACCEPTED | docs/M3_ACCEPTANCE.md; local annotated m3-accepted at 9eac329 |
 | Server Table negotiation | DEFERRED | M3 accepted safe live CRD printer projection instead; not Table parity |
-| Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
+| Pod logs | ACCEPTED, incl. M4.1 advanced | multi-source/init/ephemeral/pause/search/filter/eviction live-proven; docs/LOGS.md |
 | M4 session foundation | ACCEPTED | 62 unit + 11 fake HTTP; live scripts/accept-m4.py, exact palette race replay and stty restoration |
 | Exec/attach/port-forward | RESEARCHED | locked kube-client 4.2.0 APIs inspected; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
@@ -242,14 +242,15 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. M4 is now authorized: audit → minimal
-owned sessions using existing logs → advanced logs → exec/shell/attach feasibility →
-background forwards → combined acceptance/soak. Ledger: docs/M4_ACCEPTANCE.md.
+isolated unit tests alone. Keep buildable handoffs. M4.0 (session foundation) and
+M4.1 (advanced logs) are ACCEPTED. Current: M4.2 (native exec/shell) next, then M4.2b
+(attach), M4.3 (port-forward manager), M4.4 (combined acceptance + soak).
+Ledger: docs/M4_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
 
-## M4 audit (2026-09-16)
+## M4 initial audit (2026-09-16; historical baseline, M4.0 resolves lifecycle gaps)
 
 Runtime already owns a JoinSet, scope/document CancellationTokens, a 256-slot channel,
 epoch gate and document request gate. Shutdown cancels then aborts/joins tasks. Retain
@@ -268,6 +269,51 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.1 accepted (advanced logs); two test-harness bugs found and fixed
+
+Ran `python3 scripts/accept-m4.py logs` (the harness left mid-flight): failed twice,
+neither time in the application. (1) `pods -n sauron-fixtures / m4-sessions OR healthy`
+asserted a stale `[2 / 2;` total-row count from before the fixture namespace had grown
+to 6 Pods across M1-M4 fixtures; the real, correct behavior is `[2 / 6;` (2 filtered
+out of 6 total) -- fixed the assertion to check the filtered count only. (2) requesting
+logs from a freshly-added ephemeral container 400'd: `scripts/test-cluster.sh
+m4-ephemeral` patched the container then the harness slept a fixed 1 second before
+requesting logs, which isn't always enough for the container to actually reach
+Running -- confirmed live (kubectl logs succeeded moments later once it was Running,
+and a manual retry through the app also succeeded) that this was a timing race in the
+harness, not a log-request/UID bug. Fixed by polling
+`.status.ephemeralContainerStatuses[?(@.name=="observer")].state.running` in
+`test-cluster.sh` until non-empty instead of a fixed sleep. Also fixed a Pyright
+`possibly unbound` on `expect()`'s `output` variable. Full suite green (65 unit + 11
+fake HTTP) after both fixes; `accept-m4.py logs` then PASSED twice in a row, and
+`accept-m4.py` (M4.0 foundation) re-run clean to confirm no regression from M4.1's
+shared-code changes. M4.1 is ACCEPTED -- explicit container/init/ephemeral choice,
+`:logs *`/`:logs_visible` multi-source, pause/search/matching-line filter/clear,
+Refresh restarting with fresh identity, bounded eviction with a visible count and
+`PARTIAL` notice, same-name-replacement correctly failing rather than retargeting,
+ANSI sanitization, 32x9, and terminal restoration all demonstrated live. M4.2
+(exec/shell) is next.
+
+### 2026-09-16 — M4.1 implementation and test checkpoint
+
+Added kube/logs.rs with bounded FuturesUnordered fan-in (no child Tokio tasks), fixed
+UID/source sets and pre/post-connection plus five-second identity checks. Shared viewer
+now batches search indexing per render, preserves paused anchors on eviction, counts
+evictions, filters matching lines, clears and restarts. Logs inherit document keymap
+with logs-only pause/clear/filter actions; source errors remain explicit. Added guarded
+reproducible m4-sessions and m4-logburst fixtures; both Ready. Full checks passed
+(65 unit + 11 fake HTTP = 76). First live advanced-log pass in progress; not accepted.
+Transient compile shadowing and clippy nested-format error corrected before this suite.
+
+### 2026-09-16 — M4.1 scope decision
+
+After M4.0 live acceptance, implement bounded all-container and explicit visible-Pod
+aggregation first (8 sources max), source tags, regular/init/ephemeral choice,
+UID pre/post/open and periodic checks, pause/clear/matching-line controls. Retain
+arrival order with Kubernetes timestamps; do not claim timestamp merge, workload/
+Service/marked aggregation or exports. Shared document viewer remains the presentation
+model; logs-only mode inherits document bindings. No new dependencies. Contract LOGS.md.
 
 ### 2026-09-16 — M4.0 accepted; continuing M4.1
 

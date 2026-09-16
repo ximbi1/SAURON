@@ -45,6 +45,10 @@ pub struct Document {
     pub streaming: bool,
     pub session: Option<super::session::SessionId>,
     pub session_state: Option<super::session::State>,
+    pub log_request: Option<crate::kube::logs::Request>,
+    pub source_errors: Vec<String>,
+    pub filter_matches: bool,
+    pub evicted: u64,
     pub follow: bool,
     pub source: Option<Source>,
     pub freshness: Freshness,
@@ -61,6 +65,8 @@ pub struct Document {
     max_width: usize,
     layout_partial: bool,
     matches_partial: bool,
+    search_dirty: bool,
+    pending_evicted: usize,
 }
 impl Document {
     pub fn new(title: String, text: String) -> Self {
@@ -75,6 +81,10 @@ impl Document {
             streaming: false,
             session: None,
             session_state: None,
+            log_request: None,
+            source_errors: vec![],
+            filter_matches: false,
+            evicted: 0,
             follow: false,
             source: None,
             freshness: Freshness::Local,
@@ -91,6 +101,8 @@ impl Document {
             max_width: 0,
             layout_partial: false,
             matches_partial: false,
+            search_dirty: false,
+            pending_evicted: 0,
         };
         doc.replace(text);
         doc
@@ -101,6 +113,8 @@ impl Document {
         self.lines.clear();
         self.bytes = 0;
         self.truncated = false;
+        self.evicted = 0;
+        self.pending_evicted = 0;
         for line in text.lines() {
             let line = crate::safety::text(line).replace('\t', "    ");
             if self.lines.len() >= MAX_LINES || self.bytes + line.len() > MAX_BYTES {
@@ -138,12 +152,14 @@ impl Document {
             if let Some(old) = self.lines.pop_front() {
                 self.bytes = self.bytes.saturating_sub(old.len());
                 self.truncated = true;
+                self.evicted = self.evicted.saturating_add(1);
+                self.pending_evicted = self.pending_evicted.saturating_add(1);
             } else {
                 break;
             }
         }
         self.revision += 1;
-        self.index_search();
+        self.search_dirty = true;
     }
     fn anchor(&self) -> (usize, usize) {
         self.visual
@@ -159,15 +175,28 @@ impl Document {
             .unwrap_or(0);
     }
     pub fn layout(&mut self, width: usize, height: usize) {
+        if self.search_dirty {
+            self.index_search();
+        }
         self.page_size = height.max(1);
         self.width = width.max(1);
         let key = (self.revision, self.width, self.wrap);
         if self.layout_key != Some(key) {
-            let anchor = self.anchor();
+            let mut anchor = self.anchor();
+            anchor.0 = anchor.0.saturating_sub(self.pending_evicted);
+            self.pending_evicted = 0;
             self.visual.clear();
             self.max_width = 0;
             self.layout_partial = false;
             'lines: for (i, line) in self.lines.iter().enumerate() {
+                if self.filter_matches
+                    && self
+                        .search_regex
+                        .as_ref()
+                        .is_some_and(|regex| !regex.is_match(line))
+                {
+                    continue;
+                }
                 self.max_width = self.max_width.max(line.width());
                 let mut start = 0;
                 let mut used = 0;
@@ -242,9 +271,15 @@ impl Document {
             })
             .flatten();
         self.index_search();
+        self.layout_key = None;
         self.search_next(false);
     }
+    pub fn toggle_log_filter(&mut self) {
+        self.filter_matches = !self.filter_matches;
+        self.layout_key = None;
+    }
     fn index_search(&mut self) {
+        self.search_dirty = false;
         self.hits.clear();
         self.hit = None;
         self.matches_partial = false;
@@ -261,6 +296,7 @@ impl Document {
         }
     }
     pub fn search_next(&mut self, reverse: bool) {
+        self.layout(self.width, self.page_size);
         if self.hits.is_empty() {
             return;
         }
@@ -317,13 +353,37 @@ impl Document {
                 if self.matches_partial { "+" } else { "" }
             )
         };
+        let logs = if self.session.is_some() {
+            format!(
+                " · {}{} · evicted {}{}",
+                if self.follow {
+                    "following"
+                } else {
+                    "paused display"
+                },
+                if self.filter_matches {
+                    " · matching lines"
+                } else {
+                    ""
+                },
+                self.evicted,
+                if self.source_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · PARTIAL: {} source errors", self.source_errors.len())
+                }
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "line {}/{} · col {} · wrap {} · {}{}{}",
+            "line {}/{} · col {} · wrap {} · {}{}{}{}",
             self.anchor().0 + usize::from(!self.lines.is_empty()),
             self.lines.len(),
             self.horizontal,
             if self.wrap { "on" } else { "off" },
             freshness,
+            logs,
             search,
             if self.truncated || self.layout_partial {
                 " · PARTIAL: viewer limit"
@@ -337,6 +397,34 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paused_tail_retains_anchor_on_eviction_and_filter_search_is_batched() {
+        let mut doc = Document::new("logs".into(), String::new());
+        doc.wrap = false;
+        for i in 0..MAX_LINES {
+            doc.append(format!("line-{i}"));
+        }
+        doc.layout(80, 10);
+        doc.scroll = 100;
+        let before = doc.visible_lines().next().expect("visible").to_owned();
+        doc.append("incoming".into());
+        doc.layout(80, 10);
+        assert_eq!(doc.visible_lines().next(), Some(before.as_str()));
+        assert_eq!(doc.evicted, 1);
+        doc.set_search("incoming".into());
+        doc.toggle_log_filter();
+        doc.append("incoming too".into());
+        assert!(doc.search_dirty);
+        doc.layout(80, 10);
+        assert!(!doc.search_dirty);
+        assert_eq!(doc.hits.len(), 2);
+        assert!(doc.visible_lines().all(|line| line.contains("incoming")));
+        doc.set_search("absent".into());
+        doc.layout(80, 10);
+        assert_eq!(doc.visible_lines().count(), 0);
+        doc.replace(String::new());
+        assert_eq!(doc.evicted, 0);
+    }
     #[test]
     fn wrapping_scroll_resize_and_unicode_keep_logical_anchor() {
         let mut doc = Document::new(

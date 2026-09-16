@@ -29,6 +29,11 @@ pub enum Payload {
         request: u64,
         session: super::session::SessionId,
     },
+    LogSourceError {
+        request: u64,
+        session: super::session::SessionId,
+        message: String,
+    },
     NamespaceList {
         request: u64,
         names: Vec<String>,

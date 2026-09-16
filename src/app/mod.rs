@@ -449,6 +449,20 @@ impl Runtime {
                     doc.session_state = Some(status);
                 }
             }
+            Payload::LogSourceError {
+                request,
+                session,
+                message,
+            } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && doc.session == Some(session)
+                {
+                    doc.append(format!("SOURCE ERROR: {message}"));
+                    if doc.source_errors.len() < crate::kube::logs::MAX_SOURCES {
+                        doc.source_errors.push(message);
+                    }
+                }
+            }
             Payload::NamespaceList {
                 request,
                 names,
@@ -553,18 +567,13 @@ impl Runtime {
                 // would silently do nothing instead of the same "not available here"
                 // feedback a mismatched key press would never even have a chance to
                 // produce (since it isn't bound outside its mode in the first place).
-                let mode_name = if matches!(self.state.mode, Mode::Document(_)) {
-                    "document"
-                } else {
-                    "table"
-                };
+                let mode_name = self.mode_name();
                 if let Some(binding) = crate::command::registry()
                     .into_iter()
                     .find(|b| b.action == action)
                 {
                     anyhow::ensure!(
-                        matches!(binding.mode, "global" | "navigation")
-                            || binding.mode == mode_name,
+                        crate::command::available(binding.mode, mode_name),
                         "{} is not available in {mode_name} mode",
                         binding.name
                     );
@@ -694,6 +703,27 @@ impl Runtime {
             }
             Logs => self.open_logs(None, false)?,
             PreviousLogs => self.open_logs(None, true)?,
+            LogsVisible => {
+                self.state.prepare();
+                let objects = self.state.rows.clone();
+                self.start_logs(crate::kube::logs::Request {
+                    objects,
+                    options: crate::kube::logs::LogOptions {
+                        container: Some("*".into()),
+                        previous: false,
+                    },
+                })?;
+            }
+            PauseLogs | ClearLogs | FilterLogs => {
+                let doc = self.active_document_mut().context("Open logs first")?;
+                anyhow::ensure!(doc.session.is_some(), "This action requires a log session");
+                match action {
+                    PauseLogs => doc.follow = !doc.follow,
+                    ClearLogs => doc.replace(String::new()),
+                    FilterLogs => doc.toggle_log_filter(),
+                    _ => unreachable!(),
+                }
+            }
             Refresh => {
                 if matches!(self.state.mode, Mode::Document(_)) {
                     self.refresh_document()?;
@@ -785,6 +815,13 @@ impl Runtime {
             _ => None,
         }
     }
+    fn mode_name(&self) -> &'static str {
+        match &self.state.mode {
+            Mode::Document(doc) if doc.session.is_some() => "logs",
+            Mode::Document(_) => "document",
+            _ => "table",
+        }
+    }
     fn open_palette(&mut self, text: String) {
         let previous = std::mem::replace(&mut self.state.mode, Mode::Command(text));
         if let Mode::Document(doc) = previous {
@@ -816,6 +853,12 @@ impl Runtime {
         self.refresh_document()
     }
     fn refresh_document(&mut self) -> Result<()> {
+        if let Some(request) = self
+            .active_document_mut()
+            .and_then(|d| d.log_request.clone())
+        {
+            return self.start_logs(request);
+        }
         let connection = self.connection.clone().context("Not connected")?;
         let doc = self.active_document_mut().context("No document open")?;
         let source = doc
@@ -840,19 +883,36 @@ impl Runtime {
     }
     fn open_logs(&mut self, container: Option<String>, previous: bool) -> Result<()> {
         let object = self.state.selected_object().context("Select a Pod first")?;
+        self.start_logs(crate::kube::logs::Request {
+            objects: vec![object],
+            options: crate::kube::logs::LogOptions {
+                container,
+                previous,
+            },
+        })
+    }
+    fn start_logs(&mut self, request: crate::kube::logs::Request) -> Result<()> {
+        let sources = crate::kube::logs::sources(&request)?;
+        let object = sources.first().context("No log sources")?.object.clone();
         let connection = self.connection.clone().context("Not connected")?;
         self.document.cancel();
         self.document = self.scope.child_token();
         self.state.request += 1;
         let mut doc = Document::new(
             format!(
-                "Logs: {} · timestamps · {}",
+                "Logs: {} · {} sources · timestamps · {}",
                 object.name,
-                if previous { "previous" } else { "follow" }
+                sources.len(),
+                if request.options.previous {
+                    "previous"
+                } else {
+                    "follow"
+                }
             ),
             String::new(),
         );
         doc.follow = true;
+        doc.log_request = Some(request.clone());
         let scope = session::Scope {
             epoch: self.state.epoch,
             request: self.state.request,
@@ -864,23 +924,12 @@ impl Runtime {
             uid: object.uid.clone(),
         };
         let epoch = self.state.epoch;
-        let request = self.state.request;
+        let request_id = self.state.request;
         let tx = self.tx.clone();
         let id = self
             .sessions
             .spawn(session::Kind::Logs, scope, self.document.clone(), |id| {
-                crate::kube::evidence::logs(
-                    connection,
-                    object,
-                    crate::kube::evidence::LogOptions {
-                        container,
-                        previous,
-                    },
-                    epoch,
-                    request,
-                    tx,
-                    id,
-                )
+                crate::kube::logs::run(connection, request, epoch, request_id, tx, id)
             })?;
         doc.session = Some(id);
         doc.session_state = Some(session::State::Starting);
@@ -1038,7 +1087,7 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                             },
                             mode=>{
                                 runtime.state.mode=mode;
-                                let mode_name=if matches!(runtime.state.mode,Mode::Document(_)){"document"}else{"table"};
+                                let mode_name=runtime.mode_name();
                                 // A per-action validation error (e.g. "select a row first",
                                 // "turn wrapping off before horizontal scrolling") is transient
                                 // input feedback, not a backend/transport problem -- it must not

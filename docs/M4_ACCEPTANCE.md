@@ -8,7 +8,7 @@ via bootstrap-test-cluster.sh; node Ready/identity verified. Every fixture write
 | Slice | Intended contract | State | Coverage / live evidence | Gaps / verdict |
 | --- | --- | --- | --- | --- |
 | M4.0 | Owned identity, cancellation, startup/running/stopping/final outcomes; prove with logs | ACCEPTED | 62 unit + 11 fake HTTP; live accept-m4.py, opt-in cluster test | Protocol-specific operational sessions still subsequent slices |
-| M4.1 | Bounded advanced logs, explicit container/source, controls, UID and scope integrity | RESEARCHED | Existing basic logs accepted in M1; new evidence pending | NOT ACCEPTED |
+| M4.1 | Bounded advanced logs, explicit container/source, controls, UID and scope integrity | ACCEPTED | 65 unit + 11 fake HTTP; live accept-m4.py logs, twice | Aggregation scope is explicit visible-Pods/all-containers only; see LOGS.md |
 | M4.2 | Native structured exec/shell, readonly boundary, terminal handoff/restore | RESEARCHED | Locked kube-client 4.2.0 inspected | NOT ACCEPTED |
 | M4.2b | Separate native attach semantics or justified deferral | RESEARCHED | Api::attach exists; terminal/fixture acceptance pending | NOT ACCEPTED |
 | M4.3 | Loopback background forwarding, manager, durable identity, bounded connections | RESEARCHED | Native API inspected; no implementation | NOT ACCEPTED |
@@ -58,6 +58,25 @@ duration/RSS/CPU/session counts/reconnects honestly (target 1–2 hours when pra
 Do not create m4-accepted until combined live acceptance and documentation reconcile.
 
 ## Execution log
+
+- M4.1 accepted: full fmt/check/clippy/test green (65 unit + 11 fake HTTP), fresh
+  `cargo build --locked`, `python3 scripts/accept-m4.py logs` PASS twice in a row
+  against `m4-fixtures`: explicit container choice (bare `:logs` on a multi-container
+  Pod correctly refuses and names the choice), init container (`setup`, runs to
+  completion, `Ended`), `:logs *` (worker+web together, source-tagged lines),
+  pause (display freezes, bounded ingestion continues), search+matching-line
+  filter narrowing to one source, clear, Refresh restarting with fresh
+  request/session identity, `:logs_visible` across two different Pods,
+  a high-volume burst Pod hitting the bounded-eviction `PARTIAL: viewer limit`
+  notice, 32x9 resize, same-name Pod recreation (`m4-recreate`) correctly ending
+  the old session and `Refresh` reporting "replaced" rather than silently
+  retargeting, ANSI/control-sequence sanitization on a deliberately unsafe line,
+  and an ephemeral container (`observer`) added after the Pod was already open.
+  No production calls. Two test-harness bugs found and fixed during this pass
+  (both in `scripts/accept-m4.py`/`scripts/test-cluster.sh`, not the application
+  -- see journal): a stale total-row-count assertion from before the fixture
+  namespace had accumulated 6 Pods, and a fixed `sleep(1)` racing an ephemeral
+  container's actual startup instead of polling its real status.
 
 - M4.0 accepted: all four checks green, fresh build, accept-m4.py PASS against restored
   kind; exact palette-loss reproduction passed three times, follow/previous/explicit

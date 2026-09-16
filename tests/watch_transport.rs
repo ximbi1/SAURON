@@ -102,7 +102,7 @@ async fn owned_logs_clip_sanitize_and_reject_replaced_uid() {
     assert_eq!(lines.len(), 3);
     assert!(lines[1].ends_with("[line truncated at 16 KiB]"));
     assert!(lines[1].len() < 16_450);
-    assert_eq!(lines[2], "last");
+    assert!(lines[2].ends_with("] last"));
     let mut replaced = pod;
     replaced["metadata"]["uid"] = "old".into();
     let (tx, mut rx) = mpsc::channel(16);
@@ -127,6 +127,10 @@ async fn owned_logs_clip_sanitize_and_reject_replaced_uid() {
     assert!(
         matches!(record.state, State::Ended(Outcome::Failed(ref message)) if message.contains("replaced"))
     );
+    assert!(matches!(
+        rx.try_recv().expect("explicit source failure").payload,
+        Payload::LogSourceError { .. }
+    ));
     assert!(rx.try_recv().is_err());
 }
 impl Drop for Server {

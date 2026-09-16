@@ -27,11 +27,19 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
-M4.0 ACCEPTED; continuing M4.1 advanced logs. Clean baseline verified at annotated `m3-accepted`, commit
-`9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked fmt/check/clippy/test passed:
-55 unit + 10 fake HTTP = 65 passed; one opt-in live test ignored. No tracked credentials
-found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
-Current full checks: 62 unit + 11 fake HTTP = 73 passed; opt-in cluster test passed too.
+M4.0 and M4.1 ACCEPTED; M4.2 (native exec/shell) next. Clean baseline verified at
+annotated `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full
+locked fmt/check/clippy/test passed: 65 unit + 11 fake HTTP = 76 passed; one opt-in
+live test ignored. No tracked credentials found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
+M4.1 accepted 2026-09-16: `python3 scripts/accept-m4.py logs` PASS twice in a row
+against `m4-fixtures` (container choice/init/ephemeral/multi-source/pause/search/
+filter/clear/restart/bounded eviction/same-name replacement/32x9/terminal). Two
+test-harness timing/assertion bugs found and fixed along the way (fixture-count
+drift, an ephemeral-container startup race) -- neither was an application bug; see
+HANDBOOK journal. Reproducible fixtures: `bash scripts/test-cluster.sh m4-fixtures`;
+`python3 scripts/accept-m4.py logs`. The latter deletes/recreates only named
+m4-sessions and adds its ephemeral fixture, always through guarded test-cluster.sh.
+Never substitute a production config.
 `python3 scripts/accept-m4.py` rebuilds before launching a unique tmux session and
 validates follow/previous, ownership/cancel/rapid scope changes, palette race replay,
 32x9, zero sessions after close and exact stty restoration. PASS 2026-09-16.

@@ -22,6 +22,10 @@ pub enum Action {
     Timeline,
     Logs,
     PreviousLogs,
+    LogsVisible,
+    PauseLogs,
+    ClearLogs,
+    FilterLogs,
     Refresh,
     Sort,
     Reverse,
@@ -145,6 +149,34 @@ pub fn registry() -> Vec<Binding> {
             "p",
         ),
         (
+            Action::LogsVisible,
+            "logs_visible",
+            "table",
+            "Logs: all known containers of visible Pods (max 8 sources)",
+            "M",
+        ),
+        (
+            Action::PauseLogs,
+            "pause_logs",
+            "logs",
+            "Logs: pause/resume display (bounded ingestion continues)",
+            "space",
+        ),
+        (
+            Action::ClearLogs,
+            "clear_logs",
+            "logs",
+            "Logs: clear retained lines",
+            "z",
+        ),
+        (
+            Action::FilterLogs,
+            "filter_logs",
+            "logs",
+            "Logs: show only lines matching document search",
+            "v",
+        ),
+        (
             Action::Refresh,
             "refresh",
             "navigation",
@@ -256,12 +288,9 @@ impl Keymap {
                 entry.keys = keys.clone();
             }
         }
-        for mode in ["table", "document"] {
+        for mode in ["table", "document", "logs"] {
             let mut used = Vec::new();
-            for binding in bindings
-                .iter()
-                .filter(|b| b.mode == mode || b.mode == "global" || b.mode == "navigation")
-            {
+            for binding in bindings.iter().filter(|b| available(b.mode, mode)) {
                 for key in &binding.keys {
                     let event = parse_key(key)?;
                     ensure!(
@@ -277,9 +306,7 @@ impl Keymap {
     pub fn action(&self, key: KeyEvent, mode: &str) -> Option<Action> {
         self.bindings
             .iter()
-            .filter(|b| {
-                b.mode == "global" || b.mode == mode || (mode != "input" && b.mode == "navigation")
-            })
+            .filter(|b| available(b.mode, mode))
             .find(|b| {
                 b.keys.iter().any(|k| {
                     parse_key(k).is_ok_and(|(code, modifiers)| {
@@ -318,6 +345,12 @@ impl Keymap {
             .join("\n")
     }
 }
+pub fn available(binding: &str, mode: &str) -> bool {
+    binding == "global"
+        || binding == mode
+        || (mode != "input" && binding == "navigation")
+        || (mode == "logs" && binding == "document")
+}
 fn normalize(mut m: KeyModifiers, c: KeyCode) -> KeyModifiers {
     if matches!(c, KeyCode::Char(_)) {
         m.remove(KeyModifiers::SHIFT);
@@ -338,6 +371,7 @@ fn parse_key(s: &str) -> Result<(KeyCode, KeyModifiers)> {
     }
     let code = match rest {
         "enter" => KeyCode::Enter,
+        "space" => KeyCode::Char(' '),
         "esc" => KeyCode::Esc,
         "up" => KeyCode::Up,
         "down" => KeyCode::Down,
@@ -652,4 +686,34 @@ mod tests {
             );
         }
     }
+}
+#[test]
+fn logs_inherit_documents_and_validate_conflicts() {
+    let keys = Keymap::compile(&BTreeMap::new()).expect("default map");
+    assert_eq!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            "logs"
+        ),
+        Some(Action::PauseLogs)
+    );
+    assert_eq!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            "document"
+        ),
+        None
+    );
+    assert_eq!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+            "logs"
+        ),
+        Some(Action::Wrap)
+    );
+    let overrides = BTreeMap::from([(
+        "logs".into(),
+        BTreeMap::from([("pause_logs".into(), vec!["w".into()])]),
+    )]);
+    assert!(Keymap::compile(&overrides).is_err());
 }

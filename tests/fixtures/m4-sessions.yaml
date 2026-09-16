@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: m4-sessions
+  namespace: sauron-fixtures
+  labels: {test: m4-sessions}
+spec:
+  initContainers:
+    - name: setup
+      image: busybox:1.37
+      command: [sh, -c, 'echo M4_INIT_READY']
+  containers:
+    - name: worker
+      image: busybox:1.37
+      command:
+        - sh
+        - -c
+        - |
+          printf '\033[31mM4_ANSI_SAFE\033[0m\007\n'
+          head -c 20000 /dev/zero | tr '\000' x
+          printf '\n'
+          while true; do echo M4_WORKER_LIVE; sleep 1; done
+      resources:
+        requests: {cpu: 5m, memory: 8Mi}
+        limits: {cpu: 100m, memory: 32Mi}
+    - name: web
+      image: busybox:1.37
+      command: [sh, -c, 'mkdir -p /tmp/www; echo M4_HTTP_OK > /tmp/www/index.html; httpd -f -p 8080 -h /tmp/www & while true; do echo M4_WEB_LIVE; sleep 1; done']
+      ports: [{name: http, containerPort: 8080}]
+      resources:
+        requests: {cpu: 5m, memory: 8Mi}
+        limits: {cpu: 100m, memory: 32Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: m4-logburst
+  namespace: sauron-fixtures
+  labels: {test: m4-burst}
+spec:
+  containers:
+    - name: burst
+      image: busybox:1.37
+      command: [sh, -c, 'n=0; while true; do i=0; while [ "$i" -lt 200 ]; do echo "M4_BURST_$n"; n=$((n+1)); i=$((i+1)); done; sleep 0.2; done']
+      resources:
+        requests: {cpu: 5m, memory: 8Mi}
+        limits: {cpu: 100m, memory: 32Mi}

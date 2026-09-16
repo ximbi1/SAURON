@@ -27,5 +27,9 @@ Cancellation ends local observation/control, **not remote rollback**. An execute
 command may already have changed application state. Ending a tunnel closes local
 connections, not transactions performed through them. Logs have no mutation authority.
 
-Existing terminal guard restores Ratatui at final exit. Interactive terminal suspension
-does not exist yet and must be implemented/tested centrally before exec/attach ships.
+Existing terminal guard restores Ratatui at final exit. `app::terminal::TerminalHandoff`
+(RAII, leaves/re-enters only the alternate screen, never touches raw mode) now
+provides interactive suspension for the shell, exercised centrally in `run()`'s
+loop; attach will reuse it directly. See `docs/EXEC.md` for the one known,
+bounded limitation this uncovered (an uncancellable stdin read can occasionally
+swallow one input chunk right after a session ends).

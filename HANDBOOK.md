@@ -139,7 +139,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Server Table negotiation | DEFERRED | M3 accepted safe live CRD printer projection instead; not Table parity |
 | Pod logs | ACCEPTED, incl. M4.1 advanced | multi-source/init/ephemeral/pause/search/filter/eviction live-proven; docs/LOGS.md |
 | M4 session foundation | ACCEPTED | 62 unit + 11 fake HTTP; live scripts/accept-m4.py, exact palette race replay and stty restoration |
-| Exec (one-shot) | ACCEPTED; interactive shell NOT BUILT | readonly-gated, UID-pinned, structured argv; live-proven; docs/EXEC.md |
+| Exec (one-shot + interactive shell) | ACCEPTED | readonly-gated, UID-pinned, TerminalHandoff-based; live-proven incl. Ctrl-C/Ctrl-D/Pod-death/network-cut/resize; docs/EXEC.md |
 | Exec/attach/port-forward | RESEARCHED | locked kube-client 4.2.0 APIs inspected; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
@@ -243,11 +243,13 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. M4.0 (session foundation),
-M4.1 (advanced logs), and M4.2's one-shot exec are ACCEPTED. Current: interactive
-TTY shell (the rest of M4.2) next -- needs a terminal-handoff guard not yet built
--- then M4.2b (attach), M4.3 (port-forward manager), M4.4 (combined acceptance +
-soak). Ledger: docs/M4_ACCEPTANCE.md.
+isolated unit tests alone. Keep buildable handoffs. M4.0 (session foundation) and
+all of M4.2 (one-shot exec and interactive shell) are ACCEPTED. Current: M4.2b
+(attach, deferred call-site plumbing over the same terminal guard) or M4.3
+(port-forward manager) next, then M4.4 (combined acceptance + soak). One known,
+bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
+can occasionally swallow one input chunk right after a shell session ends,
+mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -271,6 +273,89 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.2 interactive shell accepted; crash found+fixed, one limitation bounded+documented
+
+Built in the user's requested order: designed `app::terminal::TerminalHandoff`
+first (RAII, leaves/re-enters Ratatui's alternate screen only, raw mode never
+touched since both Ratatui and a remote PTY need it enabled continuously);
+live-verified its restore behavior across every requested ending *before*
+building the shell feature on top, per the explicit rule that shell could not be
+called ACCEPTED until terminal recovery was proven for every ending, not just a
+normal exit.
+
+**Crash found and fixed on the very first live shell-exit test.** After `exit`
+closed the remote shell and the handoff guard re-entered the alternate screen,
+`terminal.clear()` (called to force a full repaint, since Ratatui's diff buffer
+didn't know the screen had been left/re-entered) crashed the whole app with "The
+cursor position could not be read within a normal duration." Root-caused by
+reading `ratatui-core`'s actual source (not guessing): `Terminal::clear()`
+unconditionally calls `Backend::get_cursor_position()` first (to snapshot and
+later restore it), which for the crossterm backend is `crossterm::cursor::
+position()` -- a DSR escape sequence (`\x1B[6n`) written to stdout, then a
+blocking read (2s timeout) waiting for the terminal's response on stdin. This
+raced the just-ended interactive session's own stdin reading and reliably timed
+out. Fixed by calling `Terminal::resize()` with the terminal's own unchanged
+current size instead: for a `Viewport::Fullscreen` terminal (this app's case)
+`resize()`'s internal `clear_viewport()` calls `Backend::clear_region(ClearType::
+All)` directly, with no cursor query at all -- confirmed by reading that code
+path too, not just patching until the crash stopped.
+
+**A second, genuinely reproducible bug found via live byte-level tracing across
+repeated round-trips**, not from a single one-off observation: `tokio::io::Stdin`'s
+blocking-pool read cannot be cancelled on Unix (a documented tokio limitation).
+Whenever the interactive forwarding loop's `select!` resolved via the *other*
+branch (the remote side closing) while a local stdin read was still in flight,
+that read was left orphaned -- confirmed, by temporarily logging every crossterm
+key event and every raw stdin/stdout byte the interactive loop handled, to
+silently consume the *entire next chunk* of real stdin data (observed eating a
+whole subsequently-typed `:shell worker` command, and separately a Ctrl-C)
+before self-terminating; whatever byte arrived *after* that was what a freshly
+constructed `EventStream` actually delivered once the TUI resumed -- consistently
+a bare trailing `Enter`, which (before the fix) opened the wrong document,
+confusing what should have been either a working shell or a clean no-op.
+Ruled out, with direct evidence rather than assumption, before concluding this:
+tmux sending a duplicate keystroke (checked at the raw byte level via `cat -v`
+inside the same tmux session -- exactly one byte per keystroke); test-harness
+timing (reproduced identically using explicit condition-polling on the real
+displayed status, not fixed sleeps); and a crossterm-internal static-buffer
+artifact (a plain `:info`/`:exec` command -- same mechanics, no terminal handoff
+-- never doubled an Enter; only `:shell`'s drop-and-recreate of the `EventStream`
+did, isolating the cause to the handoff itself). Fixed by discarding exactly one
+bare `Enter` if it is the first key seen right after any shell session ends
+(`run()`'s `suppress_phantom_enter`) -- this does not recover the swallowed
+input, but converts the failure from a wrong, confusing action into a safe
+no-op that the user notices and resolves by simply retyping the same command
+(confirmed live to succeed immediately on retry). Documented honestly as a
+bounded, not-fully-closed limitation, not claimed fixed: closing it completely
+needs a genuinely cancellation-safe stdin reader (`tokio::io::unix::AsyncFd`
+over a non-blocking fd, epoll-readiness based rather than a blocking thread-pool
+read) -- future work, not attempted here given the scope already covered.
+**Terminal restoration itself (raw mode, exact `stty` state) was confirmed
+correct in every single tested ending regardless** -- this limitation is
+strictly about an occasionally-lost keystroke/command, never about corruption.
+
+Live-accepted against `kind-sauron-test`, fresh binary, exactly the nine
+adversarial endings requested, in the requested order: normal shell → `exit`;
+an explicit nonexistent shell path failing cleanly with the real API error; the
+target Pod force-deleted mid-session (`kubectl delete --force --grace-period=0`),
+surfacing `Shell Failed` with the real exit code 137 (SIGKILL) rather than a
+hang; the whole cluster's Docker network disconnected mid-session, ending the
+session cleanly and degrading the background watch to a clear transport-error
+status that fully recovered on `Refresh` after reconnecting; repeated local
+resize tracked correctly via `stty size` inside the remote shell across four
+distinct sizes; Ctrl-C forwarded to the remote (interrupting a `sleep 60`
+without ending the session, exactly like real `kubectl exec -it`); Ctrl-D
+cleanly ending it; eight consecutive open/use/close round-trips (both `exit`
+and Ctrl-D), which is what surfaced and confirmed the bounded limitation above;
+and a final quit from SAURON with exact `stty` state preserved. `:shell
+[container] [-- shell]` defaults to `sh` with no bash-then-sh auto-detection
+chain (explicit override only, per "avoid a complex remote shell detector").
+Extracted `check_pod_uid` into `kube::mod` (shared by `logs` and `exec` now,
+avoiding a third duplicate). 70 unit + 11 fake HTTP tests passing throughout;
+fmt/check/clippy clean; fresh binary rebuilt before every live pass. No
+production calls -- exercised only against the isolated test cluster, with the
+"OPERATIONAL (exec/shell enabled)" heading only ever shown against it.
 
 ### 2026-09-16 — M4.2 one-shot exec accepted; two real application bugs found and fixed
 

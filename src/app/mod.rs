@@ -2,6 +2,7 @@ pub mod document;
 pub mod event;
 pub mod session;
 pub mod state;
+pub mod terminal;
 
 use crate::{
     command::{Action, Command, Keymap, ResourceCommand},
@@ -31,6 +32,12 @@ pub struct Runtime {
     document: CancellationToken,
     pending: Option<ResourceCommand>,
     pending_history: Option<state::HistoryEntry>,
+    /// Set by `open_shell()`, consumed by `run()` right after each key/event
+    /// dispatch. Interactive shell is foreground and blocking -- unlike logs/exec
+    /// output, nothing else in the app runs concurrently with it -- so it does not
+    /// go through `Sessions`; `run()` itself owns suspending/resuming the terminal
+    /// (see `app::terminal::TerminalHandoff`) around the one call that runs it.
+    pending_shell: Option<crate::kube::exec::ShellRequest>,
     palette_document: Option<Document>,
     namespace_by_context: std::collections::HashMap<String, Option<String>>,
     recent_namespaces: std::collections::VecDeque<String>,
@@ -65,6 +72,7 @@ impl Runtime {
                 document: CancellationToken::new(),
                 pending: None,
                 pending_history: None,
+                pending_shell: None,
                 palette_document: None,
                 namespace_by_context: std::collections::HashMap::new(),
                 recent_namespaces: std::collections::VecDeque::new(),
@@ -690,6 +698,13 @@ impl Runtime {
                 );
                 self.open_exec(container, command)
             }
+            Command::Shell { container, shell } => {
+                anyhow::ensure!(
+                    !self.state.settings.readonly,
+                    "Shell is unavailable in read-only mode"
+                );
+                self.open_shell(container, shell)
+            }
         }
     }
     pub fn action(&mut self, action: Action) -> Result<()> {
@@ -1026,6 +1041,25 @@ impl Runtime {
         self.state.mode = Mode::Document(doc);
         Ok(())
     }
+    /// Queues an interactive shell request; `run()` picks it up right after this
+    /// key/command dispatch returns and does the actual terminal handoff. Does
+    /// nothing to `state.mode`/`connection`/`document` here -- unlike every other
+    /// document-opening action, an interactive shell is not a `Mode::Document` and
+    /// does not touch the table's current view at all while it runs.
+    fn open_shell(&mut self, container: Option<String>, shell: Option<String>) -> Result<()> {
+        let object = self.state.selected_object().context("Select a Pod first")?;
+        let request = crate::kube::exec::ShellRequest {
+            object,
+            container,
+            shell,
+        };
+        crate::kube::exec::shell_container(&request)?;
+        self.pending_shell = Some(request);
+        Ok(())
+    }
+    fn take_pending_shell(&mut self) -> Option<crate::kube::exec::ShellRequest> {
+        self.pending_shell.take()
+    }
     fn session_finished(&mut self, record: session::Record) {
         if record.scope.epoch != self.state.epoch || record.scope.request != self.state.request {
             return;
@@ -1118,13 +1152,35 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
     frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     runtime.connect(None);
+    // Set right after resuming from an interactive shell; cleared on the very
+    // next key regardless. Works around a real, root-caused limitation (see
+    // docs/EXEC.md): whenever `run_shell()`'s forwarding loop ends with a local
+    // stdin read still in flight (the common case: the OTHER select! branch,
+    // remote closure, wins the race -- observed after both a typed "exit" and a
+    // local Ctrl-D, so this is not reliably tied to which side initiates the
+    // close), that read is left orphaned -- tokio::io::Stdin's blocking-pool
+    // read cannot be cancelled on Unix. It silently consumes exactly the next
+    // available chunk of real stdin data (byte-traced live: observed eating an
+    // entire subsequently-typed command) before self-terminating, after which a
+    // trailing bare Enter is what the fresh EventStream actually sees and
+    // delivers. Discarding that one bare Enter converts what would otherwise be
+    // a wrong action (opening the wrong document under a misdelivered Enter)
+    // into a safe no-op -- the user notices nothing happened and retypes,
+    // rather than SAURON doing something unintended. It does not recover the
+    // swallowed text; that needs a cancellation-safe stdin reader (e.g. a
+    // non-blocking fd wrapped in tokio::io::unix::AsyncFd) to fix completely,
+    // which is future work, not shipped here.
+    let mut suppress_phantom_enter = false;
     let result=async {
         while !runtime.state.quit {
             tokio::select! {
                 biased;
                 _=tokio::signal::ctrl_c()=>{runtime.state.quit=true;},
-                event=input.next()=>match event {
+                event=input.next()=>{
+                    match event {
                     Some(Ok(TerminalEvent::Key(key))) if key.kind!=KeyEventKind::Release=>{
+                        let suppressed=std::mem::take(&mut suppress_phantom_enter);
+                        if suppressed && key.code==KeyCode::Enter && key.modifiers.is_empty(){continue;}
                         if let Some(action)=runtime.state.keymap.action(key,"input")&& action==Action::Quit{runtime.state.quit=true;continue;}
                         let mode=std::mem::replace(&mut runtime.state.mode,Mode::Table);
                         let command_mode=matches!(mode,Mode::Command(_));
@@ -1196,7 +1252,7 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                     },
                     Some(Ok(TerminalEvent::Resize(..)))=>runtime.state.dirty=true,
                     Some(Err(e))=>return Err(e.into()),None=>break,_=>{}
-                },
+                }},
                 _=frames.tick()=>if runtime.state.dirty {
                     runtime.state.prepare();let suggestions=if let Mode::Command(text)=&runtime.state.mode{runtime.suggestions(text)}else{vec![]};
                     terminal.draw(|frame|crate::ui::render(frame,&mut runtime.state,&suggestions))?;
@@ -1207,11 +1263,85 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                 Some(event)=rx.recv()=>{runtime.reduce(event);for _ in 0..63{match rx.try_recv(){Ok(event)=>runtime.reduce(event),Err(_)=>break}}},
                 Some(result)=runtime.tasks.join_next(),if !runtime.tasks.is_empty()=>{if result.is_err(){runtime.state.error=Some("Background task failed; refresh to retry".into());runtime.state.dirty=true;}},
             }
+            if let Some(request) = runtime.take_pending_shell() {
+                let (new_input, status) = run_shell(&mut terminal, input, &runtime, request).await?;
+                input = new_input;
+                runtime.state.status = status;
+                runtime.state.dirty = true;
+                suppress_phantom_enter = true;
+            }
         }
         Ok(())
     }.await;
     runtime.shutdown().await;
     result
+}
+/// Suspends Ratatui's alternate screen, forwards the real terminal to one
+/// interactive remote shell until it ends by any means, then restores. Owns the
+/// full lifecycle of that handoff: dropping the old `EventStream` before raw
+/// stdin/stdout access starts, and always returning a fresh one so `run()`'s loop
+/// resumes normal key handling regardless of how the shell ended (clean exit,
+/// Ctrl-D, remote disconnect, or a local I/O error -- the `TerminalHandoff` guard
+/// restores the alternate screen even on that last, error, path).
+async fn run_shell(
+    terminal: &mut ratatui::DefaultTerminal,
+    input: EventStream,
+    runtime: &Runtime,
+    request: crate::kube::exec::ShellRequest,
+) -> Result<(EventStream, String)> {
+    drop(input);
+    let outcome = {
+        let _handoff = terminal::TerminalHandoff::enter()?;
+        match &runtime.connection {
+            None => Err(anyhow::anyhow!("Not connected")),
+            Some(connection) => {
+                crate::kube::exec::interactive(
+                    connection,
+                    &request,
+                    tokio::io::stdin(),
+                    tokio::io::stdout(),
+                )
+                .await
+            }
+        }
+    };
+    // The alternate screen was just re-entered (guard dropped above); Ratatui's
+    // own diff buffer does not know that, so force a full repaint next frame
+    // rather than only redrawing what it thinks changed since the shell started.
+    // Deliberately `resize()`, not `Terminal::clear()`: for a Fullscreen viewport
+    // resize() clears without querying the backend's cursor position, while
+    // clear() always does (to restore it afterward) -- that query sends a DSR
+    // escape sequence and blocks reading stdin for a response, which can race a
+    // just-ended interactive session's own stdin reader and time out (found live;
+    // see docs/EXEC.md).
+    let size = terminal.size()?;
+    terminal.resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))?;
+    let status = match outcome {
+        Ok(session::Outcome::Completed) => "Shell ended".to_string(),
+        Ok(other) => format!("Shell {}", session::State::Ended(other).label()),
+        Err(e) => format!("Shell failed: {e}"),
+    };
+    // Root cause (found live, confirmed by tracing every received key event): a
+    // byte actually intended for the remote shell can land, mid-session, in
+    // crossterm's own process-wide event reader instead of our raw stdin forward
+    // -- that reader's background thread only shuts down asynchronously once this
+    // scope's `input` is dropped above, and any byte it manages to consume before
+    // then is buffered in a *shared, static* queue that survives the drop and is
+    // NOT tied to any one `EventStream` instance. A freshly constructed
+    // `EventStream` checks that same shared queue first, so it silently replays
+    // as a real keypress against the just-resumed table (observed concretely:
+    // a stray `Enter`, bound to Yaml in table mode, immediately reopening a
+    // document instead of the next typed command). Flushing it here with
+    // crossterm's synchronous, non-blocking poll/read (zero timeout: only drains
+    // what is *already* buffered, never waits for more) is safe unconditionally
+    // -- unlike an async settle-window, it cannot swallow a key the user types
+    // after this point, since it does not wait at all.
+    while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+        if crossterm::event::read().is_err() {
+            break;
+        }
+    }
+    Ok((EventStream::new(), status))
 }
 impl Runtime {
     fn suggestions(&self, text: &str) -> Vec<String> {

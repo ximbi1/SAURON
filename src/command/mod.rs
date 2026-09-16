@@ -420,6 +420,10 @@ pub enum Command {
         container: Option<String>,
         command: Vec<String>,
     },
+    Shell {
+        container: Option<String>,
+        shell: Option<String>,
+    },
 }
 
 /// Quoted words have shell-like grouping only. Nothing is executed or expanded.
@@ -465,11 +469,14 @@ pub fn words(s: &str) -> Result<Vec<String>> {
 pub fn parse(s: &str) -> Result<Command> {
     ensure!(s.len() <= 4096, "Command exceeds 4096 bytes");
     // A whitespace-delimited slash begins the local expression; quotes inside it
-    // remain intact for the filter parser. Detect outside quotes only. exec's argv
-    // has its own "--" separator and routinely contains absolute paths (a bare
-    // "/bin/sh" starts with exactly this same whitespace-slash shape), so it must
-    // never be misread as a filter boundary.
-    let is_exec = s.trim_start_matches(':').split_whitespace().next() == Some("exec");
+    // remain intact for the filter parser. Detect outside quotes only. exec/shell's
+    // own arguments have their own "--" separator and routinely contain absolute
+    // paths (a bare "/bin/sh" starts with exactly this same whitespace-slash
+    // shape), so they must never be misread as a filter boundary.
+    let is_exec = matches!(
+        s.trim_start_matches(':').split_whitespace().next(),
+        Some("exec" | "shell")
+    );
     let mut quote = None;
     let mut escaped = false;
     let mut boundary = None;
@@ -567,6 +574,27 @@ pub fn parse(s: &str) -> Result<Command> {
                 command,
             });
         }
+        // ":shell [container]" defaults to `sh`; ":shell [container] -- bash"
+        // overrides it with one explicit token. No auto-detection chain (bash
+        // then sh): a single explicit override is simpler and never guesses.
+        "shell" => {
+            let (container_part, shell) = match tail.iter().position(|a| a == "--") {
+                Some(split) => {
+                    ensure!(split <= 1, "Use :shell [container] -- [shell]");
+                    let rest = &tail[split + 1..];
+                    ensure!(rest.len() <= 1, "Use :shell [container] -- [shell]");
+                    (&tail[..split], rest.first().cloned())
+                }
+                None => {
+                    ensure!(tail.len() <= 1, "Use :shell [container] -- [shell]");
+                    (tail, None)
+                }
+            };
+            return Ok(Command::Shell {
+                container: container_part.first().cloned(),
+                shell,
+            });
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -627,7 +655,7 @@ pub fn parse(s: &str) -> Result<Command> {
 /// Adding a binding to `registry()` makes it suggestible automatically -- there is no
 /// second list to remember to update.
 pub fn command_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = vec!["ctx", "ns", "info", "reload", "sort", "exec"];
+    let mut names: Vec<&'static str> = vec!["ctx", "ns", "info", "reload", "sort", "exec", "shell"];
     names.extend(registry().iter().map(|b| b.name));
     names
 }

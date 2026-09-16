@@ -1,4 +1,4 @@
-# Exec (M4.2 contract: one-shot exec ACCEPTED; interactive shell NOT YET BUILT)
+# Exec (M4.2 contract: one-shot exec and interactive shell both ACCEPTED)
 
 `:exec [container] -- <command...>` runs one native, non-interactive Kubernetes exec
 (no stdin, no TTY) against the currently selected Pod, structured argv only -- never
@@ -35,30 +35,102 @@ control sequences (`safety::text`), inherited document keymap (search/scroll/wra
 fullscreen/pause/clear/matching-line filter -- pause/clear apply the same as for a
 live log stream, though a one-shot exec's output is finite).
 
-## Deliberately not built yet
+## Interactive shell (`:shell`)
 
-**Interactive TTY shell** (`:shell`) needs a terminal-suspension mechanism (hand the
-real terminal to the remote process's stdin/stdout, leaving Ratatui's alternate
-screen without racing its own stdin `EventStream` reader) that this slice does not
-attempt. Researched: `kube` 4.2's `AttachedProcess`/`AttachParams::interactive_tty()`
-support stdin/stdout/TTY and a resize channel over the same `ws` feature already
-enabled for this project (`Api::exec`/`Api::attach`, native WebSocket protocol, no
-SPDY, no new dependency needed). Building it safely is the next M4.2 sub-slice, not
-shipped speculatively here.
+`:shell [container]` opens one interactive TTY session against `sh` in the target
+container (`:shell [container] -- <path>` overrides the shell binary explicitly --
+deliberately no bash-then-sh auto-detection chain, which would need a wasted or
+ambiguous partial attach; `sh` is present on essentially every real container
+image). Same container-selection rule as `:exec`. Denied under `settings.readonly`
+exactly like `:exec`, before any connection attempt.
 
-**Attach** (`Api::attach`, distinct from exec) is researched but not implemented;
-same terminal-handoff dependency as interactive shell.
+Unlike every other document-opening action, an interactive shell is **foreground
+and blocking** by design (see `docs/SESSIONS.md`): nothing else in the app runs
+concurrently with it (the whole event loop is inside the one call), so it is not
+routed through `app::session::Sessions` -- there is nothing background to "own."
+`app::terminal::TerminalHandoff` (new, small, RAII) leaves Ratatui's alternate
+screen for the session's duration and restores it on `Drop`, so restoration
+happens regardless of how the session ends -- clean exit, Ctrl-D, remote
+disconnect, or a local I/O error. Raw mode is never toggled (both Ratatui and a
+remote PTY need it enabled continuously); only the alternate screen is
+suspended/resumed. Terminal resize is forwarded to the remote PTY by polling the
+local terminal size every 250ms and sending a `TerminalSize` message through
+`AttachedProcess::terminal_size()` whenever it changes -- confirmed live via
+`stty size` inside the remote shell tracking several rapid local resizes exactly.
+Ctrl-C is never intercepted locally during a shell session (raw mode means it is
+just byte `0x03`, forwarded like any other byte -- confirmed live interrupting a
+long-running remote `sleep`, with the shell session still alive afterward, exactly
+like a real `kubectl exec -it`). Ctrl-D forwards local EOF to the remote's stdin
+and keeps draining its output until it actually closes.
+
+### Known, root-caused, bounded limitation: one input chunk can be lost after a shell ends
+
+`tokio::io::Stdin`'s blocking-pool read cannot be cancelled on Unix (a documented
+tokio limitation, not specific to this project). Whenever the interactive
+forwarding loop's `select!` resolves via the *other* branch (the remote side
+closing) while a local stdin read was still in flight -- observed live after both
+a typed `exit` and a local Ctrl-D, so this is not reliably tied to which side
+initiates the close -- that read is orphaned: it keeps running on a background
+thread, silently consuming the *next* available chunk of real stdin data (byte-
+traced live: observed eating an entire subsequently-typed command, including a
+Ctrl-C) before self-terminating. Whatever byte arrives *after* that gets consumed
+is what a freshly constructed `EventStream` actually sees once the TUI resumes --
+byte-traced live to consistently be a bare `Enter` (the tail of whatever multi-key
+sequence got eaten).
+
+The mitigation shipped here (`run()`'s `suppress_phantom_enter` flag, set right
+after any shell session ends, cleared on the very next key) discards exactly one
+bare `Enter` if it is the first key seen after resuming. This does not recover the
+swallowed input -- it converts the failure mode from *wrong action* (a stray Enter
+opening the wrong document, confirmed live before this fix) into a *safe no-op*
+(nothing visibly happens; the user notices and simply retries the same command,
+confirmed live to succeed immediately on retry). **Terminal state itself (raw
+mode, `stty`) is unaffected by this and was confirmed correct in every tested
+ending** -- this limitation is about an occasional lost keystroke/command
+immediately after a shell session, never about terminal corruption.
+
+Fully closing this gap needs a genuinely cancellation-safe local stdin reader
+(e.g. a non-blocking fd wrapped in `tokio::io::unix::AsyncFd`, polled via epoll
+readiness rather than a blocking thread-pool read) -- future work, not shipped
+speculatively here.
+
+## Attach
+
+`Api::attach` (distinct from exec: attaches to an already-running process rather
+than starting a new one) is researched but not implemented. It would reuse the
+exact same `TerminalHandoff` guard and forwarding loop `:shell` uses -- the
+remaining work is call-site plumbing (target selection UX), not new terminal
+mechanics.
 
 ## Live-accepted (`kind-sauron-test`, fresh binary)
 
-Denied under default readonly with zero connection attempts; `--readonly` CLI
-override forces denial even when config requests `readonly = false`; explicit
-container success with real stdout+stderr capture; unknown container name; missing
-container choice on a multi-container Pod; a real nonexistent-executable failure
-from the API; non-zero exit code surfaced with the exit status; Pod delete+recreate
-correctly clearing the stale selection (`Select a Pod first`) rather than exec'ing
-into a replaced incarnation; exec against the fresh UID after reselecting; Refresh
-restarting under a new identity; 32x9 clipping; exact `stty` terminal state
-preserved end to end. See `docs/M4_ACCEPTANCE.md` for the two real bugs this pass
-found and fixed (a command-grammar collision between `/`-filter syntax and
-absolute-path argv, and readonly being entirely unwired before this slice).
+**One-shot exec:** denied under default readonly with zero connection attempts;
+`--readonly` CLI override forces denial even when config requests `readonly =
+false`; explicit container success with real stdout+stderr capture; unknown
+container name; missing container choice on a multi-container Pod; a real
+nonexistent-executable failure from the API; non-zero exit code surfaced with the
+exit status; Pod delete+recreate correctly clearing the stale selection (`Select a
+Pod first`) rather than exec'ing into a replaced incarnation; exec against the
+fresh UID after reselecting; Refresh restarting under a new identity; 32x9
+clipping; exact `stty` terminal state preserved end to end.
+
+**Interactive shell:** a real remote prompt with full bidirectional byte
+forwarding (typed commands and their real output round-tripped correctly);
+explicit nonexistent-shell-path failure surfaced from the real API; the target
+Pod force-deleted mid-session, surfaced as `Shell Failed` with the real exit code
+(137, matching SIGKILL) rather than a hang or crash; the whole cluster network
+disconnected mid-session (`docker network disconnect`), ending the session
+cleanly and degrading the background watch to a clear transport-error status that
+fully recovered on `Refresh` after reconnecting; repeated local resize tracked
+correctly via `stty size` inside the remote shell; Ctrl-C forwarded to the remote
+without ending the session; Ctrl-D ending it cleanly; eight consecutive open/use/
+close round-trips (normal exit and Ctrl-D both exercised), confirming the
+known limitation above and its safe-no-op/retry mitigation rather than any wrong
+action or corruption; a full quit from SAURON afterward with exact `stty` state
+preserved.
+
+See `docs/M4_ACCEPTANCE.md` for the three real bugs this pass found and fixed: a
+command-grammar collision between `/`-filter syntax and absolute-path argv,
+readonly being entirely unwired before this slice, and `Terminal::clear()`'s
+internal cursor-position query racing the just-ended session's own stdin reader
+and timing out.

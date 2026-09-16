@@ -27,12 +27,26 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
-M4.0, M4.1, and M4.2's one-shot exec ACCEPTED; interactive TTY shell next (needs a
-terminal-handoff guard not yet built). Clean baseline verified at annotated
+M4.0 and all of M4.2 (one-shot exec + interactive shell) ACCEPTED; M4.2b (attach)
+or M4.3 (port-forward manager) next. Clean baseline verified at annotated
 `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked
-fmt/check/clippy/test now passes 69 unit + 11 fake HTTP = 80; one opt-in live test
+fmt/check/clippy/test now passes 70 unit + 11 fake HTTP = 81; one opt-in live test
 ignored. No tracked credentials found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
-M4.2 (one-shot exec) accepted 2026-09-16: `--readonly` CLI flag wired for the first
+M4.2 interactive shell accepted 2026-09-16, built in the requested order (terminal
+guard designed and live-verified first, shell built on top second): live-tested
+against `kind-sauron-test` across all nine requested endings (clean exit,
+nonexistent shell path, Pod force-deleted mid-session, cluster network
+disconnected mid-session, repeated resize, Ctrl-C forwarded to remote, Ctrl-D,
+eight repeated round-trips, final quit) -- exact `stty` state preserved in every
+case. Found and fixed a real crash on the first live shell-exit test
+(`Terminal::clear()`'s internal cursor-position query racing the session's own
+stdin reader and timing out; fixed via `Terminal::resize()` instead, which needs
+no cursor query for a Fullscreen viewport) and a real, byte-traced bug (an
+uncancellable `tokio::io::Stdin` read can occasionally swallow one
+subsequently-typed command right after a session ends; mitigated to a safe
+no-op/retry, documented as a bounded limitation rather than claimed fully fixed)
+-- see docs/EXEC.md and HANDBOOK for both root-cause writeups.
+M4.2 one-shot exec accepted 2026-09-16: `--readonly` CLI flag wired for the first
 time (was previously parsed and never read -- see HANDBOOK); new `kube::exec`
 live-verified against `kind-sauron-test`: readonly denial before any connection,
 `--readonly` override forcing denial against a `readonly = false` config, explicit
@@ -42,8 +56,8 @@ selection, Refresh restarting under a fresh identity, 32x9, exact stty restorati
 Found and fixed a real command-grammar bug along the way: `:exec`'s argv containing
 an absolute path (e.g. `/bin/sh`) collided with the unrelated `resource / filter`
 boundary syntax and silently lost the command -- see docs/EXEC.md and HANDBOOK.
-Interactive shell/attach remain researched, not implemented -- they need a
-terminal-suspension mechanism this pass deliberately did not attempt blind.
+Attach remains researched, not implemented -- deferred call-site plumbing over
+the now-proven terminal guard, not a new mechanics problem.
 M4.1 accepted 2026-09-16: `python3 scripts/accept-m4.py logs` PASS twice in a row
 against `m4-fixtures` (container choice/init/ephemeral/multi-source/pause/search/
 filter/clear/restart/bounded eviction/same-name replacement/32x9/terminal). Two

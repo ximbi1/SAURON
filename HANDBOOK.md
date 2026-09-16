@@ -2,7 +2,7 @@
 
 Canonical project memory. Read this before each major phase, inspect the code, reconcile
 claims with reality, and update this file after meaningful changes. README is for users.
-Last reconciled: 2026-09-15. Project began in an empty directory with no Git repository.
+Last reconciled: 2026-09-16. Project began in an empty directory with no Git repository.
 
 ## Production boundary — explicit user instruction
 
@@ -86,8 +86,9 @@ extension discovery. Failed groups are visible and do not erase successful group
 Aliases resolve deterministically; explicit group qualification avoids ambiguity. Only
 one selected resource watch initially; global fanout must have separate limits.
 Objects enter a shared dynamic representation; curated projections are pure and qualified
-by API group. Unknown kinds have name/namespace/age/status fallback. CRD/Table columns
-are a subsequent slice. Secret bodies must be redacted before storage/display/export.
+by API group. CRD additionalPrinterColumns use a safe JSONPath subset evaluated against
+each live object; server Table negotiation is deferred. Secret bodies must be redacted
+before storage/display/export.
 
 Config: XDG TOML, strict schema, exact cluster/context keys (avoid filesystem name
 collisions), recursive layer merge, validated limits. Failed reload retains prior config.
@@ -133,10 +134,12 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Basic filters/sort/documents/events (M1 scope only) | ACCEPTED | basic flows observed live; NOT acceptance of the fuller M3 requirements |
 | M3 filter completion | ACCEPTED | 41 unit + 4 fake HTTP checks; reproducible live snapshots/PTY `scripts/accept-m3.py filters`; stale input-error regression fixed and replayed |
 | M3 sorting | ACCEPTED | 46 unit + 4 fake HTTP; live typed sort/update/selection/history/scope/replacement via accept-m3.py sorting |
-| M3 documents | IMPLEMENTING | shared viewer/refresh/search interaction slice next |
-| M3 events/Tables/CRD columns | DESIGNED | ordered slices, not accepted; see docs/M3_ACCEPTANCE.md |
+| M3 documents | ACCEPTED | shared viewer, search, UID-pinned refresh, narrow/resize live acceptance |
+| M3 Events/CRD columns/combined flows | ACCEPTED | docs/M3_ACCEPTANCE.md; local annotated m3-accepted at 9eac329 |
+| Server Table negotiation | DEFERRED | M3 accepted safe live CRD printer projection instead; not Table parity |
 | Pod logs | ACCEPTED | follow, previous, and explicit-container all observed live |
-| Exec/port-forward | RESEARCHED | M4; no actions exposed |
+| M4 session foundation | ACCEPTED | 62 unit + 11 fake HTTP; live scripts/accept-m4.py, exact palette race replay and stty restoration |
+| Exec/attach/port-forward | RESEARCHED | locked kube-client 4.2.0 APIs inspected; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
 | Graph/relationships/Xray | RESEARCHED | M6 |
@@ -202,11 +205,10 @@ Checks: `cargo fmt --check`, `cargo check --all-targets`,
 Bench harness: 100/1,000/5,000 Pods, generic objects, filter/sort/update/render. Record
 environment, build mode, counts, repetitions, timings and limitations. Startup and API
 latency are separate from in-memory throughput.
-M2 checkpoint records green fmt/check/clippy/tests and live acceptance. M3 baseline
-re-run: `cargo test --locked --lib` 34/34 passed; three additional fake-HTTP tests
-live in `tests/watch_transport.rs`. Live `tests/cluster.rs` is opt-in (`#[ignore]`),
-previously passed against isolated kind; this attribute does not mean untested.
-New M3 full-suite/live results will be recorded per slice, not inferred from M2.
+M4 baseline at m3-accepted: locked all-target fmt/check/clippy/test green on 2026-09-16:
+55 unit + 10 fake HTTP = 65 tests passed, one opt-in live test ignored. Historical
+entries saying "57/57 (55 unit + 10 fake HTTP)" contain an arithmetic error; 65 is the
+verified current total. Live acceptance from M3 remains historical evidence, not M4 proof.
 Debug-profile bench sample on the development machine: 100 objects 11.5ms build /
 0.5ms filter+sort / 4.4ms render; 1,000 objects 107ms / 5.4ms / 14.6ms; 5,000 objects
 472ms / 24.8ms / 53.0ms. Debug build, single run, no release-profile or repeated-sample
@@ -218,15 +220,15 @@ Initial implementation exists; the checks above are green. Broad parity is a lon
 backlog. Existing machine: rustc/cargo 1.95, 15 GiB RAM with other workloads; keep build
 parallelism modest. Docker available. Existing production API `/version` read succeeded
 (Kubernetes v1.33.4). No sensitive resource contents collected in research.
-M1 and M2 visual/TUI acceptance is recorded below; M3 acceptance is pending. Log reader caps
+M1–M3 visual/TUI acceptance is recorded below. Log reader caps
 allocation before clipping (16 KiB per line, 4 KiB read chunks); covered by the fake-HTTP
 watch tests but not yet by a dedicated log-clipping regression test. Row rebuild is gated
 by a `prepare()` memo keyed on store revision/filter/sort/descending, plus the current
 second only when the filter has an `age` comparison (see journal entry below — an earlier
-version included the clock unconditionally and resorted every tick regardless of scope). Other open concerns: document wrap
-scroll semantics, scope selection during empty filters. Watch list synchronization is
+version included the clock unconditionally and resorted every tick regardless of scope).
+Shared document interactions and selection were accepted in M3. Watch list synchronization is
 labeled separately from an established watch; no header-level connection probe yet.
-No in-cluster config fallback, server Tables, CRD printer columns,
+No in-cluster config fallback or server Tables;
 multi-container log fanout, metrics, graph, or mutations yet. Core Event reads cap at 200
 and report truncation. Describe is SAURON's contextual native report, not kubectl parity.
 
@@ -240,10 +242,75 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. Next milestone: not yet started;
-await direction before opening M4.
+isolated unit tests alone. Keep buildable handoffs. M4 is now authorized: audit → minimal
+owned sessions using existing logs → advanced logs → exec/shell/attach feasibility →
+background forwards → combined acceptance/soak. Ledger: docs/M4_ACCEPTANCE.md.
+M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
+only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
+Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
+
+## M4 audit (2026-09-16)
+
+Runtime already owns a JoinSet, scope/document CancellationTokens, a 256-slot channel,
+epoch gate and document request gate. Shutdown cancels then aborts/joins tasks. Retain
+these working invariants. Existing log transport has 10-second connect/GET deadlines,
+16-KiB line clipping, cancellation enclosing reads and queue waits, and a UID preflight.
+The shared viewer caps 5,000 lines/4 MiB. Gaps: no session census or typed final outcome;
+logs reuse generic status; LogEnd only stops streaming in Document, not Search/palette;
+startup is labelled streaming before connection; no init/ephemeral choice or multiplexing;
+search currently rescans the full buffer on every appended line. No terminal handoff
+exists beyond the final restoration guard. These are M4 targets, not reasons to rewrite
+navigation/discovery/watch/filtering. See docs/SESSIONS.md for ownership contracts.
+
+Locked kube-client 4.2.0 already enables ws: exec/attach return AttachedProcess with
+stdin/stdout/stderr, status future, resize sender, abort/join and abort-on-Drop. Native
+portforward exposes one duplex stream per requested remote port; concurrent local TCP
+clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.0 accepted; continuing M4.1
+
+Full fmt/check/clippy/locked all-target tests passed: 62 unit + 11 fake HTTP = 73;
+opt-in cluster test also passed after fixture restoration. Fresh `cargo build --locked`
+then `python3 scripts/accept-m4.py` PASS: explicit worker follow, previous crashloop,
+search/palette overlay, five reopen cycles, three rapid ns/context cycles, 32x9/resize,
+zero active sessions after close, shutdown with stream active, exact stty restored.
+The minimal live palette-loss flow replayed three times correctly before progression.
+Test harness also needed two matching screen observations: a single immediate capture
+could match the outgoing rendered frame before queued navigation ran; that false
+readiness led to an intentionally rejected "select a Pod" operation. No blind queuing
+of object actions added. No production traffic. M4.1 starts next; M4 not accepted.
+
+### 2026-09-16 — M4.0 live bug: connect completion discards active command input
+
+Initial M4 PTY flow lost `:logs worker` after rapid context navigation. Minimal real
+reproduction: `:ctx kind-sauron-test-b`, immediately `:`, wait 100ms, type `info`/Enter.
+Observed namespace picker instead of diagnostics: the `n` became a table shortcut.
+Root cause: Payload::Connected invokes watch_resource → cancel_scope, resetting Mode
+while newly entered palette input is active. Preserve only that new Command buffer
+across asynchronous connect completion; still discard old document/store identity.
+Added deterministic runtime regression. Full suite/fresh binary/exact replay pending;
+advanced-log progression paused until live verification succeeds.
+
+### 2026-09-16 — M4.0 implementation in progress
+
+Added app/session.rs: bounded owned tasks, monotonic IDs, immutable foreground identity,
+independent completion accounting, cancellation/abort/join and bounded outcome history.
+Log events now carry SessionId as well as epoch/request; logs report Connecting only
+until the stream opens, and terminal outcome belongs to the document (including search
+and palette overlays). No exec/attach/forward enabled. cargo check all-targets passes;
+full tests/live replay pending. Restored isolated kind via explicit bootstrap, node Ready;
+fixture restoration in progress. No production request. No new Rust dependency.
+
+### 2026-09-16 — M4 audit and baseline reconciliation
+
+Verified clean HEAD/local annotated m3-accepted at 9eac329f5581da45251d81c20a278e53531d4d1a.
+All four baseline checks passed (65 tests, one live ignored). Tracked-file review found
+no kubeconfig/private-key artifacts. Corrected stale current-state M3 summaries without
+rewriting historical entries. Docker uses local unix socket; no kind cluster exists now,
+although the cached kindest/node:v1.33.1 image exists. Production not accessed. Audited
+logs/tasks/terminal and locked streaming APIs; M4 acceptance remains NOT ACCEPTED.
 
 ### 2026-09-15 — M3 item 6 accepted (combined adversarial live acceptance; one
 ### real bug found, root-caused, and fixed)

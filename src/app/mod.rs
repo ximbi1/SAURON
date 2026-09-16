@@ -1,5 +1,6 @@
 pub mod document;
 pub mod event;
+pub mod session;
 pub mod state;
 
 use crate::{
@@ -25,6 +26,7 @@ pub struct Runtime {
     config_path: Option<std::path::PathBuf>,
     tx: mpsc::Sender<Event>,
     tasks: JoinSet<()>,
+    sessions: session::Sessions,
     scope: CancellationToken,
     document: CancellationToken,
     pending: Option<ResourceCommand>,
@@ -58,6 +60,7 @@ impl Runtime {
                 config_path,
                 tx,
                 tasks: JoinSet::new(),
+                sessions: session::Sessions::default(),
                 scope: CancellationToken::new(),
                 document: CancellationToken::new(),
                 pending: None,
@@ -346,6 +349,15 @@ impl Runtime {
         self.state.dirty = true;
         match event.payload {
             Payload::Connected(connection) => {
+                // Connection completion starts a fresh watch, which clears old view
+                // state. A palette opened *during* connection is new user input,
+                // not abandoned-scope data: keep its buffer across that reset.
+                // Otherwise the remaining typed letters become table shortcuts.
+                let pending_input = if matches!(self.state.mode, Mode::Command(_)) {
+                    Some(std::mem::replace(&mut self.state.mode, Mode::Table))
+                } else {
+                    None
+                };
                 self.state.context = connection.context.clone();
                 self.state.settings = connection.settings.clone();
                 match Keymap::compile(&connection.settings.keys) {
@@ -366,6 +378,9 @@ impl Runtime {
                     }
                 } else if let Err(e) = self.rewatch() {
                     self.state.error = Some(e.to_string());
+                }
+                if let Some(input) = pending_input {
+                    self.state.mode = input;
                 }
             }
             Payload::ConnectError(e) => {
@@ -413,15 +428,25 @@ impl Runtime {
                     self.state.mode = Mode::Table;
                 }
             }
-            Payload::LogLine { request, line } if request == self.state.request => {
-                if let Some(doc) = self.active_document_mut() {
+            Payload::LogLine {
+                request,
+                session,
+                line,
+            } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && doc.session == Some(session)
+                {
                     doc.append(line);
                 }
             }
-            Payload::LogEnd { request, message } if request == self.state.request => {
-                self.state.status = message;
-                if let Mode::Document(doc) = &mut self.state.mode {
-                    doc.streaming = false;
+            Payload::LogStarted { request, session } if request == self.state.request => {
+                self.sessions.running(session);
+                if let Some(status) = self.sessions.state(session)
+                    && let Some(doc) = self.active_document_mut()
+                    && doc.session == Some(session)
+                {
+                    doc.streaming = status == session::State::Running;
+                    doc.session_state = Some(status);
                 }
             }
             Payload::NamespaceList {
@@ -827,23 +852,52 @@ impl Runtime {
             ),
             String::new(),
         );
-        doc.streaming = true;
         doc.follow = true;
+        let scope = session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: "v1/pods".into(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let epoch = self.state.epoch;
+        let request = self.state.request;
+        let tx = self.tx.clone();
+        let id = self
+            .sessions
+            .spawn(session::Kind::Logs, scope, self.document.clone(), |id| {
+                crate::kube::evidence::logs(
+                    connection,
+                    object,
+                    crate::kube::evidence::LogOptions {
+                        container,
+                        previous,
+                    },
+                    epoch,
+                    request,
+                    tx,
+                    id,
+                )
+            })?;
+        doc.session = Some(id);
+        doc.session_state = Some(session::State::Starting);
         self.state.mode = Mode::Document(doc);
-        self.state.status = "Streaming logs · Esc returns".into();
-        self.tasks.spawn(crate::kube::evidence::logs(
-            connection,
-            object,
-            crate::kube::evidence::LogOptions {
-                container,
-                previous,
-            },
-            self.state.epoch,
-            self.state.request,
-            self.tx.clone(),
-            self.document.clone(),
-        ));
         Ok(())
+    }
+    fn session_finished(&mut self, record: session::Record) {
+        if record.scope.epoch != self.state.epoch || record.scope.request != self.state.request {
+            return;
+        }
+        if let Some(doc) = self.active_document_mut()
+            && doc.session == Some(record.id)
+        {
+            doc.streaming = false;
+            doc.session_state = Some(record.state);
+            self.state.dirty = true;
+        }
     }
     pub fn info(&self) -> String {
         let mut out = format!(
@@ -866,11 +920,16 @@ impl Runtime {
                 c.catalog.warnings.join("\n")
             ));
         }
+        out.push_str(&format!(
+            "Active sessions: {}\n",
+            self.sessions.active_count()
+        ));
         crate::safety::text(&out)
     }
     pub async fn shutdown(&mut self) {
         self.scope.cancel();
         self.document.cancel();
+        self.sessions.shutdown().await;
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
     }
@@ -1005,6 +1064,7 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                     runtime.state.dirty=false;
                 },
                 _=clock.tick()=>runtime.state.dirty=true,
+                Some(record)=runtime.sessions.join_next(),if !runtime.sessions.is_empty()=>runtime.session_finished(record),
                 Some(event)=rx.recv()=>{runtime.reduce(event);for _ in 0..63{match rx.try_recv(){Ok(event)=>runtime.reduce(event),Err(_)=>break}}},
                 Some(result)=runtime.tasks.join_next(),if !runtime.tasks.is_empty()=>{if result.is_err(){runtime.state.error=Some("Background task failed; refresh to retry".into());runtime.state.dirty=true;}},
             }
@@ -1050,6 +1110,139 @@ fn edit(text: &mut String, key: crossterm::event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn connection_completion_preserves_palette_opened_during_startup() {
+        let mut rt = runtime();
+        let connection = rt.connection.take().expect("connection");
+        rt.state.mode = Mode::Command("logs wor".into());
+        rt.reduce(Event {
+            epoch: rt.state.epoch,
+            payload: Payload::Connected(Box::new(connection)),
+        });
+        assert!(matches!(&rt.state.mode, Mode::Command(text) if text == "logs wor"));
+        // Old document ownership must still be discarded, not restored with input.
+        assert!(rt.palette_document.is_none());
+        assert!(rt.state.store.objects.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn log_completion_follows_document_through_search_and_palette() {
+        let mut rt = runtime();
+        for overlay in ["search", "palette"] {
+            let scope = session::Scope {
+                epoch: rt.state.epoch,
+                request: rt.state.request,
+                context: "test".into(),
+                cluster: "test".into(),
+                resource: "v1/pods".into(),
+                namespace: "test".into(),
+                name: "pod".into(),
+                uid: "uid".into(),
+            };
+            let id = rt
+                .sessions
+                .spawn(
+                    session::Kind::Logs,
+                    scope,
+                    CancellationToken::new(),
+                    |_| async { session::Outcome::Failed("connection closed".into()) },
+                )
+                .expect("session");
+            let mut doc = Document::new("logs".into(), String::new());
+            doc.session = Some(id);
+            doc.streaming = true;
+            doc.session_state = Some(session::State::Running);
+            rt.state.mode = Mode::Document(doc);
+            if overlay == "search" {
+                if let Mode::Document(doc) = std::mem::replace(&mut rt.state.mode, Mode::Table) {
+                    rt.state.mode = Mode::Search(doc, String::new());
+                }
+            } else {
+                rt.open_palette(String::new());
+            }
+            let record = rt.sessions.join_next().await.expect("completed");
+            rt.session_finished(record);
+            // A queued connection notification must never resurrect an ended session.
+            rt.reduce(Event {
+                epoch: rt.state.epoch,
+                payload: Payload::LogStarted {
+                    request: rt.state.request,
+                    session: id,
+                },
+            });
+            let doc = rt
+                .active_document_mut()
+                .expect("same document under overlay");
+            assert!(!doc.streaming);
+            assert!(doc.status().contains("Failed: connection closed"));
+            assert!(rt.state.error.is_none());
+        }
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn abandoned_log_identity_never_updates_replacement_view() {
+        let mut rt = runtime();
+        let old_epoch = rt.state.epoch;
+        let old_request = rt.state.request;
+        let scope = session::Scope {
+            epoch: old_epoch,
+            request: old_request,
+            context: "test".into(),
+            cluster: "test".into(),
+            resource: "v1/pods".into(),
+            namespace: "test".into(),
+            name: "pod".into(),
+            uid: "old".into(),
+        };
+        let old = rt
+            .sessions
+            .spawn(
+                session::Kind::Logs,
+                scope.clone(),
+                CancellationToken::new(),
+                |_| async { session::Outcome::Completed },
+            )
+            .expect("old");
+        let new = rt
+            .sessions
+            .spawn(session::Kind::Logs, scope, CancellationToken::new(), |_| {
+                std::future::pending()
+            })
+            .expect("new");
+        let mut doc = Document::new("new logs".into(), String::new());
+        doc.session = Some(new);
+        doc.session_state = Some(session::State::Starting);
+        rt.state.mode = Mode::Document(doc);
+        for (epoch, request, session) in [
+            (old_epoch, old_request, old),
+            (old_epoch + 1, old_request, new),
+            (old_epoch, old_request + 1, new),
+        ] {
+            rt.reduce(Event {
+                epoch,
+                payload: Payload::LogLine {
+                    request,
+                    session,
+                    line: "stale".into(),
+                },
+            });
+        }
+        let old_record = rt.sessions.join_next().await.expect("old ended");
+        rt.session_finished(old_record);
+        let doc = rt.active_document_mut().expect("new doc");
+        assert!(doc.lines.is_empty());
+        assert_eq!(doc.session_state, Some(session::State::Starting));
+        rt.reduce(Event {
+            epoch: old_epoch,
+            payload: Payload::LogLine {
+                request: old_request,
+                session: new,
+                line: "current".into(),
+            },
+        });
+        assert_eq!(rt.active_document_mut().expect("doc").lines[0], "current");
+        rt.shutdown().await;
+    }
     fn runtime() -> Runtime {
         let resource = entry("pods").resource;
         let (mut rt, _) = Runtime::new(

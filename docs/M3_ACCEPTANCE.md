@@ -3,7 +3,10 @@
 Baseline: local annotated `m2-accepted` → `675567d`, verified 2026-09-15.
 Status vocabulary and safety rules: HANDBOOK.md / AGENTS.md. No production fixtures.
 All live work targets verified `kind-sauron-test`, `.test-cluster/config` explicitly.
-Items 1 and 2 are ACCEPTED (2026-09-15); remaining slices are not accepted.
+All six items are ACCEPTED (2026-09-15), local annotated m3-accepted at 9eac329.
+Server Tables and related-event navigation remain deliberately deferred as detailed below.
+M4 baseline recheck counted 65 passing tests (55 unit + 10 fake HTTP); the historical
+"57/57" total below is an arithmetic error, not the current verified count.
 
 ## 1. Filters — ACCEPTED
 

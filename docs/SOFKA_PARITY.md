@@ -43,8 +43,8 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Views | ApplicationSets status/generators/apps | Argo-specific projection | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Views | Pod containers: regular/init/sidecar/ephemeral, probes/ports/images | Container inspection | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Views | Container CPU/memory five-minute trends | Bounded per-container sample ring | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Views | CRD printer columns including condition selectors | Validated printer expression subset | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Views | Server Tables, watch/poll fallback, UID/RV cell validity | Negotiated Table adapter | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
+| Views | CRD printer columns including condition selectors | Validated dotted-field/numeric-index subset | P1 | ACCEPTED (subset) | M3 item 5 fake HTTP + live combined acceptance | Condition selectors and full JSONPath unavailable |
+| Views | Server Tables, watch/poll fallback, UID/RV cell validity | Negotiated Table adapter | P1 | DEFERRED | M3 item 5 research | Live object CRD projection implemented instead |
 | Views | Custom columns, types, image tags, quantities, namespaces | Declarative typed views | P2 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Filtering | Fuzzy, quoted substring, regex, inverse | Bounded AST text predicates | P0 | ACCEPTED | M3 item 1 unit + live accept-m3.py filters | FILTERS.md |
 | Filtering | Label key/value local search | Case-sensitive labels + existence AST | P1 | ACCEPTED | M3 item 1 unit + live | Missing comparisons UNKNOWN |
@@ -63,13 +63,13 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Explain | Fresh selected object, UID checks, cancellable latest report | Evidence collection + pure rules | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Explain | Workload/Pod/container/event evidence, finding navigation | Evidence report and related targets | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Timeline | Bounded per-UID meaningful watch transitions | Session change ring | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Events | UID-related events, Warning filtering, correct last-seen | Native Event view | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Logs | Follow/tail/timestamps/previous/container selection | Cancellable native log stream | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Events | UID-related events, Warning filtering, correct last-seen | Native Event view | P1 | ACCEPTED | M3 item 4 + combined live flows | 200-result cap, explicit partial/empty/error; related-object navigation deferred |
+| Logs | Follow/tail/timestamps/previous/container selection | Cancellable native log stream | P1 | ACCEPTED (basic); M4 ownership IMPLEMENTING | M1 live follow/previous/explicit choice; M4 ledger | Fixed tail 300; advanced controls not yet delivered |
 | Logs | Multi-container/workload/service/marked-pod combined logs | Bounded multiplexed log sources | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Logs | Filter/search/wrap/fullscreen/copy/save/time anchors | Shared document/log UX | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Logs | Pause/resume/clear, severity filter, markers, ANSI handling | Bounded log state and sanitized text | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Documents | Live YAML, describe, Secret decode | Redacted native documents; reveal separately gated | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Documents | Search/highlight/page/wrap/horizontal/fullscreen/refresh | Reusable document state | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Documents | Live YAML, describe, Secret decode | Redacted native documents; no Secret reveal | P0 | ACCEPTED (redacted subset) | M3 item 3 live | Native describe is contextual, not kubectl parity; decode deferred |
+| Documents | Search/highlight/page/wrap/horizontal/fullscreen/refresh | Reusable document state | P1 | ACCEPTED | M3 item 3 tests + live deletion/replacement/resize/search | UID-pinned refresh; logs have separate lifetime |
 | Documents | Last-applied or session-baseline diff/reset baseline | Explicit comparison baseline | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Actions | Exec/shell/attach with terminal suspension | Native transport after policy gate | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Actions | EDITOR edit with pinned context | Temporary file + validated API update | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |

@@ -26,6 +26,109 @@ struct Server {
     url: String,
     task: JoinHandle<()>,
 }
+
+#[tokio::test]
+async fn owned_logs_clip_sanitize_and_reject_replaced_uid() {
+    use sauron::app::session::{Kind, Outcome, Scope, Sessions, State};
+    let pod = json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"log-test","namespace":"default","uid":"current"},"spec":{"containers":[{"name":"worker"}]}});
+    let response = pod.to_string();
+    let server = Server::new(move |path| {
+        if path.contains("/log?") {
+            assert!(path.contains("container=worker"));
+            assert!(path.contains("previous=true"));
+            assert!(path.contains("timestamps=true"));
+            (
+                200,
+                format!("\u{1b}[31munsafe\u{7}\n{}\nlast", "x".repeat(20_000)),
+            )
+        } else {
+            (200, response.clone())
+        }
+    })
+    .await;
+    let mut sessions = Sessions::default();
+    let scope = Scope {
+        epoch: 7,
+        request: 8,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/pods".into(),
+        namespace: "default".into(),
+        name: "log-test".into(),
+        uid: "current".into(),
+    };
+    let (tx, mut rx) = mpsc::channel(16);
+    let client = connection(server.client());
+    let object = Arc::new(Object::new(pod.clone()));
+    let id = sessions
+        .spawn(Kind::Logs, scope.clone(), CancellationToken::new(), |id| {
+            evidence::logs(
+                client,
+                object,
+                evidence::LogOptions {
+                    container: Some("worker".into()),
+                    previous: true,
+                },
+                7,
+                8,
+                tx,
+                id,
+            )
+        })
+        .expect("spawn");
+    let record = tokio::time::timeout(Duration::from_secs(2), sessions.join_next())
+        .await
+        .expect("deadline")
+        .expect("end");
+    assert_eq!(record.state, State::Ended(Outcome::Completed));
+    assert!(
+        matches!(rx.recv().await.expect("started").payload, Payload::LogStarted { session, .. } if session == id)
+    );
+    let mut lines = vec![];
+    while let Ok(event) = rx.try_recv() {
+        assert_eq!(event.epoch, 7);
+        if let Payload::LogLine {
+            request,
+            session,
+            line,
+        } = event.payload
+        {
+            assert_eq!(request, 8);
+            assert_eq!(session, id);
+            assert!(!line.contains('\u{1b}') && !line.contains('\u{7}'));
+            lines.push(line);
+        }
+    }
+    assert_eq!(lines.len(), 3);
+    assert!(lines[1].ends_with("[line truncated at 16 KiB]"));
+    assert!(lines[1].len() < 16_450);
+    assert_eq!(lines[2], "last");
+    let mut replaced = pod;
+    replaced["metadata"]["uid"] = "old".into();
+    let (tx, mut rx) = mpsc::channel(16);
+    let client = connection(server.client());
+    sessions
+        .spawn(Kind::Logs, scope, CancellationToken::new(), |id| {
+            evidence::logs(
+                client,
+                Arc::new(Object::new(replaced)),
+                evidence::LogOptions {
+                    container: None,
+                    previous: false,
+                },
+                7,
+                9,
+                tx,
+                id,
+            )
+        })
+        .expect("spawn");
+    let record = sessions.join_next().await.expect("replaced end");
+    assert!(
+        matches!(record.state, State::Ended(Outcome::Failed(ref message)) if message.contains("replaced"))
+    );
+    assert!(rx.try_recv().is_err());
+}
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();

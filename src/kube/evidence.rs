@@ -1,4 +1,5 @@
 use super::{Connection, discovery::Resource};
+use crate::app::session::{Outcome, SessionId};
 use crate::{
     app::event::{Event, Payload},
     command::Action,
@@ -9,7 +10,6 @@ use anyhow::{Context, Result, ensure};
 use futures_util::AsyncReadExt;
 use k8s_openapi::api::core::v1::{Event as KubeEvent, Pod};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 pub async fn document(
     connection: &Connection,
@@ -174,8 +174,8 @@ pub async fn logs(
     epoch: u64,
     request: u64,
     tx: mpsc::Sender<Event>,
-    cancel: CancellationToken,
-) {
+    session: SessionId,
+) -> Outcome {
     let LogOptions {
         container,
         previous,
@@ -209,7 +209,7 @@ pub async fn logs(
                 anyhow::anyhow!(crate::safety::api_error(&e, "checking Pod UID before logs"))
             })?;
         ensure!(
-            fresh.metadata.uid.as_deref() == Some(object.uid.as_str()),
+            !object.uid.is_empty() && fresh.metadata.uid.as_deref() == Some(object.uid.as_str()),
             "Pod replaced; select its new incarnation"
         );
         let params = LogParams {
@@ -225,6 +225,12 @@ pub async fn logs(
                 .await
                 .context("Log connection timed out")?
                 .map_err(|e| anyhow::anyhow!(crate::safety::api_error(&e, "opening Pod logs")))?;
+        tx.send(Event {
+            epoch,
+            payload: Payload::LogStarted { request, session },
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("Log view closed"))?;
         let mut chunk = [0u8; 4096];
         let mut line = Vec::with_capacity(16_384);
         let mut truncated = false;
@@ -235,13 +241,13 @@ pub async fn logs(
                 .map_err(|_| anyhow::anyhow!("Log stream interrupted"))?;
             if count == 0 {
                 if !line.is_empty() {
-                    send_line(&tx, epoch, request, &line, truncated).await?;
+                    send_line(&tx, epoch, request, session, &line, truncated).await?;
                 }
                 break;
             }
             for byte in &chunk[..count] {
                 if *byte == b'\n' {
-                    send_line(&tx, epoch, request, &line, truncated).await?;
+                    send_line(&tx, epoch, request, session, &line, truncated).await?;
                     line.clear();
                     truncated = false;
                 } else if line.len() < 16_384 {
@@ -253,18 +259,17 @@ pub async fn logs(
         }
         Ok::<_, anyhow::Error>(())
     };
-    let result = tokio::select! {biased;_=cancel.cancelled()=>return,result=job=>result};
-    let message = match result {
-        Ok(()) => "Log stream ended".into(),
-        Err(e) => e.to_string(),
-    };
-    tokio::select! {_=cancel.cancelled()=>{},_=tx.send(Event{epoch,payload:Payload::LogEnd{request,message}})=>{}}
+    match job.await {
+        Ok(()) => Outcome::Completed,
+        Err(e) => Outcome::Failed(e.to_string()),
+    }
 }
 
 async fn send_line(
     tx: &mpsc::Sender<Event>,
     epoch: u64,
     request: u64,
+    session: SessionId,
     bytes: &[u8],
     truncated: bool,
 ) -> Result<()> {
@@ -274,7 +279,11 @@ async fn send_line(
     }
     tx.send(Event {
         epoch,
-        payload: Payload::LogLine { request, line },
+        payload: Payload::LogLine {
+            request,
+            session,
+            line,
+        },
     })
     .await
     .map_err(|_| anyhow::anyhow!("Log view closed"))

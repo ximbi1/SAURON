@@ -1,6 +1,6 @@
 # SAURON development runbook
 
-Updated 2026-09-15. Canonical architecture/status: [HANDBOOK](../HANDBOOK.md).
+Updated 2026-09-16. Canonical architecture/status: [HANDBOOK](../HANDBOOK.md).
 
 ## Production protection
 
@@ -27,19 +27,35 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
+M4.0 ACCEPTED; continuing M4.1 advanced logs. Clean baseline verified at annotated `m3-accepted`, commit
+`9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked fmt/check/clippy/test passed:
+55 unit + 10 fake HTTP = 65 passed; one opt-in live test ignored. No tracked credentials
+found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
+Current full checks: 62 unit + 11 fake HTTP = 73 passed; opt-in cluster test passed too.
+`python3 scripts/accept-m4.py` rebuilds before launching a unique tmux session and
+validates follow/previous, ownership/cancel/rapid scope changes, palette race replay,
+32x9, zero sessions after close and exact stty restoration. PASS 2026-09-16.
+The isolated kind container was absent. Recreated via `bash scripts/bootstrap-test-cluster.sh`
+with explicit `.test-cluster/config`, loopback API and cached v1.33.1 image; node Ready
+and script identity checks pass. Previous dedicated kubeconfig backed up privately under
+ignored `.test-cluster/previous.*`. Fixtures restored and identity check passes.
+The following M3 details are historical evidence, not the current M4 test-cluster state.
+
+## M3 accepted checkpoint and historical evidence
+
 M2 is ACCEPTED: annotated local `m2-accepted` at `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`,
 verified before M3; worktree initially clean. All 6 M3 items are ACCEPTED (filters,
 typed stable sorting, shared document viewer, Events, CRD printer columns, combined
 adversarial live acceptance). **M3 is ACCEPTED** — see item 6 below and local
 annotated `m3-accepted`.
 Acceptance ledger/order: [M3_ACCEPTANCE.md](M3_ACCEPTANCE.md). M3 was entirely read-only.
-Latest full fmt/check/clippy clean, 49 unit + 4 fake-HTTP tests passed. Fake HTTP needs
+At the filter/document checkpoint fmt/check/clippy were clean, 49 unit + 4 fake-HTTP tests passed. Fake HTTP needed
 loopback permission outside sandbox. `cargo build --locked` followed by
 `python3 scripts/accept-m3.py filters` PASS, including exact replay of the stale-error
 regex repair bug and rapid scope changes. Full evidence in HANDBOOK journal.
 New filter language: FILTERS.md. `po` with colliding Portal CRD is now ambiguous by
 current AGENTS policy; use `pods` or `v1/pods`. Historical M2 alias behavior below is
-superseded. No M3-wide acceptance/tag yet.
+superseded. M3-wide acceptance and its tag were subsequently completed (item 6).
 `python3 scripts/accept-m3.py sorting` passed after full checks and fresh build. This
 flow applies/patches/deletes ONLY named
 `m3-sort-*` ConfigMaps in isolated `sauron-fixtures`, through `test-cluster.sh` identity

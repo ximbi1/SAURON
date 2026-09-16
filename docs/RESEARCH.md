@@ -69,3 +69,24 @@ subsequence matching is sufficient for a first catalog, measurable before replac
 Regex uses the Rust regex engine (no backtracking). JSON is canonical internal document
 representation; YAML serialization may use a maintained serializer when that slice lands.
 Tokio task and channel limits are application contracts, not defaults delegated to crates.
+
+## M4 addendum — 2026-09-16
+
+Re-read pinned [log behavior](https://github.com/nklmilojevic/sofka/blob/2024e5921cf9cb06fd02f666630f97bae5e24eb3/docs/features.md#actions)
+and [log controls](https://github.com/nklmilojevic/sofka/blob/2024e5921cf9cb06fd02f666630f97bae5e24eb3/docs/debugging.md#log-controls).
+Benchmark includes fixed source sets with per-source labels, bounded history, filtering,
+timestamp-aware merging, pause/clear and explicit multi-source selection. SAURON will
+state its narrower scope and ordering semantics rather than imply complete parity.
+
+Inspected the actual downloaded locked kube-client 4.2.0 implementation:
+`api/remote_command.rs`, `api/portforward.rs`, `api/subresource.rs`.
+Native WebSocket exec and attach are separate APIs. AttachedProcess owns and aborts its
+task on Drop, offers separate optional pipes, status future and TTY resize sender. A
+missing remote Status cannot mean success. Portforwarder exposes one stream per remote
+port and explicit abort/join, **but no abort-on-Drop implementation in 4.2.0**: SAURON
+must add an owned guard before cancellation can safely drop a forwarding future. Its
+duplex buffer is 1 MiB per port; bound concurrent local TCP connections accordingly.
+No source copied. Existing `ws` feature already supplies these APIs.
+
+Isolated cluster restoration uses [kind configuration](https://kind.sigs.k8s.io/docs/user/configuration/)
+with explicit loopback API address, named cluster and dedicated kubeconfig argument.

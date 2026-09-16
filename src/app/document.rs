@@ -43,6 +43,8 @@ pub struct Document {
     pub fullscreen: bool,
     pub search: String,
     pub streaming: bool,
+    pub session: Option<super::session::SessionId>,
+    pub session_state: Option<super::session::State>,
     pub follow: bool,
     pub source: Option<Source>,
     pub freshness: Freshness,
@@ -71,6 +73,8 @@ impl Document {
             fullscreen: false,
             search: String::new(),
             streaming: false,
+            session: None,
+            session_state: None,
             follow: false,
             source: None,
             freshness: Freshness::Local,
@@ -287,17 +291,21 @@ impl Document {
         }
     }
     pub fn status(&self) -> String {
-        let freshness = match &self.freshness {
-            Freshness::Local => {
-                if self.streaming {
-                    "stream".into()
-                } else {
-                    "local".into()
+        let freshness = if let Some(status) = &self.session_state {
+            status.label()
+        } else {
+            match &self.freshness {
+                Freshness::Local => {
+                    if self.streaming {
+                        "stream".into()
+                    } else {
+                        "local".into()
+                    }
                 }
+                Freshness::Snapshot(time) => format!("snapshot {}", time.format("%H:%M:%S")),
+                Freshness::Refreshing => "STALE · refreshing".into(),
+                Freshness::Error(error) => format!("NOT CURRENT · {error}"),
             }
-            Freshness::Snapshot(time) => format!("snapshot {}", time.format("%H:%M:%S")),
-            Freshness::Refreshing => "STALE · refreshing".into(),
-            Freshness::Error(error) => format!("NOT CURRENT · {error}"),
         };
         let search = if self.search.is_empty() {
             String::new()

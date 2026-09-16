@@ -32,6 +32,13 @@ are design defaults and must be checked against code/benchmarks as implemented.
 Cancellation includes queue waits, read deadlines, retry waits and stream polling.
 No uncontrolled spawning and no shared mutable cluster stores. Rendering has no client.
 
+M4 adds `app/session.rs` alongside (not instead of) the existing view-worker JoinSet.
+Long-running logs have an owned task, monotonic SessionId, immutable origin/UID and
+bounded retained outcomes. Data uses epoch/request/session gates; task completion is
+reaped independently of the UI channel, even after navigation. Session status is local
+to its document through search/palette overlays. Limits: 8 active tasks, 64 ended
+records, two-second cancellation grace then abort/join. See [SESSIONS.md](SESSIONS.md).
+
 ## Safety design
 
 Inspection first. Mutation service later accepts typed Intent with GVR, namespace, name,

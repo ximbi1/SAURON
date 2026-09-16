@@ -19,6 +19,8 @@ Complete vertical slices and update HANDBOOK/parity after each. No acceptance by
 | 12 | Plugins/providers/headless maturity/packaging/performance | Process limits/trust; four platform builds; checksums/license inventory; reproducible performance campaign |
 
 Headless inspection, health projections and tests are pulled forward to M1. Readonly and
-redaction are foundational; all state-changing workflows remain unavailable until M7 policy.
+redaction are foundational. M4 interactive exec/attach/forward requires a conservative
+central operation boundary (readonly denies); M7 later adds full mutation policy and
+journaling. Development operational acceptance is isolated-kind-only, never production.
 At every milestone compare current parity, input latency, broken journeys, crash cases,
 permissions assumptions and keystroke cost. Continue the next implementable slice.

@@ -22,11 +22,12 @@ pub enum Payload {
     },
     LogLine {
         request: u64,
+        session: super::session::SessionId,
         line: String,
     },
-    LogEnd {
+    LogStarted {
         request: u64,
-        message: String,
+        session: super::session::SessionId,
     },
     NamespaceList {
         request: u64,

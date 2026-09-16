@@ -163,7 +163,18 @@ def advanced_logs():
     tmux('resize-window', '-t', SESSION, '-x', '32', '-y', '9')
     expect('Logs:')
     tmux('resize-window', '-t', SESSION, '-x', '150', '-y', '36')
+    # A real gap here matters: Escape sent byte-adjacent to the next key (no
+    # human types that fast) lets crossterm's terminal-input parser fold it
+    # into Alt+<key> instead of two separate events -- confirmed live via a
+    # temporary key-trace: the Escape and the following ':' merged into one
+    # unbound "Alt-:" event, so neither the "leave document" action nor the
+    # palette ever opened, leaving the harness stuck reading raw keys into
+    # the still-open log document. Every other Escape in this script is
+    # naturally preceded by an expect() loop (which paces itself in >=80ms
+    # steps), so only this resize-adjacent spot needs an explicit gap.
+    time.sleep(0.2)
     keys('Escape')
+    time.sleep(0.2)
     command('pods -n sauron-fixtures -l test=m4-sessions')
     expect('pods [1 / 1;')
     command('logs worker')

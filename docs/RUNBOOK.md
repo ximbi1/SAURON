@@ -27,19 +27,39 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
-M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell), and M4.2b (attach) ACCEPTED;
-M4.3 (port-forward manager) ACCEPTED, implemented from clean 7af4926. Contract PORT_FORWARD.md.
-Latest M4.3 checks: 76 unit + 14 fake HTTP = 90 passed, fmt/check/clippy clean.
+M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
+M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
+acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated
+`m4-accepted` created, never pushed. Contract: PORT_FORWARD.md, EXEC.md,
+[M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
+
+M4.4 accepted 2026-09-16: ten combined live sequences run in order against
+`kind-sauron-test` (logs/ns/ctx/history; multi-source search/filter/pause/delete/
+resume; forward/navigate/context/logs/stop; exec startup/cancel/exec; shell/resize/
+remote-exit/palette; forward+logs same-name replacement; rapid scope changes;
+manager rapid start/stop; 32x9 logs/manager/help; shutdown during logs/forward/
+manager) -- no task/listener/terminal/scope leak observed in any case. Plus a full
+regression rerun (`accept-m3.py filters`/`sorting`, `accept-m4.py`/`logs`,
+`accept-m4-forward.py` full) and a 75-minute soak (912 cycles, 911 log sessions,
+one continuously-held forward, RSS 29000→29488 KiB flat, fds 17→18, threads
+steady at 4, one self-recovered timing hiccup). One real finding: a terminal-
+input-protocol ambiguity (byte-adjacent Escape + next key merging into an unbound
+`Alt+<key>` event in crossterm's parser) made one spot in `accept-m4.py` flaky;
+root-caused with a temporary key trace (added, used, fully removed), fixed with a
+small delay in the script, not the app -- bounded/self-recoverable, same category
+as the already-documented phantom-Enter limitation. Full suite (76 unit + 14 fake
+HTTP) green before and after the soak.
+
+M4.3 (port-forward manager) ACCEPTED, implemented from clean 7af4926. Latest M4.3
+checks: 76 unit + 14 fake HTTP = 90 passed, fmt/check/clippy clean.
 Live `python3 scripts/accept-m4-forward.py` passed real HTTP, navigation/context/logs,
 explicit/conflicting/auto ports, four forwards/eight clients, individual stop, 12 cycles,
 five immediate start/cancel cycles, deletion/new UID, 32x9 and listener/stty cleanup.
 `--policy-only` proved readonly survives reload and still denies all operational actions.
-M3 filter/sort, M4.0 lifecycle and opt-in cluster regression also pass. Next is M4.4
-combined acceptance + soak; not performed/accepted yet. No m4-accepted tag or push.
 Dedicated kind identity checked and node Ready. Clean baseline verified at annotated
 `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked
 fmt/check/clippy/test at M4.2b passed 72 unit + 11 fake HTTP = 83; one opt-in live test
-ignored. No tracked credentials found. M4 ledger: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md).
+ignored. No tracked credentials found. M5 is next; no M5 work has started.
 M4.2b attach accepted 2026-09-16: confirmed it needed no new terminal mechanics,
 only call-site plumbing reusing M4.2's guard/forwarding loop exactly. Found and
 fixed a real hang on the first live test: attaching to an already-running

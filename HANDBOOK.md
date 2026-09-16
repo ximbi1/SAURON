@@ -144,6 +144,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Exec (one-shot + interactive shell) | ACCEPTED | readonly-gated, UID-pinned, TerminalHandoff-based; live-proven incl. Ctrl-C/Ctrl-D/Pod-death/network-cut/resize; docs/EXEC.md |
 | Attach | ACCEPTED | reuses shell's terminal guard/forwarding loop; requires container stdin+tty; Ctrl-] local-only detach; docs/EXEC.md |
 | Port-forward manager | ACCEPTED (M4.3 scope) | Pod-only native background lifetime; repeated real TCP/UID/context/cleanup acceptance; docs/PORT_FORWARD.md |
+| M4.4 combined/regression/soak | ACCEPTED | 10 live combined sequences + full M1-M4 regression + 75-minute soak (912 cycles, flat RSS/fd/threads); docs/M4_ACCEPTANCE.md; local annotated m4-accepted |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
 | Graph/relationships/Xray | RESEARCHED | M6 |
@@ -247,12 +248,14 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. M4.0, M4.1, M4.2 (one-shot exec +
-interactive shell), M4.2b (attach) and M4.3 (Pod port-forward manager) are ACCEPTED.
-Next: M4.4 (combined acceptance + soak), not accepted and no m4-accepted tag. One known,
+isolated unit tests alone. Keep buildable handoffs. M4 is fully ACCEPTED: M4.0, M4.1,
+M4.2 (one-shot exec + interactive shell), M4.2b (attach), M4.3 (Pod port-forward
+manager) and M4.4 (combined adversarial acceptance + full M1-M4 regression + 75-minute
+soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One known,
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
+M5 is next; no M5 work has started.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -276,6 +279,72 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.4 combined acceptance, full regression, and soak (M4 fully ACCEPTED)
+
+Ran the exact combined sequence the ledger specified, live, in order, against
+`kind-sauron-test` with a fresh binary: (1) logs → ns → logs → ctx → history,
+including verifying the label filter and selection survive a full history
+round-trip; (2) `:logs *` (3 sources) → search → matching-line filter →
+pause/resume (confirmed bounded ingestion continues under pause, match count
+kept climbing) → force-delete the Pod mid-session, which correctly surfaced
+`Failed: ...404... while checking Pod UID` rather than hanging; (3) a
+port-forward survived a namespace switch, a context switch and back, and a
+concurrent `:logs` session on the same Pod (real `curl` through the tunnel
+stayed HTTP 200 throughout), then `:pf_stop` released the listener
+immediately; (4) `:exec ... sleep 30` cancelled locally while its remote
+process kept running server-side -- confirmed as the project's existing
+"cancellation ends local observation, never remote rollback" principle
+applied to exec, not a new bug -- followed immediately by a second, clean
+exec; (5) `:shell`, three consecutive resizes each tracked correctly via
+remote `stty size`, remote `exit`, then the already-documented bounded
+phantom-keystroke limitation absorbed the very next palette keystroke once
+and recovered cleanly on retry; (6) forward + logs against a force-deleted
+and same-name-recreated Pod: the log session ended rather than silently
+continuing, and the forward failed with `TargetGone` pinned to the original
+UID, never retargeting by name; (7) a rapid-fire sequence of resource/ns/
+context switches with a log document open mid-sequence, no hang or crash;
+(8) six back-to-back port-forward start/stop cycles via the picker and
+`:pf_stop`, all six ports verified closed with `curl` immediately after
+stopping; (9) 32x9 with logs, the forward manager, and the help screen all
+opened in turn, no corruption; (10) `Ctrl-C` quit while a log stream, a
+listening forward, and the forward manager document were each independently
+active -- all three left zero leftover `sauron` process and zero listening
+ports afterward.
+
+One real, reproducible finding along the way, root-caused with a temporary
+key-event trace (written, used once to confirm, then fully removed -- no
+debug code shipped): `scripts/accept-m4.py`'s logs case sent `Escape`
+byte-adjacent to the next keystroke right after a resize, and crossterm's
+terminal-input parser folded the two into a single unbound `Alt+:` event
+(the standard "ESC-then-key = Alt+key" terminal convention) instead of two
+separate events -- a terminal-protocol ambiguity, not app logic. The app
+itself was never frozen or corrupted: every subsequent typed character
+landed as an ordinary logs-document keybinding (space toggling pause, `r`
+restarting the stream), and a plain, separately-timed `Escape` recovers it
+immediately -- the same bounded, self-recoverable category already accepted
+for the phantom-Enter-after-shell limitation. Fixed with a small explicit
+delay around that one `Escape` in the script (every other `Escape` in the
+harness already has natural pacing from a preceding `expect()` poll loop).
+No `src/` change.
+
+Regression: `accept-m3.py filters`, `accept-m3.py sorting`, `accept-m4.py`
+(foundation), `accept-m4.py logs`, `accept-m4-forward.py` (full, 7/7) all
+rerun green. Full suite (`fmt`/`check`/`clippy`/`test`, 76 unit + 14 fake
+HTTP) green both before and after the soak.
+
+Soak: new `scripts/soak-m4.py`, 75 minutes (4496s) against `kind-sauron-test`
+with a fresh binary and the operational config, continuously cycling ns/ctx
+switches, log-stream open/close, and health checks against one continuously-
+held port-forward. 912 cycles, 911 log sessions opened and closed cleanly,
+one forward held the entire run without restart. RSS 29000 KiB → 29488 KiB
+(flat, not a leak, across 900+ session cycles), fds 17 → 18, threads steady
+at 4. One transient `Streaming`-wait timeout at cycle 239, self-recovered by
+the harness's own retry with no further incident for the remaining ~55
+minutes -- ordinary API-server latency jitter, not an app defect.
+
+M4 is fully ACCEPTED. Local annotated `m4-accepted` created at this commit,
+never pushed. No production calls anywhere in this pass.
 
 ### 2026-09-16 — M4.3 live proof and regression checkpoint
 

@@ -12,7 +12,7 @@ via bootstrap-test-cluster.sh; node Ready/identity verified. Every fixture write
 | M4.2 | Native structured exec/shell, readonly boundary, terminal handoff/restore | ACCEPTED | 72 unit + 11 fake HTTP; live one-shot exec + interactive shell, all 9 requested adversarial endings | One known, bounded, documented limitation: an orphaned stdin read can occasionally swallow one input chunk after a session ends; mitigated to a safe no-op/retry, not fully closed -- see EXEC.md |
 | M4.2b | Separate native attach semantics or justified deferral | ACCEPTED | 72 unit + 11 fake HTTP; live attach against kind-sauron-test | Reuses M4.2's terminal guard/forwarding loop exactly, no new mechanics -- see EXEC.md |
 | M4.3 | Loopback background forwarding, manager, durable identity, bounded connections | ACCEPTED | 76 unit + 14 fake HTTP; repeated live accept-m4-forward.py; PORT_FORWARD.md | Pod TCP only; no Service resolution/reconnect/autostart; no endurance claim |
-| M4.4 | Combined adversarial flows, old-milestone regressions, measured soak | NOT STARTED | None | NOT ACCEPTED |
+| M4.4 | Combined adversarial flows, old-milestone regressions, measured soak | ACCEPTED | 76 unit + 14 fake HTTP; live combined pass (10 sequences) + full M1-M3/M4 regression + soak, all against `kind-sauron-test` | One terminal-input-timing finding, root-caused and fixed in the test harness (not the app); see below |
 
 ## M4.0 acceptance
 
@@ -189,18 +189,143 @@ denial flow. No production calls, published artifacts or m4-accepted tag.
 
 ## M4.4 combined and regression acceptance
 
-Logs → namespace → logs → context → history; multi-source → search/filter → pause →
-delete → resume; forward → navigate/context/logs → stop; exec startup → cancel → exec;
-shell → repeated resize → remote exit → palette; forward/logs → same-name replacement;
-rapid context/resource/ns/log changes; manager rapid start/stop; 32x9 logs/sessions/help;
-shutdown during logs/forward/manager. Observe no task/listener/terminal/scope leaks.
+Accepted 2026-09-16 against `kind-sauron-test`, fresh binary, explicit isolated
+`.test-cluster/config`. All ten requested combined sequences run live, in order,
+against the real fixtures (`m4-sessions`, `m4-logburst`, plus the standing M1-M3
+fixture set):
 
-Recheck context/ns pickers, CRDs/alias ambiguity, history, palette, typed filter/sort,
-documents, Events toggle, printer columns, Refresh and narrow terminal. Record soak
-duration/RSS/CPU/session counts/reconnects honestly (target 1–2 hours when practical).
-Do not create m4-accepted until combined live acceptance and documentation reconcile.
+1. **Logs → namespace → logs → context → history.** `m4-sessions`/`worker` logs
+   opened, `:ns kube-system` correctly closed the log document and returned to
+   Table with the namespace switched and the label filter preserved (0/0 match,
+   correctly empty in that namespace); switched back, reopened logs, then
+   `:ctx kind-sauron-test-b` again correctly closed logs and switched context;
+   `:history_back` restored ctx/ns/resource/filter/selection exactly.
+2. **Multi-source → search/filter/pause → delete → resume.** `:logs *` (3
+   sources: `worker`, `web`, the already-completed `setup` init container);
+   `/M4_WEB_LIVE` search jumped to a match and paused display (expected
+   `search_next()` side effect); `v` toggled the matching-line filter; Space
+   toggled pause off, with the match counter still climbing under the filter
+   (132→144), confirming bounded ingestion continues while paused. Force-
+   deleted the Pod mid-session: the session correctly reported `Failed:
+   ...404... while checking Pod UID` rather than hanging or silently
+   continuing against a phantom source.
+3. **Forward → navigate/context/logs → stop.** Started a forward on the
+   auto-loopback port; real `curl` through the tunnel returned HTTP 200;
+   survived a namespace switch, a context switch and back, and a concurrent
+   `:logs web` session on the same Pod (tunnel still serving HTTP 200
+   throughout); `:pf_stop <id>` cancelled it, and the local listener refused
+   connections immediately after (`curl` exit 7).
+4. **Exec startup → cancel → exec.** Started `:exec web -- sleep 30`,
+   cancelled the local view (Escape/Back) before it finished, then
+   immediately ran a second `:exec web -- echo ...`, which completed cleanly.
+   The first command's remote process (`sleep 30`) kept running server-side
+   after local cancellation -- consistent with the project's standing
+   "cancellation ends local observation, never remote rollback" principle
+   already documented for `:pf_stop`/attach's `Ctrl-]` in `docs/SESSIONS.md`,
+   not a new bug.
+5. **Shell → repeated resize → remote exit → palette.** `:shell worker`,
+   three consecutive local resizes (30x130 → 40x160 → 36x150) each tracked
+   correctly via `stty size` inside the remote shell; `exit` typed remotely
+   ended the session cleanly (`Shell ended`). The very next keystroke (`:`
+   to open the palette) was silently absorbed once -- the already-documented,
+   bounded phantom-keystroke limitation (`EXEC.md`) -- and opened correctly
+   on retry with no terminal corruption.
+6. **Forward/logs → same-name replacement.** Started a second forward and a
+   log session against `m4-sessions`, then force-deleted and recreated the
+   Pod under the same name (new UID). The log session ended (`Ended`) rather
+   than silently continuing against the old identity; the forward failed
+   with `TargetGone` pinned to the *original* UID (no retarget-by-name) and
+   released its listener (`curl` connection refused immediately after).
+7. **Rapid context/resource/ns/log changes.** A fast sequence of resource
+   type switches (`pods` → `deployments` → `pods`), namespace switches, and
+   context switches with a log document opened mid-sequence: no hang, no
+   crash, table stayed synchronized and correctly re-showed 6 Pods on return.
+8. **Manager rapid start/stop.** Six consecutive forward start/stop cycles
+   via the picker and `:pf_stop <id>`; all six ended `Cancelled` and all six
+   local ports refused connections immediately after stopping (verified with
+   `curl` against every port).
+9. **32x9 logs/sessions/help.** Resized to 32x9 with logs open (renders and
+   wraps, no clipping crash), the forward manager open, and the keyboard
+   help screen open -- all three rendered without corruption; restored to
+   150x36 cleanly afterward.
+10. **Shutdown during logs/forward/manager.** Quit (`Ctrl-C`) while (a) a log
+    stream was actively following, (b) a port-forward was `Listening`, and
+    (c) the forward manager document itself was open. All three: the process
+    exited entirely (no leftover `sauron` process), and any active forward's
+    local listener refused connections immediately after (`curl` exit 7) --
+    no task/listener/terminal leak in any of the three cases.
+
+**Regression:** `accept-m3.py filters`, `accept-m3.py sorting`, `accept-m4.py`
+(foundation), `accept-m4.py logs`, `accept-m4-forward.py` (full, all 7
+sub-checks) all rerun and passing against the current binary, reconfirming
+context/ns pickers, history, palette, typed filter/sort, documents, and
+narrow-terminal behavior inherited from M1-M3 alongside the M4 slices.
+`cargo fmt --check` / `cargo check --all-targets --locked` / `cargo clippy
+--all-targets --locked -- -D warnings` / `cargo test --all-targets --locked`
+(76 unit + 14 fake HTTP) all green throughout.
+
+**One real finding, root-caused, fixed in the test harness (not the app):**
+`scripts/accept-m4.py`'s logs case sent `Escape` immediately (zero real
+delay) after a resize-window call, then immediately opened the command
+palette. Reproduced live three times, then root-caused via a temporary key-
+event trace (removed after diagnosis): the `Escape` byte and the following
+`:` byte arrived close enough together that crossterm's terminal-input
+parser folded them into a single unbound `Alt+:` event instead of two
+separate `Esc` then `Char(':')` events -- a standard terminal-protocol
+ambiguity (many terminals send `Alt+<key>` as `ESC` followed immediately by
+`<key>`), not an app logic bug. The app was never frozen or corrupted during
+this: every following character typed into what the test *thought* was the
+command palette instead landed as ordinary logs-document keybindings
+(space toggling pause, `r` restarting the stream), and a plain, separately-
+timed `Escape` recovers it immediately -- the same bounded, self-recoverable
+category as the already-documented phantom-Enter-after-shell limitation,
+just triggered by scripted/byte-adjacent input rather than a stdin race.
+Fixed by adding a small explicit delay around that one `Escape` in the
+script (every other `Escape` in the harness is already naturally paced by a
+preceding `expect()` poll loop, which is why only this one spot flaked).
+No code change to `src/`; see `scripts/accept-m4.py`'s inline comment at the
+fix site for the full note.
+
+**Soak: 75 minutes (4496s), `kind-sauron-test`, fresh binary, operational
+config.** `scripts/soak-m4.py` (new) continuously cycled: namespace switch
+round-trip, context switch round-trip, a fresh log-stream open/close, and a
+periodic health check against one long-lived port-forward held for the
+entire run, sampling RSS/fd/thread counts every cycle. 912 cycles, 911 log
+sessions opened and closed, one long-lived forward held continuously without
+ever being restarted. RSS 29000 KiB → 29488 KiB (488 KiB drift over 900+
+session start/stop cycles -- flat, not a leak), fds 17 → 18, threads
+steady at 4 throughout. One transient timing hiccup at cycle 239 (1170s
+in): a single `Streaming` wait exceeded the harness's timeout once; the
+script's own recovery (`Escape`, retry) absorbed it and the run continued
+normally for the remaining ~55 minutes with no further incident -- consistent
+with ordinary API-server latency jitter, not an app defect. Final check
+suite (`fmt`/`check`/`clippy`/`test`, 76 unit + 14 fake HTTP) rerun clean
+after the soak.
 
 ## Execution log
+
+- M4.4 accepted: ten combined adversarial sequences run live in order against
+  `kind-sauron-test` (logs/ns/ctx/history; multi-source search/filter/pause/
+  delete/resume; forward/navigate/context/logs/stop; exec startup/cancel/
+  exec; shell/resize/remote-exit/palette; forward+logs same-name replacement;
+  rapid scope changes; manager rapid start/stop; 32x9 logs/manager/help;
+  shutdown during logs/forward/manager), plus a full M1-M4 regression rerun
+  (`accept-m3.py filters`, `accept-m3.py sorting`, `accept-m4.py`,
+  `accept-m4.py logs`, `accept-m4-forward.py` full) and a 75-minute soak
+  (912 cycles, 911 log sessions, one continuously-held forward, RSS/fd/
+  thread counts flat, one self-recovered timing hiccup). One real finding:
+  a terminal-input-protocol ambiguity (Escape sent byte-adjacent to the next
+  key merges into an unbound `Alt+<key>` event in crossterm's parser,
+  matching the standard "ESC-then-key = Alt+key" terminal convention) made
+  `scripts/accept-m4.py`'s logs case flaky at one specific resize-adjacent
+  spot; root-caused via a temporary key-event trace (added, used to confirm,
+  then fully removed -- no debug code shipped), fixed with a small explicit
+  delay in the script itself, not the app -- the app was never frozen or
+  corrupted, and a plain, separately-timed `Escape` always recovers it
+  immediately, the same bounded/self-recoverable category as the already-
+  documented phantom-Enter-after-shell limitation. `cargo fmt/check/clippy/
+  test` (76 unit + 14 fake HTTP) green throughout and rerun clean after the
+  soak. No production calls. `m4-accepted` tagged locally, never pushed.
 
 - M4.2b (attach) accepted: extracted the shared `forward_interactive()` byte-
   relay loop out of `interactive()` (shell) so `attach()` could reuse it

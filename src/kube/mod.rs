@@ -1,5 +1,6 @@
 pub mod discovery;
 pub mod evidence;
+pub mod exec;
 pub mod logs;
 pub mod printer;
 pub mod watch;
@@ -17,6 +18,10 @@ use std::{path::PathBuf, time::Duration};
 pub struct ConnectOptions {
     pub kubeconfig: Option<PathBuf>,
     pub context: Option<String>,
+    /// Unconditionally forces `Settings.readonly = true` on every resolve, regardless
+    /// of what a cluster/context config layer requests. `--readonly` on the CLI sets
+    /// this; it is a hard safety override, not just a default a config file can lift.
+    pub force_readonly: bool,
 }
 #[derive(Clone)]
 pub struct Connection {
@@ -53,7 +58,10 @@ pub async fn connect(options: ConnectOptions, app_config: AppConfig) -> Result<C
         .context("Requested context is not present in kubeconfig")?;
     let cluster = named.cluster.clone();
     let contexts = raw.contexts.iter().map(|c| c.name.clone()).collect();
-    let settings = app_config.resolve(&cluster, &context)?;
+    let mut settings = app_config.resolve(&cluster, &context)?;
+    if options.force_readonly {
+        settings.readonly = true;
+    }
     let deadline = Duration::from_secs(settings.request_timeout_secs);
     let mut config=tokio::time::timeout(deadline,Config::from_custom_kubeconfig(raw,&KubeConfigOptions{context:Some(context.clone()),..Default::default()})).await
         .map_err(|_|anyhow::anyhow!("Kubeconfig authentication timed out"))?
@@ -98,4 +106,25 @@ impl Connection {
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.settings.request_timeout_secs)
     }
+}
+
+/// Re-reads `name`/`namespace` and rejects if its UID no longer matches: the one
+/// Kubernetes-side precondition every session-owned Pod operation (logs, exec) can
+/// give itself, since the log/exec/attach subresource APIs accept no UID precondition
+/// of their own. Best-effort, not atomic with the operation it guards.
+pub async fn check_pod_uid(
+    connection: &Connection,
+    api: &::kube::Api<k8s_openapi::api::core::v1::Pod>,
+    name: &str,
+    uid: &str,
+) -> Result<()> {
+    let pod = tokio::time::timeout(connection.timeout(), api.get(name))
+        .await
+        .context("Pod identity check timed out; operation stopped")?
+        .map_err(|e| anyhow::anyhow!(crate::safety::api_error(&e, "checking Pod UID")))?;
+    anyhow::ensure!(
+        pod.metadata.uid.as_deref() == Some(uid),
+        "Pod replaced; select its new incarnation"
+    );
+    Ok(())
 }

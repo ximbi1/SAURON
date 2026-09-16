@@ -105,6 +105,7 @@ async fn start() -> Result<()> {
     let options = ConnectOptions {
         kubeconfig: cli.kubeconfig,
         context: cli.context,
+        force_readonly: cli.readonly,
     };
     let (mut runtime, mut rx) = Runtime::new(options, config, cli.config, query)?;
     if let Some(filter) = cli.filter {

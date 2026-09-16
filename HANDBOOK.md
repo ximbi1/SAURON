@@ -139,6 +139,7 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Server Table negotiation | DEFERRED | M3 accepted safe live CRD printer projection instead; not Table parity |
 | Pod logs | ACCEPTED, incl. M4.1 advanced | multi-source/init/ephemeral/pause/search/filter/eviction live-proven; docs/LOGS.md |
 | M4 session foundation | ACCEPTED | 62 unit + 11 fake HTTP; live scripts/accept-m4.py, exact palette race replay and stty restoration |
+| Exec (one-shot) | ACCEPTED; interactive shell NOT BUILT | readonly-gated, UID-pinned, structured argv; live-proven; docs/EXEC.md |
 | Exec/attach/port-forward | RESEARCHED | locked kube-client 4.2.0 APIs inspected; no actions exposed |
 | Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
 | Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
@@ -242,10 +243,11 @@ Events, CRD printer columns, combined adversarial acceptance) are ACCEPTED. Serv
 Table conversion was researched and deliberately deferred (see item 5 journal).
 Contract and case ledger: `docs/M3_ACCEPTANCE.md`. M3 was entirely read-only.
 Re-read this handbook at phase boundaries. Never mark broader milestones done from
-isolated unit tests alone. Keep buildable handoffs. M4.0 (session foundation) and
-M4.1 (advanced logs) are ACCEPTED. Current: M4.2 (native exec/shell) next, then M4.2b
-(attach), M4.3 (port-forward manager), M4.4 (combined acceptance + soak).
-Ledger: docs/M4_ACCEPTANCE.md.
+isolated unit tests alone. Keep buildable handoffs. M4.0 (session foundation),
+M4.1 (advanced logs), and M4.2's one-shot exec are ACCEPTED. Current: interactive
+TTY shell (the rest of M4.2) next -- needs a terminal-handoff guard not yet built
+-- then M4.2b (attach), M4.3 (port-forward manager), M4.4 (combined acceptance +
+soak). Ledger: docs/M4_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -269,6 +271,82 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-16 — M4.2 one-shot exec accepted; two real application bugs found and fixed
+
+Researched `kube` 4.2's exec/attach/portforward APIs directly from the vendored
+source before writing transport code, per the plan: `Api::exec`/`Api::attach`
+return `AttachedProcess` (stdin/stdout/stderr as `tokio::io::DuplexStream`, a
+`take_status()` future, a resize sender, abort-on-Drop), all behind the `ws`
+feature this project already enables -- no new dependency. `Api::portforward`
+similarly needs no new dependency (M4.3 work, not started).
+
+New `src/kube/exec.rs` mirrors `kube::logs`'s pattern for a one-shot, non-
+interactive command: explicit container required on a multi-container Pod (same
+convention as bare `:logs`), UID checked before and right after the exec
+connection opens, stdout+stderr drained concurrently and tagged `[stdout]`/
+`[stderr]` (arrival order, not merge-sorted -- documented, not a defect), exit
+status mapped to the session `Outcome` used everywhere else. `:exec [container]
+-- <argv>` parses via the same `words()` shlex tokenizer as everything else;
+extracted a shared `check_pod_uid` helper into `kube::mod` so `kube::logs` and
+`kube::exec` share the identity-check logic instead of duplicating it a third time.
+
+Found two real application bugs while building/testing this, both fixed with
+regression tests:
+
+1. **`--readonly` was completely unwired.** `Cli.readonly` was parsed by clap and
+   then never read anywhere; `Settings.readonly` defaulted `true` but nothing
+   enforced it, and a cluster/context config layer could freely flip it to `false`
+   with no way to force it back. Since M4.2 needed a real enforcement point for
+   the first time, this had to be fixed properly rather than papered over: added
+   `ConnectOptions.force_readonly`, set from `cli.readonly`, applied inside
+   `kube::connect()` right after `Settings` resolves (`settings.readonly = true`
+   unconditionally when set) so it survives every reconnect and cannot be
+   overridden by a later cluster/context layer. The "READ ONLY" heading now
+   reflects the real value instead of being hardcoded text; live-verified the
+   badge flips to "OPERATIONAL (exec/shell enabled)" only when a config sets
+   `readonly = false`, and that `--readonly` on the CLI forces it back to `true`
+   (and exec denial) even against that same config.
+2. **`:exec` argv containing an absolute path silently lost its command.**
+   `command::parse()`'s whitespace-slash filter-boundary heuristic (the one that
+   splits `pods / status=Pending` into a resource query plus a filter) fires on
+   ANY `/` preceded by whitespace anywhere in the raw command string -- including
+   inside `:exec`'s own argv. `:exec worker -- /bin/sh` was silently parsed as
+   `exec worker --` (a resource-query-style split ate `/bin/sh` as a "filter"),
+   surfacing as a confusing "Use :exec [container] -- <command>" error instead of
+   ever reaching the API. Found on the very first live absolute-path test (a
+   deliberately nonexistent-executable case). Root cause: the heuristic runs
+   before the command name is even known. Fixed by checking the first
+   whitespace-delimited word for `"exec"` before the boundary scan and skipping
+   the heuristic entirely in that case -- exec's own `--` separator always wins.
+   Regression test covers both a bare absolute path and one following an
+   explicit container name.
+
+Live-accepted against `kind-sauron-test`, fresh binary, after both fixes: denied
+under default readonly with zero connection attempts; `--readonly` CLI override
+verified against a `readonly = false` config; explicit container success with real
+stdout+stderr; unknown container name; missing container choice on a multi-
+container Pod; a genuine nonexistent-executable failure from the real API;
+non-zero exit code (3) surfaced with stdout+stderr both captured; Pod delete+
+recreate (`m4-recreate`) correctly clearing the stale selection (`Select a Pod
+first`) instead of exec'ing into the replacement, then succeeding again after
+reselecting the fresh UID; Refresh restarting under a new session identity (added
+`Document.exec_request` mirroring `log_request`, and split `start_exec`/
+`open_exec` the same way `start_logs`/`open_logs` already are, so Refresh reuses
+the exact frozen request rather than re-reading the current selection); 32x9
+clipping; exact `stty` state preserved end to end. 69 unit + 11 fake HTTP tests
+passing (4 new: 2 container-selection, 1 readonly-gate-ordering regression, 1
+command-grammar regression). No production calls -- exec was exercised only
+against the isolated test cluster, and the badge/config make read-write mode an
+explicit, visible opt-in, never a default.
+
+Deliberately NOT built this pass, and recorded honestly rather than faked:
+interactive TTY shell (`:shell`) and `Api::attach`. Both need a terminal-handoff
+guard that hands the real terminal to the remote process without racing Ratatui's
+own `crossterm::EventStream` stdin reader; that mechanism doesn't exist yet and
+building it blind, untested, risked leaving a user's terminal corrupted. Next M4.2
+sub-slice. See docs/EXEC.md for the full contract and docs/M4_ACCEPTANCE.md for the
+ledger entry.
 
 ### 2026-09-16 — M4.1 accepted (advanced logs); two test-harness bugs found and fixed
 

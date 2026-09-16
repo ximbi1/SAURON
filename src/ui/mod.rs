@@ -92,9 +92,14 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
     ])
     .split(area);
     let heading = format!(
-        "{} {}  ·  READ ONLY",
+        "{} {}  ·  {}",
         crate::brand::MARK,
         crate::brand::NAME,
+        if state.settings.readonly {
+            "READ ONLY"
+        } else {
+            "OPERATIONAL (exec/shell enabled)"
+        },
     );
     // Short, canonical breadcrumb for the current scope: ctx:X › ns:Y › resource, or
     // ctx:X › resource with no ns segment for a cluster-scoped resource. Always the

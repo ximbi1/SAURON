@@ -416,6 +416,10 @@ pub enum Command {
         previous: bool,
     },
     Sort(String),
+    Exec {
+        container: Option<String>,
+        command: Vec<String>,
+    },
 }
 
 /// Quoted words have shell-like grouping only. Nothing is executed or expanded.
@@ -461,7 +465,11 @@ pub fn words(s: &str) -> Result<Vec<String>> {
 pub fn parse(s: &str) -> Result<Command> {
     ensure!(s.len() <= 4096, "Command exceeds 4096 bytes");
     // A whitespace-delimited slash begins the local expression; quotes inside it
-    // remain intact for the filter parser. Detect outside quotes only.
+    // remain intact for the filter parser. Detect outside quotes only. exec's argv
+    // has its own "--" separator and routinely contains absolute paths (a bare
+    // "/bin/sh" starts with exactly this same whitespace-slash shape), so it must
+    // never be misread as a filter boundary.
+    let is_exec = s.trim_start_matches(':').split_whitespace().next() == Some("exec");
     let mut quote = None;
     let mut escaped = false;
     let mut boundary = None;
@@ -482,7 +490,7 @@ pub fn parse(s: &str) -> Result<Command> {
             }
         } else if c == '\'' || c == '"' {
             quote = Some(c);
-        } else if c == '/' && previous.is_whitespace() {
+        } else if !is_exec && c == '/' && previous.is_whitespace() {
             boundary = Some(i);
             break;
         }
@@ -542,6 +550,22 @@ pub fn parse(s: &str) -> Result<Command> {
         "sort" => {
             ensure!(tail.len() == 1, "Use :sort [column[:asc|:desc]]");
             return Ok(Command::Sort(tail[0].clone()));
+        }
+        // A structured argv after an explicit "--" separator, never a shell string:
+        // ":exec -- ls /" or ":exec worker -- sh -c 'echo hi'". At most one token
+        // (the container) may precede "--"; never guessed when a Pod has several.
+        "exec" => {
+            let split = tail
+                .iter()
+                .position(|a| a == "--")
+                .ok_or_else(|| anyhow::anyhow!("Use :exec [container] -- <command>"))?;
+            ensure!(split <= 1, "Use :exec [container] -- <command>");
+            let command = tail[split + 1..].to_vec();
+            ensure!(!command.is_empty(), "Use :exec [container] -- <command>");
+            return Ok(Command::Exec {
+                container: tail[..split].first().cloned(),
+                command,
+            });
         }
         _ => {}
     }
@@ -603,7 +627,7 @@ pub fn parse(s: &str) -> Result<Command> {
 /// Adding a binding to `registry()` makes it suggestible automatically -- there is no
 /// second list to remember to update.
 pub fn command_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = vec!["ctx", "ns", "info", "reload", "sort"];
+    let mut names: Vec<&'static str> = vec!["ctx", "ns", "info", "reload", "sort", "exec"];
     names.extend(registry().iter().map(|b| b.name));
     names
 }
@@ -622,6 +646,21 @@ mod tests {
         assert_eq!(q.namespace.as_deref(), Some("prod"));
         assert_eq!(q.labels.as_deref(), Some("app in (api,worker)"));
         assert!(parse("pods -A -n prod").is_err());
+    }
+    #[test]
+    fn exec_argv_with_an_absolute_path_is_never_misread_as_a_filter_boundary() {
+        // "exec worker -- /bin/sh" has the exact same whitespace-slash shape the
+        // filter-boundary heuristic looks for; exec's own "--" must win.
+        assert!(matches!(
+            parse("exec worker -- /bin/sh -c echo"),
+            Ok(Command::Exec { container: Some(c), command })
+                if c == "worker" && command == vec!["/bin/sh", "-c", "echo"]
+        ));
+        assert!(matches!(
+            parse("exec -- /nonexistent-binary"),
+            Ok(Command::Exec { container: None, command })
+                if command == vec!["/nonexistent-binary"]
+        ));
     }
     #[test]
     fn effective_bindings_detect_conflicts() {

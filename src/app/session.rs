@@ -15,6 +15,7 @@ pub struct SessionId(u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Logs,
+    Exec,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {

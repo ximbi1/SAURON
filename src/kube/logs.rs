@@ -185,15 +185,7 @@ pub async fn run(
     }
 }
 async fn check_uid(connection: &Connection, api: &Api<Pod>, source: &Source) -> Result<()> {
-    let pod = tokio::time::timeout(connection.timeout(), api.get(&source.object.name))
-        .await
-        .context("Pod identity check timed out; stream stopped")?
-        .map_err(|e| anyhow::anyhow!(crate::safety::api_error(&e, "checking log Pod UID")))?;
-    ensure!(
-        pod.metadata.uid.as_deref() == Some(source.object.uid.as_str()),
-        "Pod replaced; select its new incarnation"
-    );
-    Ok(())
+    super::check_pod_uid(connection, api, &source.object.name, &source.object.uid).await
 }
 async fn stream(
     connection: &Connection,

@@ -14,6 +14,7 @@ async fn discovery_documents_explain_and_secrets() {
         ConnectOptions {
             kubeconfig: Some(path.into()),
             context: Some("kind-sauron-test".into()),
+            force_readonly: false,
         },
         Config::default(),
     )

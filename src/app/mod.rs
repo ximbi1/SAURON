@@ -463,6 +463,27 @@ impl Runtime {
                     }
                 }
             }
+            Payload::ExecStarted { request, session } if request == self.state.request => {
+                self.sessions.running(session);
+                if let Some(status) = self.sessions.state(session)
+                    && let Some(doc) = self.active_document_mut()
+                    && doc.session == Some(session)
+                {
+                    doc.streaming = status == session::State::Running;
+                    doc.session_state = Some(status);
+                }
+            }
+            Payload::ExecLine {
+                request,
+                session,
+                line,
+            } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && doc.session == Some(session)
+                {
+                    doc.append(line);
+                }
+            }
             Payload::NamespaceList {
                 request,
                 names,
@@ -662,6 +683,13 @@ impl Runtime {
                 self.state.dirty = true;
                 Ok(())
             }
+            Command::Exec { container, command } => {
+                anyhow::ensure!(
+                    !self.state.settings.readonly,
+                    "Exec is unavailable in read-only mode"
+                );
+                self.open_exec(container, command)
+            }
         }
     }
     pub fn action(&mut self, action: Action) -> Result<()> {
@@ -859,6 +887,16 @@ impl Runtime {
         {
             return self.start_logs(request);
         }
+        if let Some(request) = self
+            .active_document_mut()
+            .and_then(|d| d.exec_request.clone())
+        {
+            anyhow::ensure!(
+                !self.state.settings.readonly,
+                "Exec is unavailable in read-only mode"
+            );
+            return self.start_exec(request);
+        }
         let connection = self.connection.clone().context("Not connected")?;
         let doc = self.active_document_mut().context("No document open")?;
         let source = doc
@@ -930,6 +968,58 @@ impl Runtime {
             .sessions
             .spawn(session::Kind::Logs, scope, self.document.clone(), |id| {
                 crate::kube::logs::run(connection, request, epoch, request_id, tx, id)
+            })?;
+        doc.session = Some(id);
+        doc.session_state = Some(session::State::Starting);
+        self.state.mode = Mode::Document(doc);
+        Ok(())
+    }
+    /// One-shot, non-interactive exec: structured argv, explicit container, UID-pinned.
+    /// Interactive TTY shell needs a terminal-handoff mechanism this does not attempt
+    /// (see docs/EXEC.md); callers must never reach this path when `settings.readonly`.
+    fn open_exec(&mut self, container: Option<String>, command: Vec<String>) -> Result<()> {
+        let object = self.state.selected_object().context("Select a Pod first")?;
+        self.start_exec(crate::kube::exec::Request {
+            object,
+            container,
+            command,
+        })
+    }
+    fn start_exec(&mut self, request: crate::kube::exec::Request) -> Result<()> {
+        let target_container = crate::kube::exec::container(&request)?;
+        let object = request.object.clone();
+        let connection = self.connection.clone().context("Not connected")?;
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let mut doc = Document::new(
+            format!(
+                "Exec: {}/{} · {}",
+                object.name,
+                target_container,
+                request.command.join(" ")
+            ),
+            String::new(),
+        );
+        doc.follow = true;
+        doc.exec_request = Some(request.clone());
+        let scope = session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: "v1/pods".into(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let epoch = self.state.epoch;
+        let request_id = self.state.request;
+        let tx = self.tx.clone();
+        let id = self
+            .sessions
+            .spawn(session::Kind::Exec, scope, self.document.clone(), |id| {
+                crate::kube::exec::run(connection, request, epoch, request_id, tx, id)
             })?;
         doc.session = Some(id);
         doc.session_state = Some(session::State::Starting);
@@ -1403,6 +1493,26 @@ mod tests {
         assert!(rt.command("sort name:wrong").is_err());
         assert_eq!(rt.state.sort, sort);
         rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn exec_is_denied_before_any_connection_attempt_when_readonly() {
+        let mut rt = runtime();
+        assert!(rt.state.settings.readonly);
+        let sessions_before = rt.sessions.active_count();
+        let error = rt.command("exec -- true").expect_err("must deny");
+        assert!(error.to_string().contains("read-only"));
+        assert_eq!(
+            rt.sessions.active_count(),
+            sessions_before,
+            "denial must happen before any session/connection attempt"
+        );
+        rt.state.settings.readonly = false;
+        // With readonly lifted the gate passes; the very next check (no row
+        // selected) is what actually fails now, proving gate ordering is correct.
+        let error = rt
+            .command("exec -- true")
+            .expect_err("still needs a selection");
+        assert!(!error.to_string().contains("read-only"));
     }
     #[tokio::test]
     async fn navigate_while_reconnecting_queues_instead_of_erroring() {

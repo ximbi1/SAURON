@@ -34,6 +34,15 @@ pub enum Payload {
         session: super::session::SessionId,
         message: String,
     },
+    ExecLine {
+        request: u64,
+        session: super::session::SessionId,
+        line: String,
+    },
+    ExecStarted {
+        request: u64,
+        session: super::session::SessionId,
+    },
     NamespaceList {
         request: u64,
         names: Vec<String>,

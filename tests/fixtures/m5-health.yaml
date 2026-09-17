@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oomkilled
+  namespace: sauron-fixtures
+spec:
+  containers:
+    - name: worker
+      image: busybox:1.37
+      command: [sh, -c, 'x=$(yes | head -c 200000000); sleep 3600']
+      resources:
+        limits:
+          memory: 20Mi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: m5-statefulset
+  namespace: sauron-fixtures
+spec:
+  serviceName: m5-statefulset
+  replicas: 2
+  selector:
+    matchLabels:
+      app: m5-statefulset
+  template:
+    metadata:
+      labels:
+        app: m5-statefulset
+    spec:
+      containers:
+        - name: worker
+          image: busybox:1.37
+          command: [sh, -c, 'sleep 3600']
+          readinessProbe:
+            exec:
+              command: [sh, -c, 'exit 0']
+            initialDelaySeconds: 90
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: m5-daemonset
+  namespace: sauron-fixtures
+spec:
+  selector:
+    matchLabels:
+      app: m5-daemonset
+  template:
+    metadata:
+      labels:
+        app: m5-daemonset
+    spec:
+      containers:
+        - name: worker
+          image: busybox:1.37
+          command: [sh, -c, 'sleep 3600']
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m5-job-completed
+  namespace: sauron-fixtures
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: busybox:1.37
+          command: [sh, -c, 'exit 0']
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: m5-job-failing
+  namespace: sauron-fixtures
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: busybox:1.37
+          command: [sh, -c, 'exit 1']
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: m5-unavailable
+  namespace: sauron-fixtures
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: m5-unavailable
+  template:
+    metadata:
+      labels:
+        app: m5-unavailable
+    spec:
+      containers:
+        - name: worker
+          image: registry.invalid/sauron-fixture:missing
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: m5-pvc-pending
+  namespace: sauron-fixtures
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: sauron-invalid-fixture-class
+  resources:
+    requests:
+      storage: 1Mi

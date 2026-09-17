@@ -14,7 +14,7 @@ Production remains read-only; fixture writes require explicit `.test-cluster/con
 | M5.1 | Optional bounded Pod/container/Node Metrics API polling, owned and scope-gated | IMPLEMENTED | 83 unit + 17 fake HTTP green; decode/403/404/500/timeout/bounds/correlation tests | Real metrics-server v0.8.1 live: Pod+Node CPU/memory, ns/ctx round-trip, 32x9, `Ctrl-C` shutdown with exact `stty` restore | Values currently inspectable only via `:info`; table/filter/sort integration is M5.2; live metrics-absent PTY mode retired once the fixture became permanent (fake-HTTP covers it instead, see journal) | ACCEPTED (transport only; not table-integrated) |
 | M5.2a | Requests/limits/capacity/QoS accounting, table/filter/sort integration | IMPLEMENTED | 4 unit tests (init-container formula, missing-vs-malformed, QoS passthrough); live table/filter/sort | Live `v1/pods -w` shows real CPU/R, MEM/R, CPU/L, MEM/L, QOS; `Node -w` shows CPU/C, MEM/C; typed filter (`cpu/r>1m`) and sort (`mem/l`) verified against real fixture data | Wide-only columns to avoid overwhelming narrow terminals; QoS read from `status.qosClass`, never re-derived | ACCEPTED |
 | M5.2b | Live Metrics API usage in table/filter/sort/percentages | IMPLEMENTED | 88 unit + 17 fake HTTP green; zero-denominator/unknown-usage percentage test | Live `CPU`/`MEM` columns (real usage, unknown shows `-`); `cpu>10m` filter correctly excludes 3 unknowns; typed sort by `cpu/%r` orders known ascending then unknown-last | `Metrics` trait (`resources::mod.rs`) threaded through `Field`/`Expr`/`sort::rows` so filters keeps no upward dependency on `app`; percentages use a real zero-denominator check, never fabricated 0%/∞ | ACCEPTED |
-| M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | DESIGNED | Existing basic rules are not M5 acceptance | Pending | Missing controller/container evidence must not imply health | NOT ACCEPTED |
+| M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | IMPLEMENTED | 95 unit + 17 fake HTTP green; 5 new precedence tests (10 total in the health module) | Live against `kind-sauron-test`: CrashLoopBackOff/ImagePullBackOff/Unschedulable/OOMKilled/NotReady Pods, Unavailable/Ready Deployment, Progressing StatefulSet, Ready DaemonSet, Completed/Failed Job, Pending PVC, Ready Node -- 13 real cases, all correct | `Health` now carries bounded `evidence: Vec<String>` citing real fields; `ContainerCreating`/`PodInitializing` no longer misclassified as failures; `lastState.terminated` (e.g. OOMKilled after restart) surfaces even when current state is a waiting reason | ACCEPTED |
 | M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | DESIGNED | Existing Explain is not M5 acceptance | Pending | No graph, speculative cause or name-prefix correlation | NOT ACCEPTED |
 | M5.5 | Bounded UID-scoped meaningful watch/relist transitions | DESIGNED | Existing history is not M5 acceptance | Pending | Equivalent relist must not invent transitions | NOT ACCEPTED |
 | M5.6 | Combined adversarial flows, M1–M4 regression and API/performance sanity | NOT STARTED | Pending | Pending | No m5-accepted until demonstrated | NOT ACCEPTED |
@@ -151,6 +151,43 @@ partition/OnDelete/revisions; DaemonSet rollout; Job failure/completion; Node co
 polarity/Unknown; PVC/PV phase. Each finding cites actual fields; absent data is not healthy.
 Live fixtures must be bounded and reproducible, without disrupting the cluster's Node.
 
+**Accepted 2026-09-17.** Full contract: [HEALTH.md](HEALTH.md). `resources::
+health::Health` now carries a bounded `evidence: Vec<String>` alongside status/
+severity, citing the actual fields/values that produced the result -- empty for
+`Healthy`/`Unknown`, where there is nothing to explain. Two real gaps found and
+fixed while implementing, both confirmed by a new unit test before touching the
+logic further: (1) `ContainerCreating`/`PodInitializing` waiting reasons were
+being treated as generic "failures" (Critical or Warning depending on the
+reason string) by the same code path as real crashes -- separated into a
+distinct "ordinary startup" case that returns no failure at all, so a container
+that is merely still starting up can no longer preempt or be confused with a
+genuine crash-loop elsewhere. (2) `OOMKilled` and other terminal reasons were
+only read from `state.terminated`, never from `lastState.terminated` -- once a
+container has already restarted into `waiting: CrashLoopBackOff`, the fact that
+it was OOM-killed moments earlier was silently lost. Both are exactly the kind
+of subtle "the formula looked right but Kubernetes does something else" failure
+this milestone is expected to surface, not infrastructure bugs.
+
+Live-accepted against `kind-sauron-test` with `bash scripts/test-cluster.sh
+m5-health-fixtures` (isolated, new `tests/fixtures/m5-health.yaml`), fresh
+binary, 13 real cases: `crashloop` → `CrashLoopBackOff`; `missing-image` →
+`ImagePullBackOff`; `unschedulable` → `Unschedulable`; a new `oomkilled` fixture
+(`yes | head -c 200000000` against a 20Mi memory limit) → confirmed a genuine
+kernel OOM kill via `kubectl` first (`lastState.terminated.reason=OOMKilled`,
+`exitCode=137`), then `CrashLoopBackOff` in SAURON with the OOM evidence
+preserved; a 2-replica StatefulSet with a 90s readiness-probe delay →
+`Progressing` (1/2) while one replica is still starting, with its own not-yet-
+ready Pod showing `NotReady`; a DaemonSet → `Ready`; a `backoffLimit: 0` Job
+that exits 0 → `Completed`, and one that exits 1 → `Failed`; a 2-replica
+Deployment pointed at an unreachable image → `Unavailable`; the pre-existing
+`healthy` Deployment → `Ready`; a PVC referencing a nonexistent storage class →
+`Pending`; the real cluster Node, inspected read-only → `Ready` (no pressure
+conditions tripped, confirming the healthy path and the "read-only Node
+inspection only" boundary). 95 unit + 17 fake HTTP green; full M1-M4 and M5.1/
+M5.2 regression re-ran clean afterward. Evidence strings are not yet surfaced in
+any UI -- that is M5.4's job, which can now reuse these findings directly
+instead of inventing its own.
+
 ## M5.4 — Explain 2.0
 
 Reuse existing fresh-object GET, UID validation, Event timestamp/cap semantics and
@@ -201,6 +238,26 @@ never push/publish. No M6 graph or M7 mutation-policy expansion.
 
 ## Execution journal
 
+- M5.3 accepted: rewrote `resources::health.rs` with an explicit precedence
+  (deletion, terminal failure, container failure, scheduling/init, readiness,
+  progressing, healthy, unknown) applied per kind (Pod, Deployment/StatefulSet/
+  DaemonSet/ReplicaSet, Job, Node, PVC/PV/Namespace), and gave every result a
+  bounded `evidence: Vec<String>` citing the fields that produced it. Found and
+  fixed two real gaps via new unit tests before touching live fixtures:
+  `ContainerCreating`/`PodInitializing` were being classified as generic
+  failures by the same code path as real crashes (separated into a distinct
+  non-failure case); `OOMKilled` and other terminal reasons were only read from
+  `state.terminated`, never `lastState.terminated`, so the evidence vanished
+  once a container rolled into `CrashLoopBackOff`. New `tests/fixtures/
+  m5-health.yaml` (`m5-health-fixtures` in `test-cluster.sh`): a Pod that
+  reliably triggers a genuine kernel OOM kill, a StatefulSet with a delayed
+  readiness probe, a DaemonSet, a completing and a failing Job, an unreachable-
+  image Deployment, a PVC on a nonexistent storage class. Live-accepted against
+  `kind-sauron-test`, 13 real cases across every kind, all correct (see the
+  M5.3 section above for the full list). 95 unit + 17 fake HTTP green; full
+  M1-M4 and M5.1/M5.2 regression re-ran clean afterward. Full contract:
+  `docs/HEALTH.md`. Next: M5.4 Explain 2.0, which can now reuse these evidence
+  strings directly.
 - 2026-09-17: ledger created; M5.0 implementation starting. No M5 acceptance claimed.
 - M5.0/M5.1: evidence primitives and owned bounded collector implemented; first suite
   81 unit green, 16/17 fake HTTP green. Corrected one fake-API expectation: kube's

@@ -255,13 +255,14 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is active. M5.0-M5.2 are all ACCEPTED against real `kind-sauron-test` with a
+M5 is active. M5.0-M5.3 are all ACCEPTED against real `kind-sauron-test` with a
 pinned metrics-server v0.8.1 fixture: evidence/freshness primitives (M5.0), the
-Metrics API collector (M5.1), static requests/limits/QoS accounting (M5.2a) and
-live usage/percentages threaded into the same table/filter/sort pipeline (M5.2b).
+Metrics API collector (M5.1), static requests/limits/QoS accounting plus live
+usage/percentages in the table/filter/sort pipeline (M5.2), and deterministic
+Pod/workload/Node/storage health with evidence (M5.3, see docs/HEALTH.md).
 `CPU`/`MEM` are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/
-`QOS`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.3 deterministic
-health. Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
+`QOS`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.4 Explain 2.0.
+Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -285,6 +286,57 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.3 accepted (deterministic health with cited evidence)
+
+Rewrote `resources::health.rs` with an explicit precedence -- deletion, then
+terminal failure, then container failure, then scheduling/init problems, then
+readiness degradation, then progressing, then healthy, then unknown --
+applied per kind (Pod; Deployment/StatefulSet/DaemonSet/ReplicaSet; Job; Node;
+PVC/PV/Namespace). Every result now carries a bounded `evidence: Vec<String>`
+citing the actual fields/values, empty only for `Healthy`/`Unknown` where
+there is nothing to explain.
+
+Found and fixed two real, subtle gaps via new unit tests before touching live
+fixtures at all -- both the "the formula looked right but Kubernetes does
+something else" kind of bug this milestone is expected to surface, not
+infrastructure bugs: (1) `ContainerCreating`/`PodInitializing` waiting reasons
+were classified as generic container failures by the same code path as real
+crashes, so a container that was merely still starting up could be reported
+Critical or could silently preempt a genuine crash-loop elsewhere -- separated
+into a distinct "ordinary startup, not a failure" case. (2) `OOMKilled` (and
+any other terminal reason) was only read from `state.terminated`, never
+`lastState.terminated` -- the moment a container restarts into `waiting:
+CrashLoopBackOff`, the fact that it had just been OOM-killed was silently
+lost. Fixed by also citing `lastState.terminated.reason` as evidence whenever
+the current state is a failure-reason `waiting`.
+
+New isolated fixture `tests/fixtures/m5-health.yaml` (`bash scripts/
+test-cluster.sh m5-health-fixtures`): a Pod that reliably triggers a genuine
+kernel OOM kill (`yes | head -c 200000000` against a 20Mi memory limit,
+confirmed via `kubectl` showing `lastState.terminated.reason=OOMKilled,
+exitCode=137` *before* touching SAURON at all); a 2-replica StatefulSet with a
+90-second readiness-probe delay so it observably sits `Progressing` for that
+window; a DaemonSet; a `backoffLimit: 0` Job that exits 0 and one that exits
+1; a 2-replica Deployment pointed at an unreachable image; a PVC on a
+nonexistent storage class.
+
+Live-accepted against `kind-sauron-test`, 13 real cases across every kind, all
+correct: `crashloop` → `CrashLoopBackOff`; `missing-image` →
+`ImagePullBackOff`; `unschedulable` → `Unschedulable`; `oomkilled` →
+`CrashLoopBackOff` with the OOM evidence preserved; the StatefulSet →
+`Progressing` (1/2) with its still-starting Pod showing `NotReady`; the
+DaemonSet → `Ready`; the completing Job → `Completed`; the failing Job →
+`Failed`; the unreachable-image Deployment → `Unavailable`; the pre-existing
+`healthy` Deployment → `Ready`; the PVC → `Pending`; the real cluster Node,
+inspected read-only → `Ready` (no pressure conditions tripped -- confirms both
+the healthy path and that Node inspection stayed strictly read-only). 95 unit
++ 17 fake HTTP green; full M1-M4 and M5.1/M5.2 regression re-ran clean
+afterward. Full contract: `docs/HEALTH.md`.
+
+Evidence strings are not surfaced in any UI yet -- that is M5.4 (Explain 2.0)
+next, which can now reuse these findings directly instead of inventing its
+own.
 
 ### 2026-09-17 — M5.2b accepted (live Metrics API usage/percentages, table/filter/sort integrated; M5.2 fully closed)
 

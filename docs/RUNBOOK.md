@@ -59,13 +59,14 @@ five immediate start/cancel cycles, deletion/new UID, 32x9 and listener/stty cle
 Dedicated kind identity checked and node Ready. Clean baseline verified at annotated
 `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked
 fmt/check/clippy/test at M4.2b passed 72 unit + 11 fake HTTP = 83; one opt-in live test
-ignored. No tracked credentials found. M5.0-M5.2 are all ACCEPTED against real
+ignored. No tracked credentials found. M5.0-M5.3 are all ACCEPTED against real
 metrics-server v0.8.1 on `kind-sauron-test`: evidence/freshness foundation
 (M5.0), the Metrics API collector (M5.1), static requests/limits/QoS accounting
-(M5.2a), and live usage/percentages threaded into the same table/filter/sort
-pipeline (M5.2b). `CPU`/`MEM` are default-visible columns; `CPU/R`/`MEM/R`/
-`CPU/L`/`MEM/L`/`QOS`/`CPU/C`/`MEM/C`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are
-wide-only. Next: M5.3 deterministic health. See [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
+plus live usage/percentages in the table/filter/sort pipeline (M5.2), and
+deterministic Pod/workload/Node/storage health with cited evidence (M5.3, see
+[HEALTH.md](HEALTH.md)). `CPU`/`MEM` are default-visible columns; `CPU/R`/
+`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/`CPU/C`/`MEM/C`/`CPU/%R`/`MEM/%R`/`CPU/%L`/
+`MEM/%L` are wide-only. Next: M5.4 Explain 2.0. See [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
 M4.2b attach accepted 2026-09-16: confirmed it needed no new terminal mechanics,
 only call-site plumbing reusing M4.2's guard/forwarding loop exactly. Found and
 fixed a real hang on the first live test: attaching to an already-running

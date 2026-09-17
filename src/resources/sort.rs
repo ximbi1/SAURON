@@ -4,12 +4,18 @@ use crate::filters::value::Field;
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
 
-pub fn rows(rows: &mut Vec<SharedObject>, field: &Field, descending: bool, now: DateTime<Utc>) {
+pub fn rows(
+    rows: &mut Vec<SharedObject>,
+    field: &Field,
+    descending: bool,
+    now: DateTime<Utc>,
+    metrics: Option<&dyn super::Metrics>,
+) {
     // Compute values once, not inside O(n log n) comparisons. Input is in canonical
     // namespace/name order from the store; stable sorting preserves that tie order.
     let mut keyed: Vec<_> = rows
         .drain(..)
-        .map(|object| (field.read(&object, now), object))
+        .map(|object| (field.read(&object, now, metrics), object))
         .collect();
     keyed.sort_by(|(a, _), (b, _)| match (a, b) {
         (None, None) => Ordering::Equal,
@@ -74,6 +80,7 @@ mod tests {
                     &Field::parse(field).expect("field"),
                     desc,
                     Utc::now(),
+                    None,
                 );
                 assert_eq!(
                     input.iter().map(|o| o.uid.as_str()).collect::<Vec<_>>(),

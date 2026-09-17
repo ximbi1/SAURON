@@ -89,8 +89,13 @@ impl Expr {
         );
         Ok(result)
     }
-    pub fn matches(&self, obj: &Object, now: DateTime<Utc>) -> bool {
-        self.evaluate(obj, now) == Truth::Yes
+    pub fn matches(
+        &self,
+        obj: &Object,
+        now: DateTime<Utc>,
+        metrics: Option<&dyn crate::resources::Metrics>,
+    ) -> bool {
+        self.evaluate(obj, now, metrics) == Truth::Yes
     }
     /// True when membership can change purely from the passage of time (an `age`
     /// comparison), independent of any store update. Sort sequences do not need this:
@@ -106,7 +111,12 @@ impl Expr {
             Self::And(a, b) | Self::Or(a, b) => a.has_time_predicate() || b.has_time_predicate(),
         }
     }
-    pub fn evaluate(&self, obj: &Object, now: DateTime<Utc>) -> Truth {
+    pub fn evaluate(
+        &self,
+        obj: &Object,
+        now: DateTime<Utc>,
+        metrics: Option<&dyn crate::resources::Metrics>,
+    ) -> Truth {
         match self {
             Self::All => Truth::Yes,
             Self::Text(s) => Truth::from_bool(fuzzy(s, &obj.search_text())),
@@ -118,9 +128,13 @@ impl Expr {
                     || r.is_match(&obj.namespace)
                     || obj.cells.iter().any(|(_, value)| r.is_match(value)),
             ),
-            Self::Not(a) => a.evaluate(obj, now).not(),
-            Self::And(a, b) => a.evaluate(obj, now).and(b.evaluate(obj, now)),
-            Self::Or(a, b) => a.evaluate(obj, now).or(b.evaluate(obj, now)),
+            Self::Not(a) => a.evaluate(obj, now, metrics).not(),
+            Self::And(a, b) => a
+                .evaluate(obj, now, metrics)
+                .and(b.evaluate(obj, now, metrics)),
+            Self::Or(a, b) => a
+                .evaluate(obj, now, metrics)
+                .or(b.evaluate(obj, now, metrics)),
             Self::LabelExists(key) => match obj.value.pointer("/metadata") {
                 Some(serde_json::Value::Object(metadata)) => match metadata.get("labels") {
                     None | Some(serde_json::Value::Null) => Truth::No,
@@ -134,7 +148,7 @@ impl Expr {
                 _ => Truth::Unknown,
             },
             Self::Compare(field, op, want) => {
-                let Some(ordering) = field.compare(obj, now, want) else {
+                let Some(ordering) = field.compare(obj, now, want, metrics) else {
                     return Truth::Unknown;
                 };
                 Truth::from_bool(match op {
@@ -420,7 +434,9 @@ mod tests {
             "number:field:/spec/signed<-1.5",
         ] {
             assert_eq!(
-                Expr::parse(query).expect(query).evaluate(&object, now()),
+                Expr::parse(query)
+                    .expect(query)
+                    .evaluate(&object, now(), None),
                 Truth::Yes,
                 "{query}"
             );
@@ -434,7 +450,9 @@ mod tests {
             "label.missing",
         ] {
             assert_eq!(
-                Expr::parse(query).expect(query).evaluate(&object, now()),
+                Expr::parse(query)
+                    .expect(query)
+                    .evaluate(&object, now(), None),
                 Truth::No,
                 "{query}"
             );
@@ -450,7 +468,9 @@ mod tests {
             "label.example.test/team=Ops",
         ] {
             assert_eq!(
-                Expr::parse(query).expect(query).evaluate(&object, now()),
+                Expr::parse(query)
+                    .expect(query)
+                    .evaluate(&object, now(), None),
                 Truth::Unknown,
                 "{query}"
             );
@@ -498,13 +518,13 @@ mod tests {
         assert_eq!(
             Expr::parse("cpu>1 OR name=api-worker")
                 .expect("valid")
-                .evaluate(&object, now()),
+                .evaluate(&object, now(), None),
             Yes
         );
         assert_eq!(
             Expr::parse("cpu>1 AND name=other")
                 .expect("valid")
-                .evaluate(&object, now()),
+                .evaluate(&object, now(), None),
             No
         );
     }
@@ -520,7 +540,9 @@ mod tests {
             "status=Running",
         ] {
             assert_eq!(
-                Expr::parse(query).expect("valid").evaluate(&object, now()),
+                Expr::parse(query)
+                    .expect("valid")
+                    .evaluate(&object, now(), None),
                 Truth::Unknown,
                 "{query}"
             );
@@ -539,13 +561,17 @@ mod tests {
             "\"api-1\"",
         ] {
             assert!(
-                Expr::parse(query).expect("valid").matches(&p, Utc::now()),
+                Expr::parse(query)
+                    .expect("valid")
+                    .matches(&p, Utc::now(), None),
                 "{query}"
             );
         }
         for query in ["cpu>0", "!(cpu>0)", "cpu!=0"] {
             assert_eq!(
-                Expr::parse(query).expect("valid").evaluate(&p, Utc::now()),
+                Expr::parse(query)
+                    .expect("valid")
+                    .evaluate(&p, Utc::now(), None),
                 Truth::Unknown
             );
         }

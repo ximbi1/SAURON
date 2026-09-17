@@ -39,6 +39,23 @@ Use discovered served metrics version; v1beta1 is the conventional probe when ab
 from discovery, so denied discovery does not silently masquerade as absent metrics.
 Implementation/live verdicts: [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
 
+## Table/filter/sort surface (M5.2)
+
+Two independent key families, both typed through the existing `filters::value::
+Field` engine -- no separate grammar. **Static accounting** (`src/resources/
+accounting.rs`, object/status fields only, no Metrics API): `cpu/r`, `mem/r`,
+`cpu/l`, `mem/l` (Pod effective request/limit, following Kubernetes' own
+documented init-container formula), `cpu/a`/`mem/a` (Node allocatable, pre-
+existing), `cpu/c`/`mem/c` (Node capacity), and `qos` (`status.qosClass` read
+verbatim, never re-derived). **Live sampled usage** (`app::metrics::Cache`, via
+the `resources::Metrics` trait so `filters`/`sort` gain no upward dependency on
+`app`): bare `cpu`/`memory`, and `cpu/%r`/`mem/%r`/`cpu/%l`/`mem/%l` for usage as
+a percentage of the Pod's own effective request/limit. A real zero denominator
+("no container specified this resource anywhere") is `Unknown::ZeroDenominator`,
+never a fabricated 0% or an infinity. `CPU`/`MEM` are default-visible table
+columns (Pod and Node); every other key above is wide-mode (`w`) only, alongside
+the pre-existing `NODE` column, to avoid overwhelming a narrow terminal.
+
 ## Isolated live fixture
 
 `bash scripts/test-cluster.sh m5-metrics-install` verifies the Docker identity and

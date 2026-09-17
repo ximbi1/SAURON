@@ -112,6 +112,18 @@ impl Cache {
             Err(Unknown::Malformed)
         }
     }
+    /// Usage as a percentage of the Pod's own effective request or limit. A zero
+    /// denominator ("no container specified this resource at all") is a distinct
+    /// not-applicable result, never a fabricated 0% or an infinity.
+    pub fn percentage(&self, object: &Object, cpu: bool, of_limit: bool) -> Result<f64, Unknown> {
+        let usage = self.amount(object, cpu)?;
+        let field = if of_limit { "limits" } else { "requests" };
+        let denominator = crate::resources::accounting::pod_effective(&object.value, field, cpu)?;
+        if denominator == 0.0 {
+            return Err(Unknown::ZeroDenominator);
+        }
+        Ok(usage / denominator * 100.0)
+    }
     pub fn summary(&self) -> String {
         match self.status {
             Err(reason) => format!("Metrics UNKNOWN: {reason}"),
@@ -169,6 +181,14 @@ impl Cache {
         report
     }
 }
+impl crate::resources::Metrics for Cache {
+    fn usage(&self, object: &Object, cpu: bool) -> Result<f64, Unknown> {
+        self.amount(object, cpu)
+    }
+    fn percentage(&self, object: &Object, cpu: bool, of_limit: bool) -> Result<f64, Unknown> {
+        self.percentage(object, cpu, of_limit)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -182,6 +202,36 @@ mod tests {
     }
     fn batch() -> Batch {
         decode(json!({"items":[{"metadata":{"name":"p","namespace":"n"},"timestamp":Utc::now().to_rfc3339(),"window":"15s","containers":[{"name":"main","usage":{"cpu":"250m","memory":"64Mi"}}]}]}), false).expect("sample")
+    }
+    #[test]
+    fn percentage_zero_denominator_is_distinct_from_unknown_usage() {
+        let obj = Object::new(
+            json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","namespace":"n","uid":"u1","creationTimestamp":(Utc::now()-chrono::Duration::minutes(5)).to_rfc3339()},"spec":{"containers":[{"name":"main","resources":{"requests":{"cpu":"500m"}}}]}}),
+        );
+        let pin = Pin {
+            uid: obj.uid.clone(),
+            created: obj.created,
+        };
+        let pins = Pins::from([("n/p".into(), pin)]);
+        let mut store = Store::new(10, 100000);
+        store.apply(obj, false);
+        let mut cache = Cache::default();
+        cache.apply(pins.clone(), Ok(batch()), &store);
+        // Usage 250m / request 500m = 50%.
+        assert_eq!(
+            cache.percentage(&store.objects["n/p"], true, false),
+            Ok(50.0)
+        );
+        // No limit specified anywhere: a real zero denominator, not fabricated 0%/inf.
+        assert_eq!(
+            cache.percentage(&store.objects["n/p"], true, true),
+            Err(Unknown::ZeroDenominator)
+        );
+        cache.apply(pins, Err(Unknown::Forbidden), &store);
+        assert_eq!(
+            cache.percentage(&store.objects["n/p"], true, false),
+            Err(Unknown::Forbidden)
+        );
     }
     #[test]
     fn uid_pins_and_replacement_never_share_samples() {

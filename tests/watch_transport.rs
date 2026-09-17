@@ -681,7 +681,7 @@ async fn server_selectors_are_preserved_on_list_and_watch_with_local_filter() {
                     assert_eq!(
                         sauron::filters::Expr::parse("name=api AND restarts>1")
                             .expect("filter")
-                            .evaluate(&object, chrono::Utc::now()),
+                            .evaluate(&object, chrono::Utc::now(), None),
                         sauron::filters::Truth::Unknown
                     );
                     break;

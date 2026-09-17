@@ -13,7 +13,7 @@ Production remains read-only; fixture writes require explicit `.test-cluster/con
 | M5.0 | Explicit known/unknown/partial, origin, identity and freshness; no invented defaults | IMPLEMENTED | 2 unit tests direct; proven through the M5.1 collector as its only consumer so far | Same live evidence as M5.1 (Evidence/Unknown/Observation carry every sample end to end) | Primitives only proven through one consumer; M5.2-M5.5 must each exercise them independently before this is closed | ACCEPTED (as a foundation; re-verify per consumer) |
 | M5.1 | Optional bounded Pod/container/Node Metrics API polling, owned and scope-gated | IMPLEMENTED | 83 unit + 17 fake HTTP green; decode/403/404/500/timeout/bounds/correlation tests | Real metrics-server v0.8.1 live: Pod+Node CPU/memory, ns/ctx round-trip, 32x9, `Ctrl-C` shutdown with exact `stty` restore | Values currently inspectable only via `:info`; table/filter/sort integration is M5.2; live metrics-absent PTY mode retired once the fixture became permanent (fake-HTTP covers it instead, see journal) | ACCEPTED (transport only; not table-integrated) |
 | M5.2a | Requests/limits/capacity/QoS accounting, table/filter/sort integration | IMPLEMENTED | 4 unit tests (init-container formula, missing-vs-malformed, QoS passthrough); live table/filter/sort | Live `v1/pods -w` shows real CPU/R, MEM/R, CPU/L, MEM/L, QOS; `Node -w` shows CPU/C, MEM/C; typed filter (`cpu/r>1m`) and sort (`mem/l`) verified against real fixture data | Wide-only columns to avoid overwhelming narrow terminals; QoS read from `status.qosClass`, never re-derived | ACCEPTED |
-| M5.2b | Live Metrics API usage in table/filter/sort/percentages | DESIGNED | Pending | Pending | Zero/missing denominator stays unknown; needs `Cache` threaded into `Field`/table rendering | NOT ACCEPTED |
+| M5.2b | Live Metrics API usage in table/filter/sort/percentages | IMPLEMENTED | 88 unit + 17 fake HTTP green; zero-denominator/unknown-usage percentage test | Live `CPU`/`MEM` columns (real usage, unknown shows `-`); `cpu>10m` filter correctly excludes 3 unknowns; typed sort by `cpu/%r` orders known ascending then unknown-last | `Metrics` trait (`resources::mod.rs`) threaded through `Field`/`Expr`/`sort::rows` so filters keeps no upward dependency on `app`; percentages use a real zero-denominator check, never fabricated 0%/∞ | ACCEPTED |
 | M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | DESIGNED | Existing basic rules are not M5 acceptance | Pending | Missing controller/container evidence must not imply health | NOT ACCEPTED |
 | M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | DESIGNED | Existing Explain is not M5 acceptance | Pending | No graph, speculative cause or name-prefix correlation | NOT ACCEPTED |
 | M5.5 | Bounded UID-scoped meaningful watch/relist transitions | DESIGNED | Existing history is not M5 acceptance | Pending | Equivalent relist must not invent transitions | NOT ACCEPTED |
@@ -105,16 +105,42 @@ unrelated, pre-existing, non-reproducing timing flake in its `configmaps` typed-
 retry loop (nothing to do with `pods`/metrics); passed cleanly on immediate retry,
 documented here rather than silently rerun.
 
-**M5.2b (live Metrics API usage in table/filter/sort/percentages) NOT STARTED.**
-`Field::read`/`compare` currently only take `&Object`; live usage values live in
-`app::metrics::Cache`, addressed by UID, not on the `Object` itself. Wiring usage into
-the same filter/sort/table pipeline needs either (a) writing the Cache's current
-values onto matching rows at each metrics-revision tick (bounded, UID-keyed,
-Object stays otherwise immutable), or (b) threading an optional `&Cache` reference
-through `Field`/`State::columns()`/`State::cell()`. Usage/request and usage/limit
-percentages (division-by-zero-denominator handling per the ledger's own rule) are
-part of this same slice, not accounting. Deferred to keep this commit reviewable;
-next concrete M5 step.
+**M5.2b (live Metrics API usage in table/filter/sort/percentages) accepted
+2026-09-17.** `Field::read`/`compare` only took `&Object`; live usage lives in
+`app::metrics::Cache`, addressed by UID, not on `Object` itself. Resolved via a new
+`resources::Metrics` trait (`usage`/`percentage`), defined in `resources` (not
+`filters` or `app`) so this crate's core resource/filter types gain no upward
+dependency on the `app` layer; `app::metrics::Cache` implements it by delegating to
+its existing inherent `amount`/`percentage` methods. `Field::read`/`compare`,
+`Expr::evaluate`/`matches` and `sort::rows` now take `Option<&dyn Metrics>`,
+threaded from `State::rebuild()`/`State::cell()` as `Some(&self.metrics)`; every
+other call site (tests, printer-column reads) passes `None` and gets the prior
+behavior unchanged. Bare `cpu`/`memory` keys (already reserved by `Field::parse`
+before this milestone) now resolve to live sampled usage -- distinct from the
+`cpu/r`/`cpu/l`/`cpu/a` accounting/allocatable keys from M5.2a, which stay
+object-only. New `cpu/%r`, `mem/%r`, `cpu/%l`, `mem/%l` keys resolve usage-as-
+percent-of-request/limit via `Cache::percentage`, which checks for a real zero
+denominator explicitly (`Unknown::ZeroDenominator`) rather than fabricating 0% or
+dividing into infinity. New default-visible `CPU`/`MEM` table columns (Pod and
+Node, gated on `kube::metrics::supported`) and new wide-only `CPU/%R`/`MEM/%R`/
+`CPU/%L`/`MEM/%L` columns (Pod only -- a Node has no request/limit concept).
+
+New unit test: usage 250m against a 500m request computes exactly 50%; the same
+Pod with no limit anywhere gets `ZeroDenominator` for the limit percentage, not a
+fabricated value; a `Forbidden` metrics status propagates through unchanged. 89
+unit + 17 fake HTTP green throughout.
+
+Live-accepted against `kind-sauron-test`, wide mode: `CPU`/`MEM` show real usage
+per Pod, `-` for the three `BestEffort` fixtures currently reporting no sample
+(not a fabricated 0); `cpu>10m` correctly matches 1 Pod and excludes exactly the
+3 unknown ones (`?3` in the header, Strong Kleene unknown-excluded); typed sort by
+`cpu/%r` orders the 3 known Pods ascending by real percentage and places all 3
+unknowns last, in both directions. `m4-logburst`'s intentionally CPU-heavy fixture
+correctly shows a percentage over 100% (real usage exceeding its small declared
+request) -- exactly the kind of signal this feature exists to surface, not
+clamped or hidden. Full M1-M4 regression (`accept-m3.py filters`/`sorting`,
+`accept-m4.py` foundation/`logs`) and the M5.1 live pass (`accept-m5.py`) all
+re-ran clean afterward.
 
 ## M5.3 — deterministic health
 
@@ -217,3 +243,24 @@ never push/publish. No M6 graph or M7 mutation-policy expansion.
   same filter/sort/table pipeline, plus usage/request and usage/limit percentages)
   is the explicit next step -- deferred out of this commit to keep it reviewable, not
   because it is easy or optional.
+- M5.2b accepted: added a `resources::Metrics` trait (`usage`/`percentage`) rather
+  than have `filters` depend upward on `app::metrics::Cache` directly; threaded
+  `Option<&dyn Metrics>` through `Field::read`/`compare`, `Expr::evaluate`/
+  `matches` and `sort::rows`, passed as `Some(&self.metrics)` from `State::rebuild`/
+  `State::cell` and `None` everywhere else (tests, printer-column reads) with no
+  behavior change there. Bare `cpu`/`memory` (a key space `Field::parse` already
+  reserved before this milestone) now resolves to live sampled usage; new `cpu/%r`/
+  `mem/%r`/`cpu/%l`/`mem/%l` resolve usage-as-percent-of-request/limit via
+  `Cache::percentage`, which returns `Unknown::ZeroDenominator` on a real zero
+  denominator rather than fabricating 0% or dividing into infinity. New default-
+  visible `CPU`/`MEM` columns and wide-only `CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L`
+  (Pod only). New unit test: 250m usage against a 500m request is exactly 50%; the
+  same Pod with no limit anywhere gets `ZeroDenominator`, not a fabricated value;
+  `Forbidden` status propagates unchanged. 88 unit + 17 fake HTTP green. Live
+  against `kind-sauron-test` wide mode: real per-Pod `CPU`/`MEM` usage, `-` for the
+  three `BestEffort` fixtures with no sample; `cpu>10m` matches 1 and excludes
+  exactly the 3 unknowns (`?3`, Strong Kleene); typed sort by `cpu/%r` orders known
+  ascending with unknowns last in both directions; `m4-logburst`'s CPU-heavy
+  fixture correctly shows over 100% of its small request, uncapped and unclamped.
+  Full M1-M4 regression and the M5.1 live pass re-ran clean afterward. M5.2 (both
+  halves) is now fully ACCEPTED. Next: M5.3 deterministic health.

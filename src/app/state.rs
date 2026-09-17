@@ -154,6 +154,28 @@ impl State {
                     .map(|(k, _)| k.clone()),
             );
         }
+        if self
+            .resource
+            .as_ref()
+            .is_some_and(crate::kube::metrics::supported)
+        {
+            columns.push("CPU".into());
+            columns.push("MEM".into());
+            // Usage-as-percent-of-request/limit only makes sense for Pods, not Nodes
+            // (a Node has no request/limit concept), and is supplementary detail.
+            if self.wide
+                && self
+                    .resource
+                    .as_ref()
+                    .is_some_and(|r| r.api.plural == "pods")
+            {
+                columns.extend(
+                    ["CPU/%R", "MEM/%R", "CPU/%L", "MEM/%L"]
+                        .into_iter()
+                        .map(String::from),
+                );
+            }
+        }
         for column in &self.printer_columns {
             if (column.priority == 0 || self.wide) && !columns.contains(&column.name) {
                 columns.push(column.name.clone());
@@ -174,10 +196,32 @@ impl State {
         column: &str,
         now: chrono::DateTime<Utc>,
     ) -> Option<String> {
+        if column == "CPU" || column == "MEM" {
+            return self.metrics.amount(object, column == "CPU").ok().map(|n| {
+                if column == "CPU" {
+                    crate::resources::cpu_text(n)
+                } else {
+                    crate::resources::memory_text(n)
+                }
+            });
+        }
+        if let Some((cpu, of_limit)) = match column {
+            "CPU/%R" => Some((true, false)),
+            "MEM/%R" => Some((false, false)),
+            "CPU/%L" => Some((true, true)),
+            "MEM/%L" => Some((false, true)),
+            _ => None,
+        } {
+            return self
+                .metrics
+                .percentage(object, cpu, of_limit)
+                .ok()
+                .map(|p| format!("{p:.0}%"));
+        }
         self.printer_columns
             .iter()
             .find(|c| c.name == column)
-            .and_then(|c| c.field.read(object, now))
+            .and_then(|c| c.field.read(object, now, Some(&self.metrics)))
             .map(|s| s.display())
             .or_else(|| object.field(column, now))
     }
@@ -202,18 +246,26 @@ impl State {
             .store
             .objects
             .values()
-            .filter(|o| match self.filter.evaluate(o, now) {
-                Truth::Yes => true,
-                Truth::No => false,
-                Truth::Unknown => {
-                    self.filter_unknown += 1;
-                    false
-                }
-            })
+            .filter(
+                |o| match self.filter.evaluate(o, now, Some(&self.metrics)) {
+                    Truth::Yes => true,
+                    Truth::No => false,
+                    Truth::Unknown => {
+                        self.filter_unknown += 1;
+                        false
+                    }
+                },
+            )
             .cloned()
             .collect();
         if let Ok(field) = Field::parse(&self.sort) {
-            crate::resources::sort::rows(&mut self.rows, &field, self.descending, now);
+            crate::resources::sort::rows(
+                &mut self.rows,
+                &field,
+                self.descending,
+                now,
+                Some(&self.metrics),
+            );
         }
         // A pending list has not disproved the history's selected UID. Conversely,
         // after live deletion an empty→nonempty transition must not select a replacement.

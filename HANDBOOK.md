@@ -255,11 +255,13 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is active. M5.0 (evidence/freshness primitives), M5.1 (Metrics API collector) and
-M5.2a (static requests/limits/QoS accounting, table/filter/sort-integrated) are
-ACCEPTED against real `kind-sauron-test`. Live Metrics API *usage* is still `:info`-
-only -- M5.2b (threading it into the same table/filter/sort pipeline) is next.
-Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
+M5 is active. M5.0-M5.2 are all ACCEPTED against real `kind-sauron-test` with a
+pinned metrics-server v0.8.1 fixture: evidence/freshness primitives (M5.0), the
+Metrics API collector (M5.1), static requests/limits/QoS accounting (M5.2a) and
+live usage/percentages threaded into the same table/filter/sort pipeline (M5.2b).
+`CPU`/`MEM` are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/
+`QOS`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.3 deterministic
+health. Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -283,6 +285,44 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.2b accepted (live Metrics API usage/percentages, table/filter/sort integrated; M5.2 fully closed)
+
+`Field::read`/`compare` only took `&Object`; live usage lives in `app::metrics::
+Cache`, addressed by UID, not on `Object` itself. Resolved with a new
+`resources::Metrics` trait (`usage`/`percentage`), defined in `resources` rather
+than `filters` or `app` so the core resource/filter types gain no upward
+dependency on the `app` layer; `Cache` implements it by delegating to its own
+existing `amount`/`percentage` methods. Threaded `Option<&dyn Metrics>` through
+`Field::read`/`compare`, `Expr::evaluate`/`matches` and `sort::rows`, passed as
+`Some(&self.metrics)` from `State::rebuild`/`State::cell` and `None` everywhere
+else (tests, printer-column reads) with no behavior change there. Bare `cpu`/
+`memory` -- a key space `Field::parse` already reserved before this milestone --
+now resolves to live sampled usage, distinct from M5.2a's object-only `cpu/r`/
+`cpu/l`/`cpu/a`. New `cpu/%r`/`mem/%r`/`cpu/%l`/`mem/%l` resolve usage-as-percent-
+of-request/limit via `Cache::percentage`, which returns a real `ZeroDenominator`
+on "no container specified this resource" rather than fabricating 0% or dividing
+into infinity. New default-visible `CPU`/`MEM` table columns (Pod and Node, gated
+on metrics support) and new wide-only `CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` (Pod
+only -- a Node has no request/limit concept).
+
+New unit test: 250m usage against a 500m request computes exactly 50%; the same
+Pod with no limit anywhere gets `ZeroDenominator`, not a fabricated value; a
+`Forbidden` metrics status propagates through unchanged. 88 unit + 17 fake HTTP
+green throughout.
+
+Live-accepted against `kind-sauron-test`, wide mode: `CPU`/`MEM` show real usage
+per Pod, `-` for the three `BestEffort` fixtures with no current sample (not a
+fabricated 0); `cpu>10m` matches exactly 1 Pod and excludes exactly the 3 unknown
+ones (`?3` in the header, Strong Kleene unknown-excluded); typed sort by `cpu/%r`
+orders the 3 known Pods ascending by real percentage with all 3 unknowns last in
+both directions; `m4-logburst`'s intentionally CPU-heavy fixture correctly shows
+over 100% of its small declared request, uncapped and unclamped -- exactly the
+signal this feature exists to surface. Full M1-M4 regression (`accept-m3.py
+filters`/`sorting`, `accept-m4.py` foundation/`logs`) and the M5.1 live pass
+(`accept-m5.py`) all re-ran clean afterward.
+
+M5.2 (both halves) is now fully ACCEPTED. Next: M5.3 deterministic health.
 
 ### 2026-09-17 — M5.2a accepted (static resource accounting, table/filter/sort integrated)
 

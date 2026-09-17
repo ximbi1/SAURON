@@ -164,6 +164,7 @@ impl Field {
                 "memory" | "mem" | "mem/a" | "mem/c" | "mem/r" | "mem/l" | "capacity" => {
                     Kind::Memory
                 }
+                "cpu/%r" | "cpu/%l" | "mem/%r" | "mem/%l" => Kind::Percent,
                 "suspend" => Kind::Bool,
                 _ => Kind::Auto,
             }
@@ -178,9 +179,28 @@ impl Field {
         );
         Ok(())
     }
-    pub fn read(&self, obj: &Object, now: DateTime<Utc>) -> Option<Scalar> {
+    pub fn read(
+        &self,
+        obj: &Object,
+        now: DateTime<Utc>,
+        metrics: Option<&dyn crate::resources::Metrics>,
+    ) -> Option<Scalar> {
         if self.key == "age" {
             return obj.age(now).map(Scalar::Number);
+        }
+        // Bare "cpu"/"memory" is live sampled usage, distinct from the "cpu/r",
+        // "cpu/l", "cpu/a" accounting/allocatable keys, which stay object-only.
+        if matches!(self.key.as_str(), "cpu" | "memory") {
+            return metrics.and_then(|m| m.usage(obj, self.key == "cpu").ok().map(Scalar::Number));
+        }
+        if let Some((cpu, of_limit)) = match self.key.as_str() {
+            "cpu/%r" => Some((true, false)),
+            "mem/%r" => Some((false, false)),
+            "cpu/%l" => Some((true, true)),
+            "mem/%l" => Some((false, true)),
+            _ => None,
+        } {
+            return metrics.and_then(|m| m.percentage(obj, cpu, of_limit).ok().map(Scalar::Number));
         }
         let json = if let Some(label) = self.key.strip_prefix("label.") {
             Some(obj.value.pointer("/metadata/labels")?.get(label)?)
@@ -213,8 +233,14 @@ impl Field {
         let text = obj.field(&self.key, now)?;
         self.kind.parse(&text)
     }
-    pub fn compare(&self, obj: &Object, now: DateTime<Utc>, want: &str) -> Option<Ordering> {
-        let actual = self.read(obj, now)?;
+    pub fn compare(
+        &self,
+        obj: &Object,
+        now: DateTime<Utc>,
+        want: &str,
+        metrics: Option<&dyn crate::resources::Metrics>,
+    ) -> Option<Ordering> {
+        let actual = self.read(obj, now, metrics)?;
         let expected = if self.kind == Kind::Auto {
             actual.literal_like(want)?
         } else {

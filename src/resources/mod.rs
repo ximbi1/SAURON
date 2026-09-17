@@ -3,10 +3,18 @@ pub mod health;
 pub mod sort;
 pub mod store;
 
-use crate::safety;
+use crate::{evidence::Unknown, safety};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::sync::Arc;
+
+/// Live sampled usage lookup, implemented by `app::metrics::Cache`. Defined here
+/// (not in `filters`) so `Field`/`Expr`/sort can depend on it without an upward
+/// dependency from this crate's core resource types onto the `app` layer.
+pub trait Metrics {
+    fn usage(&self, object: &Object, cpu: bool) -> Result<f64, Unknown>;
+    fn percentage(&self, object: &Object, cpu: bool, of_limit: bool) -> Result<f64, Unknown>;
+}
 
 #[derive(Clone, Debug)]
 pub struct Object {

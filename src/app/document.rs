@@ -48,6 +48,10 @@ pub struct Document {
     pub session_state: Option<super::session::State>,
     pub log_request: Option<crate::kube::logs::Request>,
     pub exec_request: Option<crate::kube::exec::Request>,
+    /// UID whose session-local watch history this document renders. Refresh
+    /// re-renders directly from the in-memory `Store`, like the forward
+    /// manager -- no network call, no `Source`.
+    pub timeline_for: Option<String>,
     pub source_errors: Vec<String>,
     pub filter_matches: bool,
     pub evicted: u64,
@@ -86,6 +90,7 @@ impl Document {
             session_state: None,
             log_request: None,
             exec_request: None,
+            timeline_for: None,
             source_errors: vec![],
             filter_matches: false,
             evicted: 0,

@@ -846,8 +846,11 @@ impl Runtime {
             Yaml | Describe | Explain | Events => self.open_document(action)?,
             Timeline => {
                 let object = self.state.selected_object().context("Select a row first")?;
-                let text=self.state.store.histories.get(&object.uid).map(|h|h.iter().map(|c|format!("{} {}",c.at.to_rfc3339(),c.summary)).collect::<Vec<_>>().join("\n")).unwrap_or_else(||"No meaningful watch changes observed for this UID during this view. History is session-local and bounded.".into());
-                self.open_static("Timeline", text);
+                let uid = object.uid.clone();
+                self.open_static("Timeline", self.timeline_text(&uid));
+                if let Some(doc) = self.active_document_mut() {
+                    doc.timeline_for = Some(uid);
+                }
             }
             Logs => self.open_logs(None, false)?,
             PreviousLogs => self.open_logs(None, true)?,
@@ -959,6 +962,32 @@ impl Runtime {
         self.state.dirty = true;
         Ok(())
     }
+    /// Session-local, UID-scoped watch history -- never Events or an audit
+    /// log. Newest first, since the most recent transition is almost always
+    /// what prompted opening this. `RelistObserved` entries are marked, since
+    /// they may compress real changes that happened while disconnected.
+    fn timeline_text(&self, uid: &str) -> String {
+        let history = self.state.store.histories.get(uid);
+        if history.is_none_or(|h| h.is_empty()) {
+            return "No meaningful watch changes observed for this UID during this view. \
+                    History is session-local and bounded (64 entries/object, 256 objects); \
+                    it is not an audit log and does not persist across restarts."
+                .into();
+        }
+        history
+            .into_iter()
+            .flatten()
+            .rev()
+            .map(|c| {
+                let source = match c.source {
+                    crate::resources::store::Source::WatchObserved => "watch",
+                    crate::resources::store::Source::RelistObserved => "relist",
+                };
+                format!("{} [{source}] {}", c.at.to_rfc3339(), c.summary)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
     fn open_static(&mut self, title: &str, text: String) {
         self.document.cancel();
         self.state.request += 1;
@@ -1033,6 +1062,17 @@ impl Runtime {
                 "Exec is unavailable in read-only mode"
             );
             return self.start_exec(request);
+        }
+        if let Some(uid) = self
+            .active_document_mut()
+            .and_then(|d| d.timeline_for.clone())
+        {
+            let text = self.timeline_text(&uid);
+            if let Some(doc) = self.active_document_mut() {
+                doc.replace(text);
+                doc.freshness = document::Freshness::Snapshot(chrono::Utc::now());
+            }
+            return Ok(());
         }
         let connection = self.connection.clone().context("Not connected")?;
         let doc = self.active_document_mut().context("No document open")?;

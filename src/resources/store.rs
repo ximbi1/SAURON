@@ -1,14 +1,25 @@
-use super::{Object, SharedObject};
+use super::{Object, SharedObject, timeline};
 use chrono::{DateTime, Utc};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Seen through a live, uninterrupted watch stream.
+    WatchObserved,
+    /// Reconstructed by diffing a fresh relist against the last known state
+    /// after a watch reconnect -- the delta is real, but anything that
+    /// happened *between* the two observations was never seen and is not
+    /// synthesized here.
+    RelistObserved,
+}
 #[derive(Clone, Debug)]
 pub struct Change {
     pub at: DateTime<Utc>,
     pub summary: String,
+    pub source: Source,
 }
 
 pub struct Store {
@@ -46,12 +57,54 @@ impl Store {
     pub fn is_syncing(&self) -> bool {
         self.staging.is_some()
     }
+    /// Diffs every slot present before or after the relist against its prior
+    /// state (`Source::RelistObserved`) before replacing `objects` wholesale.
+    /// A relist that reconnects to unchanged state must diff to nothing; one
+    /// that missed real changes while disconnected gets exactly one delta
+    /// per object, never a synthesized sequence of intermediate states.
     pub fn finish(&mut self) {
-        if let Some(objects) = self.staging.take() {
-            self.objects = objects;
+        if let Some(staged) = self.staging.take() {
+            let mut keys: std::collections::BTreeSet<String> =
+                self.objects.keys().cloned().collect();
+            keys.extend(staged.keys().cloned());
+            for key in keys {
+                let old = self.objects.get(&key).cloned();
+                let new = staged.get(&key).cloned();
+                self.diff_and_record(old.as_ref(), new.as_ref(), Source::RelistObserved);
+            }
+            self.objects = staged;
             self.bytes = self.staging_bytes;
             self.staging_bytes = 0;
             self.revision += 1;
+        }
+    }
+    fn diff_and_record(
+        &mut self,
+        old: Option<&SharedObject>,
+        new: Option<&SharedObject>,
+        source: Source,
+    ) {
+        match (old, new) {
+            (Some(old), Some(new)) if old.uid == new.uid => {
+                if old.version == new.version {
+                    return;
+                }
+                let changes = timeline::meaningful_diff(old, new);
+                if !changes.is_empty() {
+                    self.record(&new.uid, changes.join("; "), source);
+                }
+            }
+            (Some(old), Some(_new)) => {
+                self.record(
+                    &old.uid,
+                    "Object replaced by a different UID".into(),
+                    source,
+                );
+            }
+            (Some(old), None) => {
+                self.record(&old.uid, "Deleted (observed by watch)".into(), source);
+            }
+            (None, Some(_)) | (None, None) => {}
         }
     }
     pub fn apply(&mut self, object: Object, initial: bool) {
@@ -71,6 +124,12 @@ impl Store {
             return;
         }
         let old = self.objects.get(&key).cloned();
+        if old
+            .as_ref()
+            .is_some_and(|o| o.uid == object.uid && o.version == object.version)
+        {
+            return;
+        }
         let old_bytes = old.as_ref().map_or(0, |o| o.bytes);
         if (!self.objects.contains_key(&key) && self.objects.len() >= self.max_objects)
             || self.bytes.saturating_sub(old_bytes) + object.bytes > self.max_bytes
@@ -78,39 +137,10 @@ impl Store {
             self.incomplete = true;
             return;
         }
-        if let Some(old) = old {
-            if old.uid == object.uid && old.version == object.version {
-                return;
-            }
-            if old.uid == object.uid {
-                let mut changes = Vec::new();
-                if old.health.status != object.health.status {
-                    changes.push(format!(
-                        "status: {} → {}",
-                        old.health.status, object.health.status
-                    ));
-                }
-                for path in [
-                    "/metadata/generation",
-                    "/spec/replicas",
-                    "/status/readyReplicas",
-                    "/status/conditions",
-                    "/status/containerStatuses",
-                    "/status/initContainerStatuses",
-                ] {
-                    if old.value.pointer(path) != object.value.pointer(path) {
-                        changes.push(format!("{path} changed"));
-                    }
-                }
-                if !changes.is_empty() {
-                    self.record(&object.uid, changes.join("; "));
-                }
-            } else {
-                self.record(&old.uid, "Object replaced by a different UID".into());
-            }
-        }
-        self.bytes = self.bytes.saturating_sub(old_bytes) + object.bytes;
-        self.objects.insert(key, Arc::new(object));
+        let new = Arc::new(object);
+        self.diff_and_record(old.as_ref(), Some(&new), Source::WatchObserved);
+        self.bytes = self.bytes.saturating_sub(old_bytes) + new.bytes;
+        self.objects.insert(key, new);
         self.revision += 1;
     }
     pub fn delete(&mut self, object: &Object) {
@@ -119,11 +149,15 @@ impl Store {
             if let Some(old) = self.objects.remove(&key) {
                 self.bytes = self.bytes.saturating_sub(old.bytes);
             }
-            self.record(&object.uid, "Deleted (observed by watch)".into());
+            self.record(
+                &object.uid,
+                "Deleted (observed by watch)".into(),
+                Source::WatchObserved,
+            );
             self.revision += 1;
         }
     }
-    fn record(&mut self, uid: &str, summary: String) {
+    fn record(&mut self, uid: &str, summary: String, source: Source) {
         if !self.histories.contains_key(uid) {
             if self.history_order.len() >= 256
                 && let Some(old) = self.history_order.pop_front()
@@ -139,6 +173,7 @@ impl Store {
         h.push_back(Change {
             at: Utc::now(),
             summary,
+            source,
         });
     }
     pub fn bytes(&self) -> usize {
@@ -154,6 +189,11 @@ mod tests {
             serde_json::json!({"kind":"Pod","apiVersion":"v1","metadata":{"name":"a","uid":uid,"resourceVersion":rv}}),
         )
     }
+    fn obj_phase(uid: &str, rv: &str, phase: &str) -> Object {
+        Object::new(
+            serde_json::json!({"kind":"Pod","apiVersion":"v1","metadata":{"name":"a","uid":uid,"resourceVersion":rv},"status":{"phase":phase}}),
+        )
+    }
     #[test]
     fn relist_is_atomic_and_old_delete_cannot_remove_replacement() {
         let mut s = Store::new(10, 100_000);
@@ -164,6 +204,46 @@ mod tests {
         s.finish();
         s.delete(&obj("old", "1"));
         assert_eq!(s.objects["/a"].uid, "new");
+    }
+    #[test]
+    fn unchanged_relist_records_nothing() {
+        let mut s = Store::new(10, 100_000);
+        s.apply(obj_phase("u", "1", "Running"), false);
+        s.begin();
+        s.apply(obj_phase("u", "1", "Running"), true);
+        s.finish();
+        assert!(s.histories.get("u").is_none_or(|h| h.is_empty()));
+    }
+    #[test]
+    fn changed_while_disconnected_relist_records_exactly_one_delta() {
+        let mut s = Store::new(10, 100_000);
+        s.apply(obj_phase("u", "1", "Pending"), false);
+        s.begin();
+        // The relist never saw the intermediate state -- only the final one.
+        s.apply(obj_phase("u", "5", "Running"), true);
+        s.finish();
+        let h = s.histories.get("u").expect("one delta recorded");
+        assert_eq!(h.len(), 1);
+        assert!(h[0].summary.contains("Pending → Running"));
+        assert_eq!(h[0].source, Source::RelistObserved);
+    }
+    #[test]
+    fn uid_replacement_and_deletion_are_both_observed_through_a_relist() {
+        let mut s = Store::new(10, 100_000);
+        s.apply(obj_phase("old", "1", "Running"), false);
+        s.begin();
+        s.apply(obj_phase("new", "1", "Running"), true);
+        s.finish();
+        let h = s.histories.get("old").expect("replacement recorded");
+        assert!(h.iter().any(|c| c.summary.contains("replaced")));
+
+        let mut gone = Store::new(10, 100_000);
+        gone.apply(obj_phase("u2", "1", "Running"), false);
+        gone.begin();
+        // Nothing staged for this slot at all -- the object vanished while disconnected.
+        gone.finish();
+        let h = gone.histories.get("u2").expect("deletion recorded");
+        assert!(h.iter().any(|c| c.summary.contains("Deleted")));
     }
     #[test]
     fn budget_is_visible() {

@@ -255,16 +255,18 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is active. M5.0-M5.4 are all ACCEPTED against real `kind-sauron-test` with a
+M5 is active. M5.0-M5.5 are all ACCEPTED against real `kind-sauron-test` with a
 pinned metrics-server v0.8.1 fixture: evidence/freshness primitives (M5.0), the
 Metrics API collector (M5.1), static requests/limits/QoS accounting plus live
 usage/percentages in the table/filter/sort pipeline (M5.2), deterministic
-Pod/workload/Node/storage health with evidence (M5.3, docs/HEALTH.md), and
-Explain 2.0 reusing that health evidence plus verified-ownership workload→Pod
-correlation and descriptive metrics (M5.4, docs/EXPLAIN.md). `CPU`/`MEM` are
-default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/`CPU/%R`/
-`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.5 Timeline. Contracts and
-per-slice evidence: docs/M5_ACCEPTANCE.md.
+Pod/workload/Node/storage health with evidence (M5.3, docs/HEALTH.md), Explain
+2.0 reusing that health evidence plus verified-ownership workload→Pod
+correlation and descriptive metrics (M5.4, docs/EXPLAIN.md), and a bounded,
+UID-keyed Timeline with correct relist-diff semantics (M5.5, docs/TIMELINE.md).
+`CPU`/`MEM` are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/
+`QOS`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.6 combined
+adversarial acceptance, then `m5-accepted`. Contracts and per-slice evidence:
+docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -288,6 +290,78 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.5 accepted (Timeline: correct relist-diff semantics)
+
+Most of this slice's infrastructure already existed from M3-era store work:
+UID-keyed `histories: BTreeMap<uid, VecDeque<Change>>`, the 64-entries-per-
+object/256-objects bounds, and the `:timeline`/`T` UI already rendering
+`Store::histories` in a static document. The real job here was closing a
+correctness gap, not building from nothing.
+
+New `resources/timeline.rs::meaningful_diff()`: a curated comparison (health
+status, phase, generation/observedGeneration, replica-family fields,
+deletion-timestamp transition, and for Pods restart totals plus per-
+container waiting/terminated reason compared by name plus per-container
+image) shared by both the incremental watch path and the relist path. This
+replaces the old inline diff, which only detected that `/status/conditions`
+or `/status/containerStatuses` "changed" without ever saying what changed.
+
+Found and fixed one real, load-bearing bug, not a cosmetic gap:
+`Store::finish()` (the relist/watch-reconnect path) previously replaced
+`objects` with the freshly-staged set with *zero comparison* against the
+prior state. This technically satisfied "an equivalent relist must not
+invent transitions" -- but only by accident, since it also silently dropped
+every *real* transition that happened while disconnected, which the
+ledger's own acceptance criteria explicitly require ("changed relist emits
+only the observed delta"). Fixed with a shared `diff_and_record()` now
+called from both `apply()` (tagged `Source::WatchObserved`) and a new
+diffing pass in `finish()` (tagged `Source::RelistObserved`) that walks
+every slot present before or after the relist against its prior state
+before the wholesale replacement. This also closes two related gaps the old
+code never handled during a relist specifically: a same-slot UID
+replacement (recreated while disconnected) and an object present before but
+absent after (deleted while disconnected) -- both now correctly recorded
+against the *old* UID's timeline, matching the live incremental path's
+already-correct behavior.
+
+New `Source` enum (`WatchObserved`/`RelistObserved`) on every `Change`,
+surfaced in the `:timeline` document as `[watch]`/`[relist]` per entry, so a
+relist-reconstructed delta (which may compress multiple real transitions
+that happened during the gap into one observed jump) is never presented as
+identical to a directly observed single transition. `Refresh` (`r`) on an
+open Timeline document now re-renders directly from the in-memory `Store`
+with no network call, via a new `Document.timeline_for: Option<String>`
+field checked in `refresh_document()` before the generic network path --
+the same convention the forward manager already established.
+
+8 new unit tests: 4 in `store.rs` (unchanged relist records nothing; a
+changed-while-disconnected relist records exactly one delta tagged
+`RelistObserved`; UID replacement and deletion are both correctly observed
+through a relist), 4 in `timeline.rs` (identical meaningful fields produce
+nothing; phase/restart/container-reason changes are each cited by name; an
+image change is cited by container name, not position; a deletion-timestamp
+transition is one-directional). 105 unit + 19 fake HTTP green.
+
+Live-accepted against `kind-sauron-test`: force-deleted the `crashloop`
+fixture and let `scripts/test-cluster.sh fixtures` recreate it under a new
+UID; the fresh incarnation's own `:timeline` showed a clean, newest-first
+sequence of real transitions with exact timestamps -- `restarts: unknown →
+0`, a `ContainerCreating`/`CrashLoopBackOff`/`Error` oscillation, `restarts:
+0 → 1 → 2 → 3`, `phase: Pending → Running` -- every entry correctly tagged
+`[watch]`. 32x9 rendered cleanly; `Refresh` re-rendered with no network
+call; switching context created a fresh `Store` and therefore a correctly-
+empty timeline for every UID in the new context, confirming no cross-
+context leakage (consistent with `docs/SESSIONS.md`'s existing isolation
+principle, just applied here to Timeline). The relist-diff unit tests cover
+the harder-to-force-live "changed while disconnected" and "replaced/deleted
+via relist" paths directly -- consistent with this project's established
+pattern of relying on fake-transport/unit coverage for scenarios a live
+watch reconnect can't be reliably triggered on demand to reproduce. Full
+M1-M4 and M5.1-M5.4 regression re-ran clean afterward.
+
+M5.0 through M5.5 are now all ACCEPTED. Next: M5.6 combined adversarial
+acceptance, full M1-M5 regression, and a soak, before `m5-accepted`.
 
 ### 2026-09-17 — M5.4 accepted (Explain 2.0: health findings + fresh evidence + bounded correlation)
 

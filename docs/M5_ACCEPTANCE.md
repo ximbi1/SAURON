@@ -16,7 +16,7 @@ Production remains read-only; fixture writes require explicit `.test-cluster/con
 | M5.2b | Live Metrics API usage in table/filter/sort/percentages | IMPLEMENTED | 88 unit + 17 fake HTTP green; zero-denominator/unknown-usage percentage test | Live `CPU`/`MEM` columns (real usage, unknown shows `-`); `cpu>10m` filter correctly excludes 3 unknowns; typed sort by `cpu/%r` orders known ascending then unknown-last | `Metrics` trait (`resources::mod.rs`) threaded through `Field`/`Expr`/`sort::rows` so filters keeps no upward dependency on `app`; percentages use a real zero-denominator check, never fabricated 0%/∞ | ACCEPTED |
 | M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | IMPLEMENTED | 95 unit + 17 fake HTTP green; 5 new precedence tests (10 total in the health module) | Live against `kind-sauron-test`: CrashLoopBackOff/ImagePullBackOff/Unschedulable/OOMKilled/NotReady Pods, Unavailable/Ready Deployment, Progressing StatefulSet, Ready DaemonSet, Completed/Failed Job, Pending PVC, Ready Node -- 13 real cases, all correct | `Health` now carries bounded `evidence: Vec<String>` citing real fields; `ContainerCreating`/`PodInitializing` no longer misclassified as failures; `lastState.terminated` (e.g. OOMKilled after restart) surfaces even when current state is a waiting reason | ACCEPTED |
 | M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | IMPLEMENTED | 98 unit + 19 fake HTTP green; 4 new explain tests, 2 new fake-HTTP ownership/partial tests | Live against `kind-sauron-test`: Deployment (2-hop, real ImagePullBackOff evidence on 2 owned Pods), Job (1-hop, real exit-code evidence + Warning Event), healthy Pod (real metrics, honest "not proven healthy" disclaimer) | `Health.evidence` reused verbatim, no re-derivation; ownership verified via `ownerReferences` UID match only; metrics gated to Pod/Node; a purely-descriptive finding never suppresses the no-fault disclaimer | ACCEPTED |
-| M5.5 | Bounded UID-scoped meaningful watch/relist transitions | DESIGNED | Existing history is not M5 acceptance | Pending | Equivalent relist must not invent transitions | NOT ACCEPTED |
+| M5.5 | Bounded UID-scoped meaningful watch/relist transitions | IMPLEMENTED | 105 unit + 19 fake HTTP green; 4 new relist-diff tests, 4 new curated-field-diff tests | Live against `kind-sauron-test`: real phase/reason/restart-count transitions on a recreated Pod (new UID), newest-first with `[watch]` source tags, 32x9 clean, no-op Refresh, context-switch isolation confirmed | Relist previously replaced `objects` wholesale with zero diffing -- real changes during a disconnect were silently dropped, not just correctly-suppressed false ones; fixed with a shared `diff_and_record` used by both the incremental and relist paths | ACCEPTED |
 | M5.6 | Combined adversarial flows, M1–M4 regression and API/performance sanity | NOT STARTED | Pending | Pending | No m5-accepted until demonstrated | NOT ACCEPTED |
 
 ## M5.0 — shared evidence semantics
@@ -255,6 +255,60 @@ Tests/live: phase/reasons/restarts/conditions/generation/replicas/images/deletio
 same-name replacement; unchanged relist emits nothing; changed relist emits only the
 observed delta; rapid updates; bounds; context/history; 32x9; process restart clears it.
 
+**Accepted 2026-09-17.** Full contract: [TIMELINE.md](TIMELINE.md). Most of the
+UID-keyed storage, the 64/256 bounds, and the `:timeline`/`T` UI already
+existed before M5 (built during M3-era store work) -- this slice's real job
+was closing a correctness gap, not building from nothing.
+
+New `resources/timeline.rs::meaningful_diff()`: a curated comparison (health
+status, phase, generation/observedGeneration, replica-family fields,
+deletion-timestamp transition, and for Pods restart totals/per-container
+reason-by-name/image) shared by both the incremental watch path and the
+relist path, replacing the old inline diff that only detected "`/status/
+conditions` changed" without saying what changed.
+
+**One real, load-bearing bug found and fixed, not a cosmetic gap:**
+`Store::finish()` (the relist/reconnect path) previously replaced `objects`
+with the freshly-staged set *with zero comparison against the prior state*.
+This satisfied "an equivalent relist must not invent transitions" only by
+accident -- it also silently dropped every *real* transition that happened
+while disconnected, which the ledger's own acceptance list explicitly
+requires ("changed relist emits only the observed delta"). Fixed with a
+shared `diff_and_record()` called from both `apply()` (tagged
+`Source::WatchObserved`) and the new relist pass in `finish()` (tagged
+`Source::RelistObserved`), diffing every slot present before or after the
+relist against its prior state before the wholesale replacement. Also
+closes two related gaps the old code never handled during a relist
+specifically: a same-slot UID replacement (recreated while disconnected) and
+an object present before but absent after (deleted while disconnected) --
+both now recorded against the *old* UID's timeline, matching the
+already-correct behavior of the live incremental path.
+
+8 new unit tests: 4 in `store.rs` (unchanged relist records nothing; a
+changed-while-disconnected relist records exactly one delta tagged
+`RelistObserved`; UID replacement and deletion are both observed through a
+relist), 4 in `timeline.rs` (identical meaningful fields produce nothing;
+phase/restart/container-reason changes are each cited by name; an image
+change is cited by container name, not position; a deletion-timestamp
+transition is one-directional). 105 unit + 19 fake HTTP green.
+
+Live-accepted against `kind-sauron-test`: force-deleted the `crashloop`
+fixture and let `scripts/test-cluster.sh fixtures` recreate it (new UID);
+the new incarnation's own `:timeline` showed a clean, newest-first sequence
+of real transitions -- `restarts: unknown → 0`, `ContainerCreating →
+CrashLoopBackOff`/`Error` oscillation with exact timestamps, `restarts: 0 →
+1 → 2 → 3`, `phase: Pending → Running` -- every entry correctly tagged
+`[watch]`. 32x9 rendered cleanly; `Refresh` re-rendered with no network call
+(same content, since nothing new had happened in that instant); switching
+context created a fresh `Store` and therefore a correctly-empty timeline for
+every UID in the new context, confirming no cross-context leakage (the
+relist-diff unit tests cover the harder-to-trigger-live "changed while
+disconnected" and "replaced/deleted via relist" paths directly, which is
+consistent with this project's established pattern of using fake-transport/
+unit coverage for scenarios a live watch reconnect can't be reliably forced
+to reproduce on demand). Full M1-M4 and M5.1-M5.4 regression re-ran clean
+afterward.
+
 ## M5.6 — combined acceptance
 
 1. Metrics → CPU filter → memory sort → namespace → back; exact known/unknown semantics.
@@ -285,6 +339,32 @@ never push/publish. No M6 graph or M7 mutation-policy expansion.
 
 ## Execution journal
 
+- M5.5 accepted: most of the UID-keyed history storage, 64/256 bounds, and
+  `:timeline`/`T` UI already existed from M3-era store work -- this slice
+  closed a real correctness gap rather than building from nothing. New
+  `resources/timeline.rs::meaningful_diff()` (curated comparison: health,
+  phase, generation/observedGeneration, replica-family fields, deletion-
+  timestamp transition, Pod restart totals/per-container reason-by-name/
+  image) replaces the old inline diff that only said "conditions changed"
+  without saying what changed. Found and fixed a real, load-bearing bug:
+  `Store::finish()`'s relist path replaced `objects` wholesale with zero
+  comparison against prior state, which satisfied "no invented transitions"
+  only by accident -- it also silently dropped every real transition that
+  happened during a disconnect. Fixed with a shared `diff_and_record()`
+  used by both the incremental (`WatchObserved`) and relist
+  (`RelistObserved`) paths; also now correctly records same-slot UID
+  replacement and deletion discovered via a relist, matching the live path's
+  existing behavior. 8 new unit tests (unchanged relist → nothing; changed-
+  while-disconnected relist → exactly one tagged delta; UID replacement/
+  deletion via relist; curated field-diff coverage). 105 unit + 19 fake HTTP
+  green. Live-accepted: force-deleted and recreated a fixture Pod, watched
+  its fresh UID's own `:timeline` show a clean, newest-first, correctly-
+  tagged sequence of real phase/reason/restart transitions; 32x9 clean;
+  no-network `Refresh`; context-switch isolation confirmed (fresh `Store` →
+  fresh empty timeline, no cross-context leakage). Full M1-M4 and M5.1-M5.4
+  regression re-ran clean afterward. Full contract: `docs/TIMELINE.md`.
+  M5.0-M5.5 are all now ACCEPTED. Next: M5.6 combined adversarial
+  acceptance + full regression + soak, then `m5-accepted`.
 - M5.4 accepted: rewrote `explain.rs` around "Explain = health findings +
   fresh evidence + bounded correlation," reusing `object.health.evidence`
   verbatim instead of re-scanning conditions/containers with duplicate logic.

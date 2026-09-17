@@ -64,7 +64,7 @@ def foundation():
         keys('Escape')
         command('ctx kind-sauron-test')
         expect('ctx:kind-sauron-test', 'list synchronized')
-    command('pods -n sauron-fixtures -l app=healthy')
+    command('v1/pods -n sauron-fixtures -l app=healthy')
     expect('pods [1 / 1;', 'healthy-')
     command('logs worker')
     expect('Logs:', 'healthy test workload', 'Streaming')
@@ -82,12 +82,12 @@ def foundation():
         expect('Logs:', 'healthy test workload', 'Streaming')
         keys('Escape')
         expect('pods [1 / 1;')
-    command('pods -n sauron-fixtures / name=crashloop')
+    command('v1/pods -n sauron-fixtures / name=crashloop')
     expect('crashloop', 'pods [1 /')
     command('previous_logs worker')
     expect('Logs:', 'fixture: deliberate exit 1', 'Ended')
     keys('Escape')
-    command('pods -n sauron-fixtures -l app=healthy')
+    command('v1/pods -n sauron-fixtures -l app=healthy')
     expect('pods [1 / 1;')
     for _ in range(3):
         command('logs worker')
@@ -97,10 +97,10 @@ def foundation():
         expect('pods [1 / 1;')
         command('logs worker')
         command('ctx kind-sauron-test-b')
-        command('pods -n sauron-fixtures -l app=healthy')
+        command('v1/pods -n sauron-fixtures -l app=healthy')
         expect('ctx:kind-sauron-test-b', 'pods [1 / 1;', 'list synchronized')
         command('ctx kind-sauron-test')
-        command('pods -n sauron-fixtures -l app=healthy')
+        command('v1/pods -n sauron-fixtures -l app=healthy')
         expect('ctx:kind-sauron-test', 'pods [1 / 1;', 'list synchronized')
     command('logs worker')
     expect('Streaming', 'healthy test workload')
@@ -121,7 +121,7 @@ def foundation():
 
 def advanced_logs():
     expect('pods [', 'list synchronized')
-    command('pods -n sauron-fixtures -l test=m4-sessions')
+    command('v1/pods -n sauron-fixtures -l test=m4-sessions')
     expect('pods [1 / 1;', 'm4-sessions')
     command('logs')
     expect('Choose :logs NAME')
@@ -147,14 +147,14 @@ def advanced_logs():
     keys('r')
     expect('Streaming', 'M4_WORKER_LIVE', 'M4_WEB_LIVE')
     keys('Escape')
-    command('pods -n sauron-fixtures / m4-sessions OR healthy')
+    command('v1/pods -n sauron-fixtures / m4-sessions OR healthy')
     # Filtered/total, not total/total: the fixture namespace has accumulated more
     # than 2 Pods across M1-M4 fixtures, so only the filtered count is stable here.
     expect('pods [2 /')
     command('logs_visible')
     expect('M4_WORKER_LIVE', 'healthy test workload', 'Streaming')
     keys('Escape')
-    command('pods -n sauron-fixtures -l test=m4-burst')
+    command('v1/pods -n sauron-fixtures -l test=m4-burst')
     expect('pods [1 / 1;')
     keys('l')
     expect('M4_BURST_', 'Streaming')
@@ -175,7 +175,7 @@ def advanced_logs():
     time.sleep(0.2)
     keys('Escape')
     time.sleep(0.2)
-    command('pods -n sauron-fixtures -l test=m4-sessions')
+    command('v1/pods -n sauron-fixtures -l test=m4-sessions')
     expect('pods [1 / 1;')
     command('logs worker')
     expect('Streaming', 'M4_WORKER_LIVE')
@@ -207,7 +207,7 @@ def main():
     tmux('new-session', '-d', '-s', SESSION, '-x', '150', '-y', '36')
     try:
         launch = ' '.join(shlex.quote(s) for s in [str(BINARY), '--kubeconfig', str(CONFIG),
-                          '--context', 'kind-sauron-test', 'pods', '-n', 'sauron-fixtures'])
+                          '--context', 'kind-sauron-test', 'v1/pods', '-n', 'sauron-fixtures'])
         # Compare exact stty state, not just whether echoed shell input appears.
         shell = 'm4_before=$(stty -g); ' + launch + '; m4_result=$?; m4_after=$(stty -g); '
         shell += 'if [ "$m4_before" = "$m4_after" ]; then echo M4_TERMINAL_RESTORED status=$m4_result; else echo M4_TERMINAL_BROKEN; fi'

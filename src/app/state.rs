@@ -137,7 +137,20 @@ impl State {
                 object
                     .cells
                     .iter()
-                    .filter(|(k, _)| self.wide || k != "NODE")
+                    .filter(|(k, _)| {
+                        self.wide
+                            || !matches!(
+                                k.as_str(),
+                                "NODE"
+                                    | "CPU/R"
+                                    | "MEM/R"
+                                    | "CPU/L"
+                                    | "MEM/L"
+                                    | "QOS"
+                                    | "CPU/C"
+                                    | "MEM/C"
+                            )
+                    })
                     .map(|(k, _)| k.clone()),
             );
         }

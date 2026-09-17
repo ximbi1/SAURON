@@ -12,7 +12,8 @@ Production remains read-only; fixture writes require explicit `.test-cluster/con
 | --- | --- | --- | --- | --- | --- | --- |
 | M5.0 | Explicit known/unknown/partial, origin, identity and freshness; no invented defaults | IMPLEMENTED | 2 unit tests direct; proven through the M5.1 collector as its only consumer so far | Same live evidence as M5.1 (Evidence/Unknown/Observation carry every sample end to end) | Primitives only proven through one consumer; M5.2-M5.5 must each exercise them independently before this is closed | ACCEPTED (as a foundation; re-verify per consumer) |
 | M5.1 | Optional bounded Pod/container/Node Metrics API polling, owned and scope-gated | IMPLEMENTED | 83 unit + 17 fake HTTP green; decode/403/404/500/timeout/bounds/correlation tests | Real metrics-server v0.8.1 live: Pod+Node CPU/memory, ns/ctx round-trip, 32x9, `Ctrl-C` shutdown with exact `stty` restore | Values currently inspectable only via `:info`; table/filter/sort integration is M5.2; live metrics-absent PTY mode retired once the fixture became permanent (fake-HTTP covers it instead, see journal) | ACCEPTED (transport only; not table-integrated) |
-| M5.2 | Requests/limits/capacity/QoS; typed metric table/filter/sort integration | DESIGNED | Pending | Pending | Zero/missing denominator stays unknown | NOT ACCEPTED |
+| M5.2a | Requests/limits/capacity/QoS accounting, table/filter/sort integration | IMPLEMENTED | 4 unit tests (init-container formula, missing-vs-malformed, QoS passthrough); live table/filter/sort | Live `v1/pods -w` shows real CPU/R, MEM/R, CPU/L, MEM/L, QOS; `Node -w` shows CPU/C, MEM/C; typed filter (`cpu/r>1m`) and sort (`mem/l`) verified against real fixture data | Wide-only columns to avoid overwhelming narrow terminals; QoS read from `status.qosClass`, never re-derived | ACCEPTED |
+| M5.2b | Live Metrics API usage in table/filter/sort/percentages | DESIGNED | Pending | Pending | Zero/missing denominator stays unknown; needs `Cache` threaded into `Field`/table rendering | NOT ACCEPTED |
 | M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | DESIGNED | Existing basic rules are not M5 acceptance | Pending | Missing controller/container evidence must not imply health | NOT ACCEPTED |
 | M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | DESIGNED | Existing Explain is not M5 acceptance | Pending | No graph, speculative cause or name-prefix correlation | NOT ACCEPTED |
 | M5.5 | Bounded UID-scoped meaningful watch/relist transitions | DESIGNED | Existing history is not M5 acceptance | Pending | Equivalent relist must not invent transitions | NOT ACCEPTED |
@@ -60,6 +61,60 @@ accounting; missing/zero request or limit; Node capacity/allocatable; justified 
 Live: known usage displayed, missing usage UNKNOWN, Strong Kleene unknown-excluded,
 stable typed known/unknown sorting; recreation, context/namespace, Refresh, history,
 32x9. Metrics refresh/expiry invalidates row memoization without disturbing UID selection.
+
+**M5.2a (accounting) accepted 2026-09-17.** New `src/resources/accounting.rs`:
+`pod_effective(pod, "requests"|"limits", cpu)` implements Kubernetes' own documented
+init-container effective-resource formula (a restartable/"sidecar" init container adds
+to every other container's total for the Pod's whole lifetime; a regular sequential
+init container's own request/limit is compared only against the running total at its
+own position, never summed against other sequential inits) -- a container that omits
+a request/limit contributes nothing to that resource's sum, matching `kubectl
+describe`'s own convention, which is distinct from the *object* failing to report
+anything. `qos_class()` reads `status.qosClass` verbatim rather than re-deriving it --
+Kubernetes already computes and stores this, and re-deriving it would be exactly the
+speculative accounting this milestone forbids. `node_amount()` reads capacity/
+allocatable directly. New `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS` Pod cells and `CPU/C`/
+`MEM/C` Node cells, gated behind wide mode (`w`) alongside the existing `NODE` column
+so the default narrow view is not overwhelmed. `Field::parse` gained `cpu/r`, `cpu/l`,
+`cpu/c`, `mem/r`, `mem/l`, `mem/c` key aliases so the existing typed filter/sort engine
+resolves them with no new grammar. 4 unit tests (init-container formula against the
+documented example, missing-vs-malformed-quantity distinction, QoS/Node passthrough).
+Live against `kind-sauron-test`: wide-mode table shows real `CPU/R`/`MEM/R`/`CPU/L`/
+`MEM/L`/`QOS` for every fixture Pod (`BestEffort` correctly shows `0m`/`0` rather than
+UNKNOWN, since "no container specified this resource" is itself known, real data);
+typed filter `cpu/r>1m` correctly excludes all three `BestEffort` fixtures; `qos=
+BestEffort` and `qos=Burstable` filters each select the correct disjoint 3-Pod subset;
+typed sort by `mem/l` orders correctly. This is static, spec/status-only accounting --
+no Metrics API usage is involved, so it works identically whether or not metrics-server
+is installed.
+
+One real regression found and fixed, affecting M1-M4 acceptance scripts, not new
+application code: the M5.1 metrics-server fixture staying permanently installed made
+the bare, unqualified `pods` resource name ambiguous with `metrics.k8s.io`'s own
+`pods` plural on the shared isolated cluster -- exactly the ambiguity `docs/METRICS.md`
+already flagged, but previously only checked against `accept-m5.py`. `scripts/
+accept-m3.py`, `accept-m4.py`, `accept-m4-forward.py` and `scripts/soak-m4.py` all
+launched with or switched to the bare `pods` plural and broke with `"pods" is
+ambiguous across API groups`. Fixed by qualifying every resource-switching `pods`
+reference in those four scripts to `v1/pods` (left the rendered-text `expect('pods
+[...`) assertions alone, since the UI's own breadcrumb/header still displays the
+plural unqualified regardless of how it was addressed). Re-ran all four live: `accept-
+m3.py filters`/`sorting`, `accept-m4.py` (foundation)/`logs`, `accept-m4-forward.py`
+(full, 7/7) all PASS again with a fresh binary. `accept-m3.py sorting` also hit one
+unrelated, pre-existing, non-reproducing timing flake in its `configmaps` typed-sort
+retry loop (nothing to do with `pods`/metrics); passed cleanly on immediate retry,
+documented here rather than silently rerun.
+
+**M5.2b (live Metrics API usage in table/filter/sort/percentages) NOT STARTED.**
+`Field::read`/`compare` currently only take `&Object`; live usage values live in
+`app::metrics::Cache`, addressed by UID, not on the `Object` itself. Wiring usage into
+the same filter/sort/table pipeline needs either (a) writing the Cache's current
+values onto matching rows at each metrics-revision tick (bounded, UID-keyed,
+Object stays otherwise immutable), or (b) threading an optional `&Cache` reference
+through `Field`/`State::columns()`/`State::cell()`. Usage/request and usage/limit
+percentages (division-by-zero-denominator handling per the ledger's own rule) are
+part of this same slice, not accounting. Deferred to keep this commit reviewable;
+next concrete M5 step.
 
 ## M5.3 — deterministic health
 
@@ -142,3 +197,23 @@ never push/publish. No M6 graph or M7 mutation-policy expansion.
   consumer; still to be re-verified independently as each of M5.2-M5.5 becomes its
   own consumer. Next: M5.2 (requests/limits/QoS accounting, then table/filter/sort
   integration) -- metrics remain `:info`-only until that lands.
+- M5.2a (accounting) accepted: `src/resources/accounting.rs` implements Kubernetes'
+  documented init-container effective-request/limit formula and reads `status.
+  qosClass` verbatim instead of re-deriving QoS. New wide-only Pod cells (`CPU/R`/
+  `MEM/R`/`CPU/L`/`MEM/L`/`QOS`) and Node cells (`CPU/C`/`MEM/C`); new `Field::parse`
+  key aliases (`cpu/r`, `cpu/l`, `cpu/c`, `mem/r`, `mem/l`, `mem/c`) let the existing
+  typed filter/sort engine resolve them with zero new grammar. 91 unit + 17 fake HTTP
+  green. Live against `kind-sauron-test`, wide mode: real per-Pod request/limit/QoS
+  values, `cpu/r>1m` correctly excluding the three `BestEffort` fixtures, `qos=
+  BestEffort`/`qos=Burstable` each selecting the correct disjoint subset, typed sort
+  by `mem/l`. Found and fixed a real regression along the way, in test harnesses, not
+  application code: M5.1's metrics-server fixture staying permanently installed made
+  bare `pods` ambiguous on the shared isolated cluster, breaking `accept-m3.py`,
+  `accept-m4.py`, `accept-m4-forward.py` and `soak-m4.py` wherever they launched with
+  or switched to the unqualified plural. Qualified every one of those to `v1/pods`;
+  re-ran all four live and all pass again (one unrelated pre-existing `configmaps`
+  sort-retry timing flake self-resolved on immediate retry, unrelated to this change,
+  noted rather than silently rerun). M5.2b (live Metrics API values threaded into the
+  same filter/sort/table pipeline, plus usage/request and usage/limit percentages)
+  is the explicit next step -- deferred out of this commit to keep it reviewable, not
+  because it is easy or optional.

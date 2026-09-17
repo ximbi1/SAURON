@@ -1,3 +1,4 @@
+pub mod accounting;
 pub mod health;
 pub mod sort;
 pub mod store;
@@ -127,6 +128,37 @@ pub fn number(v: &Value, path: &str) -> i64 {
     v.pointer(path).and_then(Value::as_i64).unwrap_or(0)
 }
 
+/// Round-trips through `filters::quantity`: a plain decimal below 1 core renders
+/// with the conventional "m" (milli) suffix, matching kubectl's own convention.
+pub fn cpu_text(cores: f64) -> String {
+    if cores < 1.0 {
+        format!("{}m", (cores * 1000.0).round() as i64)
+    } else {
+        let s = format!("{cores:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_owned()
+    }
+}
+/// Round-trips through `filters::quantity`: largest binary unit that keeps the
+/// value >= 1, matching kubectl's own binary-suffix convention.
+pub fn memory_text(bytes: f64) -> String {
+    const UNITS: [(&str, f64); 6] = [
+        ("Ei", 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        ("Pi", 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        ("Ti", 1024.0 * 1024.0 * 1024.0 * 1024.0),
+        ("Gi", 1024.0 * 1024.0 * 1024.0),
+        ("Mi", 1024.0 * 1024.0),
+        ("Ki", 1024.0),
+    ];
+    for (suffix, mult) in UNITS {
+        if bytes >= mult {
+            let s = format!("{:.2}", bytes / mult);
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            return format!("{s}{suffix}");
+        }
+    }
+    (bytes.round() as i64).to_string()
+}
+
 fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut add = |name: &str, value: String| out.push((name.to_owned(), value));
@@ -143,6 +175,28 @@ fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(St
                 .unwrap_or_else(|| "-".into()),
         );
         add("NODE", scalar(v, "/spec/nodeName"));
+        let text = |r: Result<f64, crate::evidence::Unknown>, cpu: bool| match r {
+            Ok(n) if cpu => cpu_text(n),
+            Ok(n) => memory_text(n),
+            Err(_) => "-".into(),
+        };
+        add(
+            "CPU/R",
+            text(accounting::pod_effective(v, "requests", true), true),
+        );
+        add(
+            "MEM/R",
+            text(accounting::pod_effective(v, "requests", false), false),
+        );
+        add(
+            "CPU/L",
+            text(accounting::pod_effective(v, "limits", true), true),
+        );
+        add(
+            "MEM/L",
+            text(accounting::pod_effective(v, "limits", false), false),
+        );
+        add("QOS", accounting::qos_class(v).unwrap_or("-").to_owned());
     } else if api == "apps/v1" && ["Deployment", "StatefulSet", "ReplicaSet"].contains(&kind) {
         add(
             "READY",
@@ -198,6 +252,8 @@ fn project(v: &Value, kind: &str, api: &str, health: &health::Health) -> Vec<(St
         add("VERSION", scalar(v, "/status/nodeInfo/kubeletVersion"));
         add("CPU/A", scalar(v, "/status/allocatable/cpu"));
         add("MEM/A", scalar(v, "/status/allocatable/memory"));
+        add("CPU/C", scalar(v, "/status/capacity/cpu"));
+        add("MEM/C", scalar(v, "/status/capacity/memory"));
     } else if api == "v1" && ["ConfigMap", "Secret"].contains(&kind) {
         add(
             "DATA",

@@ -62,15 +62,15 @@ def filters():
                        'cpu:field:/spec/cpu>100m AND memory:field:/spec/memory=1024Mi AND percent:field:/spec/percent=75%']:
         result = snapshot('eyes', expression)
         assert [o['metadata']['name'] for o in result['items']] == ['observatory'], expression
-    unknown = snapshot('pods', 'NOT (cpu>100m)')
+    unknown = snapshot('v1/pods', 'NOT (cpu>100m)')
     assert not unknown['items'] and unknown['unknownExcluded'] > 0
-    restarted = snapshot('pods', 'restarts>0 AND age>1s')
+    restarted = snapshot('v1/pods', 'restarts>0 AND age>1s')
     assert 'crashloop' in [o['metadata']['name'] for o in restarted['items']]
-    selected = snapshot('pods', 'age>1s', '-l', 'app=healthy', '--field-selector', 'status.phase=Running')
+    selected = snapshot('v1/pods', 'age>1s', '-l', 'app=healthy', '--field-selector', 'status.phase=Running')
     assert len(selected['items']) == 1
     assert selected['labelSelector'] == 'app=healthy'
     expect('pods [', 'list synchronized')
-    command('pods -n sauron-fixtures -l app=healthy -f status.phase=Running / age>1s')
+    command('v1/pods -n sauron-fixtures -l app=healthy -f status.phase=Running / age>1s')
     expect('pods [1 / 1;', '-l app=healthy', '-f status.phase=Running')
     command('eyes / label.example.test/Team=Ops AND field:/spec/enabled=true')
     expect('eyes.testing.sauron.local [1 / 1;', 'observatory')
@@ -101,9 +101,9 @@ def filters():
         command('ctx kind-sauron-test')
         command('ctx kind-sauron-test-b')
         expect('ctx:kind-sauron-test-b', 'list synchronized', '//^observ/')
-    command('pods -n sauron-fixtures / cpu>100m')
+    command('v1/pods -n sauron-fixtures / cpu>100m')
     expect('No TRUE matches', 'unknown excluded:')
-    command('pods -n sauron-fixtures -l app=healthy / age>1s')
+    command('v1/pods -n sauron-fixtures -l app=healthy / age>1s')
     expect('pods [1 / 1;', '-l app=healthy')
     keys('0')
     expect('ns:*', 'pods [1 / 1;', '-l app=healthy')
@@ -164,7 +164,7 @@ def sorting():
     run('bash', 'scripts/test-cluster.sh', 'm3-sort-fixtures')
     output = ordered(['m3-sort-a', 'm3-sort-b', 'm3-sort-c'])
     assert '› m3-sort-a' not in output, output
-    command('pods -n sauron-fixtures / restarts>=0')
+    command('v1/pods -n sauron-fixtures / restarts>=0')
     expect('crashloop')
     command('sort restarts:desc')
     expect('RESTARTS ↓')
@@ -178,7 +178,7 @@ def sorting():
 def main():
     run('bash', 'scripts/test-cluster.sh', 'check')
     launch = shlex.join([str(BINARY), '--kubeconfig', str(CONFIG), '--context', CONTEXT,
-                        'pods', '-n', 'sauron-fixtures', '--readonly'])
+                        'v1/pods', '-n', 'sauron-fixtures', '--readonly'])
     tmux('new-session', '-d', '-s', SESSION, '-x', '180', '-y', '35')
     try:
         tmux('send-keys', '-t', SESSION, '-l', launch)

@@ -160,8 +160,10 @@ impl Field {
                 "age" => Kind::Duration,
                 "restarts" | "updated" | "available" | "failed" | "succeeded" | "active"
                 | "data" | "subsets" => Kind::Count,
-                "cpu" | "cpu/a" => Kind::Cpu,
-                "memory" | "mem" | "mem/a" | "capacity" => Kind::Memory,
+                "cpu" | "cpu/a" | "cpu/c" | "cpu/r" | "cpu/l" => Kind::Cpu,
+                "memory" | "mem" | "mem/a" | "mem/c" | "mem/r" | "mem/l" | "capacity" => {
+                    Kind::Memory
+                }
                 "suspend" => Kind::Bool,
                 _ => Kind::Auto,
             }

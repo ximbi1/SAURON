@@ -79,7 +79,7 @@ def main():
     subprocess.run(['tmux', '-L', 'sauron-soak', 'kill-server'], capture_output=True)
     tmux('new-session', '-d', '-s', SESSION, '-x', '150', '-y', '36',
          f'{BINARY} --kubeconfig {CONFIG} --config {OPERATIONAL} '
-         '--context kind-sauron-test pods -n sauron-fixtures')
+         '--context kind-sauron-test v1/pods -n sauron-fixtures')
     expect('pods [', 'list synchronized')
     print('soak: session up')
 
@@ -105,7 +105,7 @@ def main():
             expect('ctx:kind-sauron-test')
 
             # Log stream burst: open, let it stream a bit, close
-            command('pods -n sauron-fixtures -l test=m4-sessions')
+            command('v1/pods -n sauron-fixtures -l test=m4-sessions')
             expect('pods [1 / 1;')
             keys('Down')
             command('logs web')

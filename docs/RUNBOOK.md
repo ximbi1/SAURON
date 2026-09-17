@@ -60,9 +60,12 @@ Dedicated kind identity checked and node Ready. Clean baseline verified at annot
 `m3-accepted`, commit `9eac329f5581da45251d81c20a278e53531d4d1a`. Full locked
 fmt/check/clippy/test at M4.2b passed 72 unit + 11 fake HTTP = 83; one opt-in live test
 ignored. No tracked credentials found. M5 is now active: M5.0 (evidence/freshness
-foundation) and M5.1 (Metrics API collector) ACCEPTED against real metrics-server
-v0.8.1 on `kind-sauron-test`; metrics remain `:info`-only until M5.2 (table/filter/
-sort integration) lands. See [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
+foundation), M5.1 (Metrics API collector) and M5.2a (static requests/limits/QoS
+accounting, table/filter/sort integrated: `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/
+`CPU/C`/`MEM/C`, wide mode) ACCEPTED against real metrics-server v0.8.1 on
+`kind-sauron-test`. Live Metrics API *usage* remains `:info`-only until M5.2b
+(threading it into the same filter/sort/table pipeline) lands. See
+[M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
 M4.2b attach accepted 2026-09-16: confirmed it needed no new terminal mechanics,
 only call-site plumbing reusing M4.2's guard/forwarding loop exactly. Found and
 fixed a real hang on the first live test: attaching to an already-running

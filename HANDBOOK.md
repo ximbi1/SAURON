@@ -255,10 +255,11 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is active. M5.0 (evidence/freshness primitives) and M5.1 (Metrics API collector)
-are ACCEPTED against real `kind-sauron-test` with a pinned metrics-server v0.8.1
-fixture; metrics values are `:info`-only so far -- table/filter/sort integration is
-M5.2, not yet started. Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
+M5 is active. M5.0 (evidence/freshness primitives), M5.1 (Metrics API collector) and
+M5.2a (static requests/limits/QoS accounting, table/filter/sort-integrated) are
+ACCEPTED against real `kind-sauron-test`. Live Metrics API *usage* is still `:info`-
+only -- M5.2b (threading it into the same table/filter/sort pipeline) is next.
+Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -282,6 +283,44 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.2a accepted (static resource accounting, table/filter/sort integrated)
+
+`src/resources/accounting.rs`: Pod effective CPU/memory requests/limits following
+Kubernetes' own documented init-container formula (a restartable "sidecar" init
+container adds to every other container's total for the Pod's whole lifetime; a
+regular sequential init container's own request/limit only competes against the
+running total at its own position); `status.qosClass` read verbatim rather than
+re-derived (Kubernetes already computes and stores it -- re-deriving it would be
+exactly the speculative accounting this milestone forbids); Node capacity/
+allocatable read directly. New wide-only cells (`CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/
+`QOS` for Pods, `CPU/C`/`MEM/C` for Nodes) and new `Field::parse` key aliases so
+the existing typed filter/sort engine resolves them with zero new grammar. 91 unit
++ 17 fake HTTP green. Live against `kind-sauron-test` in wide mode: real per-Pod
+request/limit/QoS values (`BestEffort` fixtures correctly show `0m`/`0`, not
+UNKNOWN -- "no container specified this resource" is itself known data); `cpu/r>1m`
+correctly excludes exactly the three `BestEffort` fixtures; `qos=BestEffort`/`qos=
+Burstable` each select the correct disjoint subset; typed sort by `mem/l` orders
+correctly. This is spec/status-only accounting -- no Metrics API involved.
+
+Found and fixed a real regression in test harnesses (not application code): M5.1's
+metrics-server fixture staying permanently installed made the bare `pods` plural
+ambiguous with `metrics.k8s.io`'s own `pods` on the shared isolated cluster --
+exactly the ambiguity `docs/METRICS.md` already flagged, but only previously
+checked against the new `accept-m5.py`. `accept-m3.py`, `accept-m4.py`,
+`accept-m4-forward.py` and `soak-m4.py` all broke wherever they launched with or
+switched to the unqualified plural. Fixed by qualifying every one to `v1/pods`
+(left the UI's own rendered-text `expect('pods [...` assertions untouched, since
+the breadcrumb/header still displays the plural unqualified regardless of how the
+resource was addressed). Re-ran all four live with a fresh binary: `accept-m3.py
+filters`/`sorting`, `accept-m4.py` (foundation)/`logs`, `accept-m4-forward.py`
+(full, 7/7) all PASS again. One unrelated, pre-existing, non-reproducing timing
+flake in `accept-m3.py sorting`'s `configmaps` retry loop self-resolved on
+immediate retry -- documented, not silently rerun without a note.
+
+M5.2b (live Metrics API usage threaded into the same filter/sort/table pipeline,
+plus usage/request and usage/limit percentages) is next -- deferred out of this
+commit deliberately, to keep the change reviewable, not because it's optional.
 
 ### 2026-09-17 — M5.0/M5.1 accepted (Metrics API collector, transport-only)
 

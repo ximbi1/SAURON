@@ -44,7 +44,7 @@ def http(port):
 
 
 def target():
-    m.command('pods -n sauron-fixtures -l test=m4-sessions')
+    m.command('v1/pods -n sauron-fixtures -l test=m4-sessions')
     m.expect('pods [1 / 1;', 'm4-sessions', 'list synchronized')
     m.keys('Home')
 
@@ -206,7 +206,7 @@ def main():
     try:
         launch = ' '.join(shlex.quote(s) for s in [str(m.BINARY), '--kubeconfig', str(m.CONFIG),
             '--context', 'kind-sauron-test', '--config', str(ROOT / 'tests/fixtures/operational.toml'),
-            'pods', '-n', 'sauron-fixtures'])
+            'v1/pods', '-n', 'sauron-fixtures'])
         shell = 'm4_before=$(stty -g); ' + launch + '; m4_result=$?; m4_after=$(stty -g); '
         shell += 'if [ "$m4_before" = "$m4_after" ]; then echo M4_FORWARD_RESTORED status=$m4_result; else echo M4_TERMINAL_BROKEN; fi'
         if '--policy-only' not in sys.argv:

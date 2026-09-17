@@ -255,14 +255,16 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is active. M5.0-M5.3 are all ACCEPTED against real `kind-sauron-test` with a
+M5 is active. M5.0-M5.4 are all ACCEPTED against real `kind-sauron-test` with a
 pinned metrics-server v0.8.1 fixture: evidence/freshness primitives (M5.0), the
 Metrics API collector (M5.1), static requests/limits/QoS accounting plus live
-usage/percentages in the table/filter/sort pipeline (M5.2), and deterministic
-Pod/workload/Node/storage health with evidence (M5.3, see docs/HEALTH.md).
-`CPU`/`MEM` are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/
-`QOS`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.4 Explain 2.0.
-Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
+usage/percentages in the table/filter/sort pipeline (M5.2), deterministic
+Pod/workload/Node/storage health with evidence (M5.3, docs/HEALTH.md), and
+Explain 2.0 reusing that health evidence plus verified-ownership workload→Pod
+correlation and descriptive metrics (M5.4, docs/EXPLAIN.md). `CPU`/`MEM` are
+default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/`CPU/%R`/
+`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.5 Timeline. Contracts and
+per-slice evidence: docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -286,6 +288,66 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.4 accepted (Explain 2.0: health findings + fresh evidence + bounded correlation)
+
+Rewrote `explain.rs` around the explicit philosophy the user set for this
+slice: Explain reuses `resources::health`'s already-deterministic findings
+and their cited evidence directly, rather than being a second, parallel
+diagnosis. The top finding's evidence is now `object.health.evidence.join(
+"; ")` verbatim; the previous redundant re-scan of `containerStatuses`/
+`conditions` (which duplicated M5.3's own rules) is gone.
+
+Order followed exactly as specified: (1) fresh GET + UID check -- already
+correct, unchanged; (2) `Health.evidence` injected directly; (3) Events,
+reusing M3's exact semantics -- already correct, unchanged; (4) metrics as
+descriptive evidence, never causal -- new, Pod/Node only, `Severity::Healthy`,
+a snapshot re-captured fresh from the view's own collector on every Refresh
+(never baked into the reused `Document::Source`, so a later Refresh sees a
+newer sample, not a stale one from when the document first opened); (5)
+workload → Pods via verified `ownerReferences` UID match only, never a name/
+label heuristic -- StatefulSet/DaemonSet/ReplicaSet/Job own Pods directly
+(one hop); Deployment owns ReplicaSets, which own Pods, so that path is a
+genuine, bounded *two*-hop resolution (list owned ReplicaSets, then Pods
+owned by any of them) -- not a step toward the relationship graph M6 owns.
+Bounded to 200 listed / 50 owned, both explicit `PARTIAL EVIDENCE` on
+truncation, matching Events' own cap convention; (6) partial evidence stays
+explicit and additive -- forbidden/timeout on any source degrades to a
+`PARTIAL EVIDENCE` line without discarding what was collected; (7) request/
+epoch gating -- already shared by every document type via the existing
+`Payload::Document{request,...}` check, needed no new code.
+
+`Finding` itself was deliberately left alone (severity/finding/evidence-
+string/affected/next) -- multiple evidence lines join into the one string
+field rather than motivating a structural change this slice does not
+actually need, per explicit instruction not to refactor M5.3 for its own
+sake.
+
+Found and fixed one real design bug via a live check, not a unit test: the
+now-always-present metrics finding for a healthy Pod meant the findings list
+was never empty, which silently suppressed the honest "no failure evidence
+found -- this does not prove the resource is healthy" disclaimer. Fixed with
+an explicit `has_fault` flag that only genuine Warning+ findings (health,
+child health, Warning Events) set -- purely descriptive findings (metrics,
+"N owned Pods checked, none unhealthy") never do.
+
+4 new unit tests, 2 new fake-HTTP tests (verified-ownership correlation
+rejecting a same-namespace Pod with no matching `ownerReferences` entry even
+though nothing else distinguishes it from a real owned Pod; a Forbidden
+owned-Pods list still yielding a usable partial report with the workload's
+own health intact and no secret leakage). 98 unit + 19 fake HTTP green.
+
+Live-accepted against `kind-sauron-test`: a Deployment stuck past its
+`progressDeadlineSeconds` (`Stalled`, real condition message) resolved
+through the ReplicaSet hop to two real `ImagePullBackOff` Pods with the
+actual registry-resolution error text; a failing Job (`Failed`, backoff-limit
+message) resolved directly to its one Pod (`Failed`, real exit-code-1
+evidence) plus a correlated `BackoffLimitExceeded` Warning Event; a healthy
+Pod showing genuine non-fabricated CPU/memory usage alongside the correctly-
+restored "not proven healthy" disclaimer. Full M1-M4 and M5.1-M5.3 regression
+re-ran clean afterward. Full contract: `docs/EXPLAIN.md`.
+
+Next: M5.5 Timeline, then the M5.6 combined adversarial pass.
 
 ### 2026-09-17 — M5.3 accepted (deterministic health with cited evidence)
 

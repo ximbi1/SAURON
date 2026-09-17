@@ -702,6 +702,87 @@ fn selected_pod() -> Object {
     Object::new(pod("u1", "1", "api"))
 }
 
+fn statefulset_resource() -> Resource {
+    Resource {
+        api: ApiResource {
+            group: "apps".into(),
+            version: "v1".into(),
+            api_version: "apps/v1".into(),
+            kind: "StatefulSet".into(),
+            plural: "statefulsets".into(),
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["list".into(), "watch".into()],
+    }
+}
+fn selected_statefulset() -> Object {
+    Object::new(
+        json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"namespace":"default","name":"s","uid":"sts-uid","resourceVersion":"1"},"spec":{"replicas":1},"status":{"observedGeneration":0,"readyReplicas":1,"updatedReplicas":1}}),
+    )
+}
+
+#[tokio::test]
+async fn explain_correlates_only_verified_owned_pods_not_by_name_or_label() {
+    let server = Server::new(|path| {
+        if path.contains("/events") {
+            (200, json!({"items":[]}).to_string())
+        } else if path.contains("/namespaces/default/pods") {
+            (200, json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":[
+                {"apiVersion":"v1","kind":"Pod","metadata":{"name":"s-0","namespace":"default","uid":"owned-uid","ownerReferences":[{"uid":"sts-uid","kind":"StatefulSet","name":"s","apiVersion":"apps/v1","controller":true}]},"spec":{"containers":[{"name":"c"}]},"status":{"phase":"Running","containerStatuses":[{"name":"c","ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}},
+                {"apiVersion":"v1","kind":"Pod","metadata":{"name":"s-imposter","namespace":"default","uid":"other-uid"},"spec":{"containers":[{"name":"c"}]},"status":{"phase":"Running","containerStatuses":[{"name":"c","ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}
+            ]}).to_string())
+        } else {
+            (200, serde_json::to_string(&selected_statefulset().value).expect("json"))
+        }
+    })
+    .await;
+    let text = evidence::document(
+        &connection(server.client()),
+        &statefulset_resource(),
+        &selected_statefulset(),
+        Action::Explain,
+        false,
+        None,
+    )
+    .await
+    .expect("explain document");
+    assert!(text.contains("s-0"), "{text}");
+    assert!(text.contains("CrashLoopBackOff"), "{text}");
+    assert!(
+        !text.contains("s-imposter"),
+        "a same-namespace Pod without a matching ownerReference must never be treated as owned: {text}"
+    );
+}
+
+#[tokio::test]
+async fn explain_partial_when_owned_pods_are_forbidden_but_still_reports_own_health() {
+    let server = Server::new(|path| {
+        if path.contains("/events") {
+            (200, json!({"items":[]}).to_string())
+        } else if path.contains("/namespaces/default/pods") {
+            (403, json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Forbidden","message":"Bearer TOP_SECRET","code":403}).to_string())
+        } else {
+            (200, json!({"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"namespace":"default","name":"s","uid":"sts-uid","resourceVersion":"1"},"spec":{"replicas":2},"status":{"observedGeneration":0,"readyReplicas":1,"updatedReplicas":1}}).to_string())
+        }
+    })
+    .await;
+    let text = evidence::document(
+        &connection(server.client()),
+        &statefulset_resource(),
+        &selected_statefulset(),
+        Action::Explain,
+        false,
+        None,
+    )
+    .await
+    .expect("explain still succeeds when owned Pods are forbidden");
+    assert!(text.contains("PARTIAL EVIDENCE"), "{text}");
+    assert!(text.contains("Forbidden"), "{text}");
+    assert!(!text.contains("TOP_SECRET"), "{text}");
+    assert!(text.contains("Progressing"), "{text}");
+}
+
 #[tokio::test]
 async fn events_403_is_visible_and_never_leaks_secrets() {
     let server = Server::new(|path| {
@@ -718,6 +799,7 @@ async fn events_403_is_visible_and_never_leaks_secrets() {
         &selected_pod(),
         Action::Events,
         false,
+        None,
     )
     .await
     .expect("Events document still succeeds when related Events are forbidden");
@@ -744,6 +826,7 @@ async fn events_partial_continue_token_is_reported() {
         &selected_pod(),
         Action::Events,
         false,
+        None,
     )
     .await
     .expect("document");
@@ -782,6 +865,7 @@ async fn warning_only_filters_events_and_a_null_timestamp_field_falls_through() 
         &selected_pod(),
         Action::Events,
         false,
+        None,
     )
     .await
     .expect("document");
@@ -805,6 +889,7 @@ async fn warning_only_filters_events_and_a_null_timestamp_field_falls_through() 
         &selected_pod(),
         Action::Events,
         true,
+        None,
     )
     .await
     .expect("document");

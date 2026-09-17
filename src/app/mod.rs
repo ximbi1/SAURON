@@ -1048,9 +1048,19 @@ impl Runtime {
         let epoch = self.state.epoch;
         let tx = self.tx.clone();
         let cancel = self.document.clone();
+        // Metrics are descriptive evidence, not fetched fresh on demand -- this
+        // snapshots whatever the view's own collector last successfully sampled,
+        // taken now (not baked into Source) so a later Refresh sees a newer
+        // sample rather than replaying whatever was current when first opened.
+        let metrics = (source.action == Action::Explain).then(|| {
+            (
+                self.state.metrics.amount(&source.selected, true),
+                self.state.metrics.amount(&source.selected, false),
+            )
+        });
         self.tasks.spawn(async move {
             let document::Source { resource, selected:object, action, warning_only } = source;
-            let result=tokio::select!{biased;_=cancel.cancelled()=>return,result=crate::kube::evidence::document(&connection,&resource,&object,action,warning_only)=>result};
+            let result=tokio::select!{biased;_=cancel.cancelled()=>return,result=crate::kube::evidence::document(&connection,&resource,&object,action,warning_only,metrics)=>result};
             let payload=match result{Ok(text)=>Payload::Document{request,title:format!("{action:?}: {}",object.name),text},Err(e)=>Payload::DocumentError{request,error:e.to_string()}};
             tokio::select!{_=cancel.cancelled()=>{},_=tx.send(Event{epoch,payload})=>{}}
         });

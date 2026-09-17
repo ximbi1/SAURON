@@ -15,7 +15,7 @@ Production remains read-only; fixture writes require explicit `.test-cluster/con
 | M5.2a | Requests/limits/capacity/QoS accounting, table/filter/sort integration | IMPLEMENTED | 4 unit tests (init-container formula, missing-vs-malformed, QoS passthrough); live table/filter/sort | Live `v1/pods -w` shows real CPU/R, MEM/R, CPU/L, MEM/L, QOS; `Node -w` shows CPU/C, MEM/C; typed filter (`cpu/r>1m`) and sort (`mem/l`) verified against real fixture data | Wide-only columns to avoid overwhelming narrow terminals; QoS read from `status.qosClass`, never re-derived | ACCEPTED |
 | M5.2b | Live Metrics API usage in table/filter/sort/percentages | IMPLEMENTED | 88 unit + 17 fake HTTP green; zero-denominator/unknown-usage percentage test | Live `CPU`/`MEM` columns (real usage, unknown shows `-`); `cpu>10m` filter correctly excludes 3 unknowns; typed sort by `cpu/%r` orders known ascending then unknown-last | `Metrics` trait (`resources::mod.rs`) threaded through `Field`/`Expr`/`sort::rows` so filters keeps no upward dependency on `app`; percentages use a real zero-denominator check, never fabricated 0%/∞ | ACCEPTED |
 | M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | IMPLEMENTED | 95 unit + 17 fake HTTP green; 5 new precedence tests (10 total in the health module) | Live against `kind-sauron-test`: CrashLoopBackOff/ImagePullBackOff/Unschedulable/OOMKilled/NotReady Pods, Unavailable/Ready Deployment, Progressing StatefulSet, Ready DaemonSet, Completed/Failed Job, Pending PVC, Ready Node -- 13 real cases, all correct | `Health` now carries bounded `evidence: Vec<String>` citing real fields; `ContainerCreating`/`PodInitializing` no longer misclassified as failures; `lastState.terminated` (e.g. OOMKilled after restart) surfaces even when current state is a waiting reason | ACCEPTED |
-| M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | DESIGNED | Existing Explain is not M5 acceptance | Pending | No graph, speculative cause or name-prefix correlation | NOT ACCEPTED |
+| M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | IMPLEMENTED | 98 unit + 19 fake HTTP green; 4 new explain tests, 2 new fake-HTTP ownership/partial tests | Live against `kind-sauron-test`: Deployment (2-hop, real ImagePullBackOff evidence on 2 owned Pods), Job (1-hop, real exit-code evidence + Warning Event), healthy Pod (real metrics, honest "not proven healthy" disclaimer) | `Health.evidence` reused verbatim, no re-derivation; ownership verified via `ownerReferences` UID match only; metrics gated to Pod/Node; a purely-descriptive finding never suppresses the no-fault disclaimer | ACCEPTED |
 | M5.5 | Bounded UID-scoped meaningful watch/relist transitions | DESIGNED | Existing history is not M5 acceptance | Pending | Equivalent relist must not invent transitions | NOT ACCEPTED |
 | M5.6 | Combined adversarial flows, M1–M4 regression and API/performance sanity | NOT STARTED | Pending | Pending | No m5-accepted until demonstrated | NOT ACCEPTED |
 
@@ -199,6 +199,53 @@ Live: healthy/CrashLoop/image-pull Pod; progressing/unavailable Deployment; comp
 failed Job; metrics and Events present/absent; partial RBAC where practical; UID
 replacement; rapid repeated reports; context switch mid-collection; 32x9.
 
+**Accepted 2026-09-17.** Full contract: [EXPLAIN.md](EXPLAIN.md). Rewrote
+`explain.rs` around the philosophy "Explain = health findings + fresh evidence
++ bounded correlation," not a second diagnosis: the top finding's evidence is
+now `object.health.evidence.join("; ")` verbatim -- M5.3's own cited fields --
+and the previous redundant re-scan of `containerStatuses`/`conditions` (which
+would have duplicated M5.3's rules, exactly what was to be avoided) is gone.
+Fresh-GET/UID-check, Events (M3 semantics, 200-cap) and request/epoch gating
+were already correct and needed no changes.
+
+New in this slice: a `resources::Metrics`-shaped snapshot -- actually just
+`(Result<f64,Unknown>, Result<f64,Unknown>)` for CPU/memory, re-captured fresh
+from the view's own collector in `refresh_document()` on every Refresh (never
+baked into the reused `Document::Source`, so a later Refresh sees a newer
+sample) -- shown as a `Severity::Healthy` descriptive finding for Pods/Nodes
+only, never a claimed cause. New verified-ownership Pod correlation in
+`kube::evidence::owned_children()`: StatefulSet/DaemonSet/ReplicaSet/Job own
+Pods directly (`ownerReferences` UID match, one hop); Deployment does not (it
+owns ReplicaSets, which own Pods), so that path is a genuine bounded two-hop
+resolution, not a step toward the relationship graph M6 owns. Bounded to 200
+listed / 50 owned, both explicit `PARTIAL EVIDENCE` when hit. A real design
+bug found and fixed by a live check, not a unit test: the always-present
+metrics finding for a healthy Pod made `out` never empty, silently suppressing
+the honest "no failure evidence found -- this does not prove healthy"
+disclaimer. Fixed with an explicit `has_fault` flag tracking only genuine
+Warning+ findings (health, child health, Warning Events) -- purely descriptive
+findings (metrics, "N owned Pods checked, none unhealthy") never set it.
+
+4 new unit tests (health evidence reused verbatim; unhealthy child surfaces
+while a healthy child alongside an unhealthy *workload* is still explicitly
+noted as checked; metrics severity never signals fault) plus 2 new fake-HTTP
+tests (`ownerReferences`-only correlation rejecting a same-namespace Pod with
+no matching owner reference even though nothing else distinguishes it; a
+Forbidden owned-Pods list still yields a usable partial report with the
+workload's own health intact and no secret leakage). 98 unit + 19 fake HTTP
+green.
+
+Live-accepted against `kind-sauron-test`: a Deployment stuck past its
+`progressDeadlineSeconds` (`Stalled`, real condition message) with two owned
+Pods correctly resolved through the ReplicaSet hop, both showing real
+`ImagePullBackOff` evidence including the actual registry-resolution error
+text; a failing Job (`Failed`, backoff-limit message) with its one owned Pod
+resolved directly (`Failed`, real exit-code-1 evidence) plus a correlated
+`BackoffLimitExceeded` Warning Event; a healthy Pod showing genuine non-
+fabricated CPU/memory usage *and*, after the `has_fault` fix, still correctly
+showing the "not proven healthy" disclaimer alongside it. Full M1-M4 and
+M5.1-M5.3 regression re-ran clean afterward.
+
 ## M5.5 — Timeline
 
 Session-only watch observations, not Events or audit logs. UID + connection scope
@@ -238,6 +285,24 @@ never push/publish. No M6 graph or M7 mutation-policy expansion.
 
 ## Execution journal
 
+- M5.4 accepted: rewrote `explain.rs` around "Explain = health findings +
+  fresh evidence + bounded correlation," reusing `object.health.evidence`
+  verbatim instead of re-scanning conditions/containers with duplicate logic.
+  Added a metrics snapshot (Pod/Node only, descriptive `Severity::Healthy`,
+  re-captured fresh every Refresh) and verified-ownership workload → Pod
+  correlation (`ownerReferences` UID match; Deployment's genuine two-hop via
+  ReplicaSet; 200/50 bounds, explicit PARTIAL on truncation). Fresh-GET/UID-
+  check, Events (M3 semantics) and request/epoch gating needed no changes --
+  already correct and shared by every document type. Found and fixed a real
+  design bug via a live check: the always-present metrics finding made a
+  healthy Pod's finding list never empty, silently suppressing the "not
+  proven healthy" disclaimer; fixed with an explicit `has_fault` flag that
+  only genuine Warning+ findings set. 98 unit + 19 fake HTTP green.
+  Live-accepted: a stalled Deployment resolved through the ReplicaSet hop to
+  two real `ImagePullBackOff` Pods; a failed Job resolved directly to its one
+  real exit-code-1 Pod plus a correlated Warning Event; a healthy Pod showing
+  real metrics alongside the honest disclaimer. Full contract: docs/
+  EXPLAIN.md. Next: M5.5 Timeline.
 - M5.3 accepted: rewrote `resources::health.rs` with an explicit precedence
   (deletion, terminal failure, container failure, scheduling/init, readiness,
   progressing, healthy, unknown) applied per kind (Pod, Deployment/StatefulSet/

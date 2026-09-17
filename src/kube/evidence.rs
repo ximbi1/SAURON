@@ -1,9 +1,12 @@
 use super::{Connection, discovery::Resource};
 use crate::app::session::{Outcome, SessionId};
+use crate::evidence::Unknown;
 use crate::{app::event::Event, command::Action, resources::Object};
 use ::kube::api::ListParams;
 use anyhow::{Context, Result, ensure};
+use k8s_openapi::api::apps::v1::ReplicaSet;
 use k8s_openapi::api::core::v1::Event as KubeEvent;
+use k8s_openapi::api::core::v1::Pod as KubePod;
 use tokio::sync::mpsc;
 
 pub async fn document(
@@ -12,6 +15,7 @@ pub async fn document(
     selected: &Object,
     action: Action,
     warning_only: bool,
+    metrics: Option<(Result<f64, Unknown>, Result<f64, Unknown>)>,
 ) -> Result<String> {
     let api = resource.api(connection.client.clone(), Some(&selected.namespace));
     let fresh = tokio::time::timeout(connection.timeout(), api.get(&selected.name))
@@ -36,9 +40,14 @@ pub async fn document(
             &object.value,
         )?));
     }
-    let (events, warnings) = events(connection, &object).await;
+    let (events, mut warnings) = events(connection, &object).await;
     if action == Action::Explain {
-        return Ok(crate::explain::report(&object, &events, &warnings));
+        let (children, child_warnings) = owned_children(connection, &object).await;
+        warnings.extend(child_warnings);
+        let children: Vec<Object> = children.into_iter().map(Object::new).collect();
+        return Ok(crate::explain::report(
+            &object, &events, &warnings, &children, metrics,
+        ));
     }
     if action == Action::Events {
         let total = events.len();
@@ -113,7 +122,13 @@ pub async fn document(
             serde_yaml_ng::to_string(&object.value[section])?
         ));
     }
-    text.push_str(&crate::explain::report(&object, &events, &warnings));
+    text.push_str(&crate::explain::report(
+        &object,
+        &events,
+        &warnings,
+        &[],
+        None,
+    ));
     Ok(crate::safety::text(&text))
 }
 
@@ -154,6 +169,147 @@ pub async fn events(
             vec![crate::safety::api_error(&e, "listing UID-related Events")],
         ),
         Err(_) => (vec![], vec!["Related Event request timed out".into()]),
+    }
+}
+
+const MAX_LISTED: u32 = 200;
+const MAX_CHILDREN: usize = 50;
+
+/// Verified-ownership Pods for a workload, never a name/label heuristic. A
+/// Deployment does not own Pods directly (it owns ReplicaSets, which own
+/// Pods), so that case is a genuine, bounded two-hop resolution -- not a
+/// step toward a general relationship graph, which stays M6's job.
+async fn owned_children(
+    connection: &Connection,
+    object: &Object,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    match object.kind.as_str() {
+        "StatefulSet" | "DaemonSet" | "ReplicaSet" | "Job" => {
+            owned_pods_by_uid(
+                connection,
+                &object.namespace,
+                std::slice::from_ref(&object.uid),
+            )
+            .await
+        }
+        "Deployment" => {
+            let (replicaset_uids, mut warnings) =
+                owned_replicaset_uids(connection, &object.namespace, &object.uid).await;
+            if replicaset_uids.is_empty() {
+                (vec![], warnings)
+            } else {
+                let (pods, pod_warnings) =
+                    owned_pods_by_uid(connection, &object.namespace, &replicaset_uids).await;
+                warnings.extend(pod_warnings);
+                (pods, warnings)
+            }
+        }
+        _ => (vec![], vec![]),
+    }
+}
+
+async fn owned_pods_by_uid(
+    connection: &Connection,
+    namespace: &str,
+    owner_uids: &[String],
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let api: ::kube::Api<KubePod> = ::kube::Api::namespaced(connection.client.clone(), namespace);
+    match tokio::time::timeout(
+        connection.timeout(),
+        api.list(&ListParams::default().limit(MAX_LISTED)),
+    )
+    .await
+    {
+        Ok(Ok(list)) => {
+            let mut warnings = Vec::new();
+            if list
+                .metadata
+                .continue_
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                // A namespace with more Pods than MAX_LISTED may hide owned ones
+                // beyond that page -- explicit, not silently incomplete.
+                warnings.push(format!(
+                    "PARTIAL: related Pods listed up to {MAX_LISTED} before ownership filtering"
+                ));
+            }
+            let mut owned: Vec<_> = list
+                .items
+                .into_iter()
+                .filter(|p| {
+                    p.metadata
+                        .owner_references
+                        .as_ref()
+                        .is_some_and(|refs| refs.iter().any(|r| owner_uids.contains(&r.uid)))
+                })
+                .collect();
+            if owned.len() > MAX_CHILDREN {
+                owned.truncate(MAX_CHILDREN);
+                warnings.push(format!("PARTIAL: owned Pods bounded to {MAX_CHILDREN}"));
+            }
+            let owned = owned
+                .into_iter()
+                .filter_map(|p| serde_json::to_value(p).ok())
+                .map(|mut v| {
+                    v["kind"] = "Pod".into();
+                    v["apiVersion"] = "v1".into();
+                    v
+                })
+                .collect();
+            (owned, warnings)
+        }
+        Ok(Err(e)) => (
+            vec![],
+            vec![crate::safety::api_error(&e, "listing owned Pods")],
+        ),
+        Err(_) => (vec![], vec!["Related Pod request timed out".into()]),
+    }
+}
+
+async fn owned_replicaset_uids(
+    connection: &Connection,
+    namespace: &str,
+    owner_uid: &str,
+) -> (Vec<String>, Vec<String>) {
+    let api: ::kube::Api<ReplicaSet> =
+        ::kube::Api::namespaced(connection.client.clone(), namespace);
+    match tokio::time::timeout(
+        connection.timeout(),
+        api.list(&ListParams::default().limit(MAX_LISTED)),
+    )
+    .await
+    {
+        Ok(Ok(list)) => {
+            let mut warnings = Vec::new();
+            if list
+                .metadata
+                .continue_
+                .as_deref()
+                .is_some_and(|s| !s.is_empty())
+            {
+                warnings.push(format!(
+                    "PARTIAL: related ReplicaSets listed up to {MAX_LISTED} before ownership filtering"
+                ));
+            }
+            let uids = list
+                .items
+                .into_iter()
+                .filter(|rs| {
+                    rs.metadata
+                        .owner_references
+                        .as_ref()
+                        .is_some_and(|refs| refs.iter().any(|r| r.uid == owner_uid))
+                })
+                .filter_map(|rs| rs.metadata.uid)
+                .collect();
+            (uids, warnings)
+        }
+        Ok(Err(e)) => (
+            vec![],
+            vec![crate::safety::api_error(&e, "listing owned ReplicaSets")],
+        ),
+        Err(_) => (vec![], vec!["Related ReplicaSet request timed out".into()]),
     }
 }
 

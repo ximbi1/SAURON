@@ -6,6 +6,10 @@ combined terms list explicit sub-capabilities. Research is not acceptance. P0 fo
 P1 operational core, P2 breadth, P3 integrations. Tests listed here are acceptance plans
 until an actual test/run is linked. Historical roadmap items are not claimed as shipped.
 
+SAURON status reconciled 2026-09-17: M1–M4 ACCEPTED; local annotated `m4-accepted`
+at `1ea0016`. M5.0 is now implementing; no M5 slice is accepted. M4 evidence and retained limitations:
+[acceptance ledger](M4_ACCEPTANCE.md). The Sofka research baseline above is unchanged.
+
 | Area | Sofka capability | SAURON equivalent | Priority | Status | Test | Notes |
 | ---- | ---------------- | ----------------- | -------- | ------ | ---- | ----- |
 | Navigation | Kubeconfig / exec credentials / explicit context | Native config/client | P0 | ACCEPTED | M1/M2 live kind; RUNBOOK | Credential plugins delegated to kube; not independently acceptance-tested |
@@ -19,7 +23,7 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Navigation | Compact mode, hidden header, terminal title | Responsive terminal chrome | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Navigation | Global fuzzy object finder with partial RBAC results | Bounded cross-kind finder | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Navigation | Name/cell clipboard and OSC52 fallback | Explicit clipboard actions | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Live data | Watches, relists, reconnects/backoff, expired RV | kube watcher with bounded messages/staged store | P0 | TESTED | watch_transport.rs; M1 live watch | Broader failure/endurance campaign remains |
+| Live data | Watches, relists, reconnects/backoff, expired RV | kube watcher with bounded messages/staged store | P0 | TESTED | watch_transport.rs; M1 live watch; M4.4 75-minute soak | Broader failure/scale campaign remains; soak scope in M4_ACCEPTANCE.md |
 | Live data | UID selection, replacement detection, generation tags | UID identity / view epoch | P0 | ACCEPTED | M1–M3 live replacement/rapid navigation | Runtime stores canonical resource identity |
 | Live data | Skipped API groups, RBAC errors, partial discovery | Per-group errors and incomplete state | P0 | TESTED | Fake HTTP discovery extension 403 | Complete restricted-RBAC live campaign remains |
 | Live data | Cached row projections and batching | Incremental projections / capped redraw cadence | P0 | TESTED | prepare-cache regressions; pipeline bench | No comparative performance claim |
@@ -81,7 +85,7 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Nodes | Cordon/uncordon | Native patch with preview | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Nodes | Drain options, sequential nodes, PDB retry, progress/cancel | Dedicated eviction state machine | P1 | DESIGNED | Pending: unit + scoped acceptance | Upstream safety/features conflict; follow current API semantics |
 | Forwarding | Pod/service declared port picker, custom/local port edits | Loopback native port-forward manager | P1 | ACCEPTED (subset) | M4.3 live TCP/picker/auto/explicit/conflict; PORT_FORWARD.md | Pod only; Service resolution and editing existing forwards deferred |
-| Forwarding | Background forwards, indicators, conflict/stop/saved/autostart | Owned forward tasks; explicit startup policy | P1 | ACCEPTED (subset) | M4.3 live context/navigation/UID/cleanup/cycles | 4 forwards × 8 clients; saved/autostart/reconnect deferred |
+| Forwarding | Background forwards, indicators, conflict/stop/saved/autostart | Owned forward tasks; explicit startup policy | P1 | ACCEPTED (subset) | M4.3 live context/navigation/UID/cleanup/cycles; M4.4 combined flows + continuously-held soak forward | 4 forwards × 8 clients; saved/autostart/reconnect deferred |
 | Files | Pod upload/download, progress | Bounded transfer with path checks and policy | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Files | PVC two-pane browser, mounted Pod/helper, cleanup, confined paths | Deferred until exec/transfer lifecycle proven | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
 | Debug | Ephemeral container, target container | Explicit irreversible debug action | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
@@ -132,20 +136,33 @@ until an actual test/run is linked. Historical roadmap items are not claimed as 
 | Plugins | Catalog search/describe/install/update/rollback/offline/checksums/withdrawal/remove | Explicit future registry design | P3 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
 | Plugins | Bundled sanitize; external Popeye/Trivy catalog integrations | Extensions after safety and process controls | P3 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
 | Distribution | Linux/macOS x86_64/aarch64, Cargo/Homebrew/Nix | Build and release automation | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
-| Performance | Published startup/filter/view/RSS methodology | Independent reproducible measured harness | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Performance | Published startup/filter/view/RSS methodology | Pipeline benchmark and session soak | P0 | TESTED (subset) | benches/pipeline.rs; M4.4 75-minute RSS/fd/thread observations in M4_ACCEPTANCE.md | No comparative performance claim; startup/large-cluster campaign remains |
 | SAURON | Eye problem-priority overview (mission addition) | Evidence-ranked current-context view | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Current gap review — M4.3, 2026-09-16
+## Current gap review — M4 accepted, M5 starting, 2026-09-17
 
-M1–M3 accepted checkpoints exist; navigation is not a gap. Basic live watch/store,
+M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
 curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config
 are implemented (see HANDBOOK/RUNBOOK for actual live scope). Remaining composite rows
 above describe full parity: DESIGNED does not imply every sub-capability is absent.
 M3 filtering/sorting/documents/Events/CRD projection are accepted; server Table
-negotiation is deliberately deferred, not accepted. M4.0–M4.3 are accepted against
-isolated kind; whole-M4 combined acceptance and soak remain M4.4 work.
-Largest remaining operational gaps: Service/workload log resolution, Service forwards,
-saved forwards, fully cancellation-safe terminal stdin, then later metrics/relationships/
-mutation policy. No comparative performance or endurance claim from short debug runs.
+negotiation is deliberately deferred, not accepted. M4.0–M4.4 are ACCEPTED against
+isolated kind, including ten combined adversarial sequences and regression of prior
+milestones. Recorded checks: 76 unit + 14 fake HTTP; fmt/check/clippy clean.
+
+Recorded soak: 75 minutes, 912 cycles, 911 log sessions, one continuously-held forward;
+RSS 29000→29488 KiB, fds 17→18, threads stable at 4. One transient timeout recovered
+without restarting the run. These are bounded observations from that run, not a general
+proof of leak freedom or a comparative performance claim. See [M4 acceptance](M4_ACCEPTANCE.md)
+for the evidence and the Escape/Alt input ambiguity fixed in the test harness.
+
+M5 is active: evidence/freshness foundation, then optional metrics, stronger deterministic
+health/Explain and timeline. Track docs/M5_ACCEPTANCE.md; existing basic
+health/Explain/timeline is not full M5 acceptance.
+Remaining operational gaps include Service/workload log resolution, Service forwards,
+saved/reconnecting/autostart forwards, IPv6/public binding and fully cancellation-safe
+terminal stdin. The bounded post-shell/attach input loss remains documented in
+[EXEC.md](EXEC.md); M4 acceptance does not claim it is fully fixed. Relationships and
+the full mutation/guardrail policy remain later milestones.

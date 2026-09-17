@@ -4,6 +4,11 @@ pub struct Event {
     pub payload: Payload,
 }
 pub enum Payload {
+    Metrics {
+        generation: u64,
+        pins: crate::kube::metrics::Pins,
+        result: Result<crate::kube::metrics::Batch, crate::evidence::Unknown>,
+    },
     Connected(Box<Connection>),
     ConnectError(String),
     Begin,

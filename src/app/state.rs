@@ -83,6 +83,7 @@ pub struct State {
     /// (never per object); empty for curated kinds and non-CRD resources alike. See
     /// `kube::printer` for why this is preferred over server Table conversion.
     pub printer_columns: Vec<crate::kube::printer::PrinterColumn>,
+    pub metrics: super::metrics::Cache,
     prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
 impl State {
@@ -117,6 +118,7 @@ impl State {
             autoselect: true,
             page_size: 20,
             printer_columns: vec![],
+            metrics: super::metrics::Cache::default(),
             prepared: None,
         })
     }

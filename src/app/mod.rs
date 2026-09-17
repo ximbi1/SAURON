@@ -1,6 +1,7 @@
 pub mod document;
 pub mod event;
 pub mod forwards;
+pub mod metrics;
 pub mod session;
 pub mod state;
 pub mod terminal;
@@ -31,6 +32,10 @@ pub struct Runtime {
     sessions: session::Sessions,
     forwards: forwards::Forwards,
     pending_forward: Option<(Connection, crate::resources::SharedObject)>,
+    metrics_due: std::time::Instant,
+    metrics_inflight: bool,
+    metrics_generation: u64,
+    metrics_failures: u32,
     scope: CancellationToken,
     document: CancellationToken,
     pending: Option<ResourceCommand>,
@@ -79,6 +84,10 @@ impl Runtime {
                 sessions: session::Sessions::default(),
                 forwards: forwards::Forwards::default(),
                 pending_forward: None,
+                metrics_due: std::time::Instant::now(),
+                metrics_inflight: false,
+                metrics_generation: 0,
+                metrics_failures: 0,
                 scope: CancellationToken::new(),
                 document: CancellationToken::new(),
                 pending: None,
@@ -276,6 +285,10 @@ impl Runtime {
         });
     }
     fn cancel_scope(&mut self) {
+        self.state.metrics = metrics::Cache::default();
+        self.metrics_due = std::time::Instant::now();
+        self.metrics_inflight = false;
+        self.metrics_failures = 0;
         self.pending_forward = None;
         self.palette_document = None;
         self.scope.cancel();
@@ -368,6 +381,33 @@ impl Runtime {
         }
         self.state.dirty = true;
         match event.payload {
+            Payload::Metrics {
+                generation,
+                pins,
+                result,
+            } => {
+                if generation != self.metrics_generation {
+                    return;
+                }
+                self.metrics_inflight = false;
+                self.metrics_failures = if result.is_err() {
+                    self.metrics_failures.saturating_add(1)
+                } else {
+                    0
+                };
+                let delay = if self.metrics_failures == 0 {
+                    crate::kube::metrics::POLL
+                } else {
+                    Duration::from_secs(15 * (1_u64 << self.metrics_failures.min(3)))
+                };
+                self.metrics_due = std::time::Instant::now() + delay;
+                let result = if self.state.synced {
+                    result
+                } else {
+                    Err(crate::evidence::Unknown::Stale)
+                };
+                self.state.metrics.apply(pins, result, &self.state.store);
+            }
             Payload::Connected(connection) => {
                 // Connection completion starts a fresh watch, which clears old view
                 // state. A palette opened *during* connection is new user input,
@@ -408,6 +448,11 @@ impl Runtime {
                 self.state.error = Some(e);
             }
             Payload::Begin => {
+                self.state.metrics.apply(
+                    Default::default(),
+                    Err(crate::evidence::Unknown::Stale),
+                    &self.state.store,
+                );
                 self.state.store.begin();
                 self.state.synced = false;
                 self.state.status = "Synchronizing list (previous rows may be stale)…".into();
@@ -423,6 +468,11 @@ impl Runtime {
                 self.state.status = "List synchronized · watching for changes".into();
             }
             Payload::WatchError(error) => {
+                self.state.metrics.apply(
+                    Default::default(),
+                    Err(crate::evidence::Unknown::Stale),
+                    &self.state.store,
+                );
                 self.state.watch_errors += 1;
                 self.state.synced = false;
                 self.state.error = Some(error);
@@ -1199,6 +1249,15 @@ impl Runtime {
             "Active forwards: {}\n",
             self.forwards.active_count(&self.sessions)
         ));
+        out.push_str(&format!(
+            "Metrics requests started: {}\nMetrics request active: {}\n{}\n",
+            self.metrics_generation,
+            self.metrics_inflight,
+            self.state.metrics.summary()
+        ));
+        if let Some(object) = self.state.selected_object() {
+            out.push_str(&self.state.metrics.report(&object));
+        }
         crate::safety::text(&out)
     }
     pub async fn shutdown(&mut self) {
@@ -1315,6 +1374,54 @@ impl Runtime {
             }
         }
         self.state.dirty = true;
+    }
+
+    fn poll_metrics(&mut self) {
+        self.state.metrics.expire();
+        if self.metrics_inflight
+            || !self.state.synced
+            || std::time::Instant::now() < self.metrics_due
+        {
+            return;
+        }
+        let Some(resource) = self
+            .state
+            .resource
+            .clone()
+            .filter(crate::kube::metrics::supported)
+        else {
+            return;
+        };
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        let pins = self
+            .state
+            .store
+            .objects
+            .iter()
+            .take(crate::kube::metrics::MAX_SAMPLES)
+            .map(|(slot, o)| {
+                (
+                    slot.clone(),
+                    crate::kube::metrics::Pin {
+                        uid: o.uid.clone(),
+                        created: o.created,
+                    },
+                )
+            })
+            .collect();
+        self.metrics_generation += 1;
+        let generation = self.metrics_generation;
+        let epoch = self.state.epoch;
+        let namespace = self.state.query.namespace.clone();
+        let tx = self.tx.clone();
+        let cancel = self.scope.clone();
+        self.metrics_inflight = true;
+        self.tasks.spawn(async move {
+            let result = tokio::select! { biased; _ = cancel.cancelled() => return, result = crate::kube::metrics::fetch(&connection, &resource, namespace.as_deref()) => result };
+            tokio::select! { biased; _ = cancel.cancelled() => {}, _ = tx.send(Event { epoch, payload: Payload::Metrics { generation, pins, result } }) => {} }
+        });
     }
 }
 
@@ -1475,7 +1582,7 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
                     terminal.draw(|frame|crate::ui::render(frame,&mut runtime.state,&suggestions))?;
                     runtime.state.dirty=false;
                 },
-                _=clock.tick()=>runtime.update_forwards(),
+                _=clock.tick()=>{ runtime.poll_metrics(); runtime.update_forwards(); },
                 Some(record)=runtime.sessions.join_next(),if !runtime.sessions.is_empty()=>runtime.session_finished(record),
                 Some(event)=rx.recv()=>{runtime.reduce(event);for _ in 0..63{match rx.try_recv(){Ok(event)=>runtime.reduce(event),Err(_)=>break}}},
                 Some(result)=runtime.tasks.join_next(),if !runtime.tasks.is_empty()=>{if result.is_err(){runtime.state.error=Some("Background task failed; refresh to retry".into());runtime.state.dirty=true;}},
@@ -1612,6 +1719,70 @@ fn edit(text: &mut String, key: crossterm::event::KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn metrics_epochs_generations_and_single_inflight_request_are_owned() {
+        use crate::evidence::Unknown;
+        let mut rt = runtime();
+        rt.state.synced = true;
+        for _ in 0..20 {
+            rt.poll_metrics();
+        }
+        assert_eq!(rt.metrics_generation, 1);
+        assert!(rt.metrics_inflight);
+        let old_epoch = rt.state.epoch;
+        rt.cancel_scope();
+        rt.state.metrics.status = Err(Unknown::Forbidden);
+        rt.reduce(Event {
+            epoch: old_epoch,
+            payload: Payload::Metrics {
+                generation: 1,
+                pins: Default::default(),
+                result: Err(Unknown::Unavailable),
+            },
+        });
+        assert_eq!(rt.state.metrics.status, Err(Unknown::Forbidden));
+        rt.metrics_generation = 2;
+        rt.state.synced = true;
+        rt.reduce(Event {
+            epoch: rt.state.epoch,
+            payload: Payload::Metrics {
+                generation: 1,
+                pins: Default::default(),
+                result: Err(Unknown::Unavailable),
+            },
+        });
+        assert_eq!(rt.state.metrics.status, Err(Unknown::Forbidden));
+        rt.reduce(Event {
+            epoch: rt.state.epoch,
+            payload: Payload::Metrics {
+                generation: 2,
+                pins: Default::default(),
+                result: Err(Unknown::Unavailable),
+            },
+        });
+        assert_eq!(rt.state.metrics.status, Err(Unknown::Unavailable));
+        assert!(rt.metrics_due > std::time::Instant::now());
+        rt.reduce(Event {
+            epoch: rt.state.epoch,
+            payload: Payload::WatchError("watch lost".into()),
+        });
+        rt.reduce(Event {
+            epoch: rt.state.epoch,
+            payload: Payload::Metrics {
+                generation: 2,
+                pins: Default::default(),
+                result: Ok(crate::kube::metrics::Batch {
+                    samples: Default::default(),
+                    coverage: Default::default(),
+                }),
+            },
+        });
+        assert_eq!(rt.state.metrics.status, Err(Unknown::Stale));
+        tokio::time::timeout(Duration::from_secs(3), rt.shutdown())
+            .await
+            .expect("cancelled collector cleanup");
+        assert!(rt.tasks.is_empty());
+    }
     #[tokio::test]
     async fn forwarding_policy_denies_before_target_resolution_and_reload_preserves_cli() {
         let mut rt = runtime();

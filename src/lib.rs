@@ -2,6 +2,7 @@ pub mod app;
 pub mod brand;
 pub mod command;
 pub mod config;
+pub mod evidence;
 pub mod explain;
 pub mod filters;
 pub mod kube;

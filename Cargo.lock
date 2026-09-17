@@ -1942,6 +1942,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "ratatui",

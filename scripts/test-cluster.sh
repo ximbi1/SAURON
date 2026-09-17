@@ -41,6 +41,12 @@ case "${1:-check}" in
   m3-sort-fixtures)
     kube_test apply -f "$repo_dir/tests/fixtures/m3-sort.yaml"
     ;;
+  m5-metrics-install)
+    # KIND ONLY: self-signed kubelet serving certs need this fixture-only exception.
+    # SAURON's API client still verifies TLS; nothing changes in production.
+    kube_test apply -k "$repo_dir/tests/fixtures/metrics-server"
+    kube_test rollout status deployment/metrics-server -n kube-system --timeout=120s
+    ;;
   m4-fixtures)
     kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"
     kube_test wait --for=condition=Ready pod/m4-sessions pod/m4-logburst -n sauron-fixtures --timeout=60s

@@ -11,3 +11,11 @@ Tokio/tokio-util (MIT), serde/serde_json, clap, anyhow, futures-util, regex and 
 for versions. Before distribution generate a complete transitive license inventory and
 include required notices, including TLS and platform dependencies. This file is not an
 exhaustive distribution license bundle.
+
+M5 adds `http-body-util` 0.1 as a direct dependency (already transitive through kube),
+licensed MIT, to stream bounded HTTP bodies without kube's eager error-body collection.
+
+The isolated-kind metrics fixture references the unmodified upstream Kubernetes SIGs
+[metrics-server v0.8.1 manifest](https://github.com/kubernetes-sigs/metrics-server/releases/tag/v0.8.1),
+licensed [Apache-2.0](https://github.com/kubernetes-sigs/metrics-server/blob/v0.8.1/LICENSE).
+The local Kustomize patch only adds a test-cluster kubelet certificate exception.

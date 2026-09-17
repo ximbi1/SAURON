@@ -255,7 +255,10 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is next; no M5 work has started.
+M5 is active. M5.0 (evidence/freshness primitives) and M5.1 (Metrics API collector)
+are ACCEPTED against real `kind-sauron-test` with a pinned metrics-server v0.8.1
+fixture; metrics values are `:info`-only so far -- table/filter/sort integration is
+M5.2, not yet started. Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -279,6 +282,60 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.0/M5.1 accepted (Metrics API collector, transport-only)
+
+Reinstalled/verified the pinned metrics-server v0.8.1 fixture against
+`kind-sauron-test` (`kubectl top nodes`/`top pods` returned real, non-fabricated
+samples before touching SAURON), rebuilt, then ran `python3 scripts/accept-m5.py`
+live: genuine Pod/Node CPU/memory with a real source timestamp distinct from
+receipt time via `:info`, `:ns`/`:ctx` round-trip preserving the collector,
+`v1/nodes` context switch, 32x9 diagnostics rendering, and a clean `Ctrl-C` quit
+with exact `stty` restoration. Full suite green: 83 unit + 17 fake HTTP.
+
+One harness-design consequence found and fixed, not an app bug: the originally
+planned `metrics-absent` live PTY mode became permanently untestable the moment
+`m5-metrics-install` made metrics-server a standing fixture on the only isolated
+live context available (`kind-sauron-test` and its alias `kind-sauron-test-b`
+share one physical kind cluster -- there is no live context left without it
+anymore). Retired that mode from `scripts/accept-m5.py` rather than leave a live
+check that can only ever time out; the absent/forbidden/malformed/timeout paths
+remain covered by the fake-HTTP transport tests, which do not depend on cluster
+fixture state, and the one metrics-absent PTY pass recorded before the fixture
+existed stands as historical evidence.
+
+M5.0 promoted to ACCEPTED as a foundation, proven through M5.1 as its first real
+consumer; it still needs independent re-verification as each of M5.2-M5.5 becomes
+its own consumer, per the ledger's own stated bar. Next: M5.2 (requests/limits/QoS
+accounting, then typed metric table/filter/sort integration) -- metrics remain
+`:info`-only, not in any table column, filter or sort yet.
+
+### 2026-09-17 — M5 started
+
+Created docs/M5_ACCEPTANCE.md with seven independent slice verdicts, unknown/identity/
+freshness contracts, live cases, combined regression and API-budget requirements.
+Implementing minimal shared evidence primitives first; reuse accepted runtime ownership.
+No M1–M4 baseline re-audit, no production operations, no new dependency selected.
+
+M5.0/M5.1 progress: shared structured Unknown/Observation/Evidence/Coverage; monotonic
+receipt expiry plus source age; view-owned bounded Metrics API request and UID/window
+correlation; diagnostic per-container/Pod/Node values via :info. Added direct
+http-body-util 0.1 (already locked transitively) to bound successful bodies and discard
+error bodies without kube's eager error-body collection. No other dependency added.
+Unit/fake suite first run: 81 unit passed, 16/17 fake HTTP passed; one test expected a
+503 response immediately, but kube 4.2 middleware retries 503 until the total timeout.
+Confirmed in kube-client retry source, corrected the direct transport-error fixture to
+500; timeouts remain a separate tested outcome. Not an application failure.
+Live metrics-absent PTY passed: UNKNOWN Unavailable, rows preserved, clean terminal/quit.
+Installing pinned metrics-server only via guarded kind script for real samples; M5.1
+still not accepted. Budget/identity contracts in docs/METRICS.md.
+
+### 2026-09-17 — Parity checkpoint reconciled after M4 acceptance
+
+Updated docs/SOFKA_PARITY.md to match local m4-accepted at 1ea0016: M4.4 combined
+acceptance and measured soak are complete, M5 has not started. Linked recorded evidence,
+retained operational gaps and the known stdin limitation; no broader parity claims.
+Documentation-only change, verified with git diff --check; no tests or cluster calls.
 
 ### 2026-09-16 — M4.4 combined acceptance, full regression, and soak (M4 fully ACCEPTED)
 

@@ -28,6 +28,87 @@ struct Server {
 }
 
 #[tokio::test]
+async fn metrics_success_pod_node_and_independent_malformed_fields() {
+    use sauron::{evidence::Unknown, kube::metrics};
+    let server = Server::new(|path| {
+        assert!(path.starts_with("/apis/metrics.k8s.io/v1beta1/"));
+        assert!(path.contains("limit=5000"));
+        if path.contains("/nodes") {
+            (200, json!({"items":[{"metadata":{"name":"node"},"timestamp":chrono::Utc::now().to_rfc3339(),"window":"15s","usage":{"cpu":"123456789n","memory":"1Gi"}}]}).to_string())
+        } else {
+            assert!(path.contains("/namespaces/default/pods"));
+            (200, json!({"metadata":{"continue":"more"},"items":[{"metadata":{"name":"p","namespace":"default"},"timestamp":chrono::Utc::now().to_rfc3339(),"window":"15s","containers":[{"name":"c","usage":{"cpu":"250m","memory":"bad"}}]}]}).to_string())
+        }
+    }).await;
+    let c = connection(server.client());
+    let batch = metrics::fetch(&c, &resource(), Some("default"))
+        .await
+        .expect("pods");
+    assert!(batch.coverage.partial());
+    let sample = batch.samples["default/p"].value.as_ref().expect("sample");
+    assert_eq!(sample.containers["c"].cpu, Ok(0.25));
+    assert_eq!(sample.containers["c"].memory, Err(Unknown::Malformed));
+    let mut node = resource();
+    node.api.plural = "nodes".into();
+    node.api.kind = "Node".into();
+    node.namespaced = false;
+    let batch = metrics::fetch(&c, &node, None).await.expect("nodes");
+    let node = batch.samples["/node"]
+        .value
+        .as_ref()
+        .expect("sample")
+        .node
+        .as_ref()
+        .expect("usage");
+    assert!((node.cpu.expect("cpu") - 0.123456789).abs() < 1e-12);
+    assert_eq!(node.memory, Ok(1073741824.0));
+}
+
+#[tokio::test]
+async fn metrics_errors_are_distinct_and_response_bounded() {
+    use sauron::{evidence::Unknown, kube::metrics};
+    for (code, body, reason) in [
+        (404, "credential sentinel".into(), Unknown::Unavailable),
+        (403, "credential sentinel".into(), Unknown::Forbidden),
+        (500, "credential sentinel".into(), Unknown::TransportError),
+        (200, "not json".into(), Unknown::Malformed),
+        (200, "x".repeat(metrics::MAX_BYTES + 1), Unknown::Partial),
+    ] {
+        let server = Server::new(move |_| (code, body.clone())).await;
+        let result = metrics::fetch(&connection(server.client()), &resource(), None).await;
+        assert_eq!(result.expect_err("unknown"), reason);
+    }
+}
+
+#[tokio::test]
+async fn metrics_body_timeout_and_cancel_are_bounded() {
+    use sauron::{evidence::Unknown, kube::metrics};
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+            .await
+            .expect("headers");
+        std::future::pending::<()>().await;
+    });
+    let server = Server { url, task };
+    let mut c = connection(server.client());
+    c.settings.request_timeout_secs = 1;
+    let r = resource();
+    assert_eq!(
+        metrics::fetch(&c, &r, None).await.expect_err("timeout"),
+        Unknown::TimedOut
+    );
+    let token = CancellationToken::new();
+    token.cancel();
+    tokio::select! { biased; _ = token.cancelled() => {}, _ = metrics::fetch(&c, &r, None) => panic!("cancel must preempt connect") }
+}
+
+#[tokio::test]
 async fn owned_logs_clip_sanitize_and_reject_replaced_uid() {
     use sauron::app::session::{Kind, Outcome, Scope, Sessions, State};
     let pod = json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"log-test","namespace":"default","uid":"current"},"spec":{"containers":[{"name":"worker"}]}});

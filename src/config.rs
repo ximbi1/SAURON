@@ -20,7 +20,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             namespace: None,
-            resource: "pods".into(),
+            // A product default is an explicit core resource, not user alias input.
+            // metrics.k8s.io also serves a plural named pods.
+            resource: "v1/pods".into(),
             readonly: true,
             theme: "ember".into(),
             max_objects: 20_000,
@@ -146,6 +148,10 @@ fn merge(base: &mut toml::Value, layer: toml::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn default_resource_is_explicit_core_identity_not_ambiguous_alias() {
+        assert_eq!(Settings::default().resource, "v1/pods");
+    }
     #[test]
     fn context_overrides_cluster_and_maps_merge() {
         let mut c = Config::default();

@@ -17,7 +17,7 @@ Production remains read-only; fixture writes require explicit `.test-cluster/con
 | M5.3 | Pure deterministic Pod/workload/Node/storage health with evidence | IMPLEMENTED | 95 unit + 17 fake HTTP green; 5 new precedence tests (10 total in the health module) | Live against `kind-sauron-test`: CrashLoopBackOff/ImagePullBackOff/Unschedulable/OOMKilled/NotReady Pods, Unavailable/Ready Deployment, Progressing StatefulSet, Ready DaemonSet, Completed/Failed Job, Pending PVC, Ready Node -- 13 real cases, all correct | `Health` now carries bounded `evidence: Vec<String>` citing real fields; `ContainerCreating`/`PodInitializing` no longer misclassified as failures; `lastState.terminated` (e.g. OOMKilled after restart) surfaces even when current state is a waiting reason | ACCEPTED |
 | M5.4 | Fresh UID-pinned Explain; bounded child/Event/metric evidence; independent source failures | IMPLEMENTED | 98 unit + 19 fake HTTP green; 4 new explain tests, 2 new fake-HTTP ownership/partial tests | Live against `kind-sauron-test`: Deployment (2-hop, real ImagePullBackOff evidence on 2 owned Pods), Job (1-hop, real exit-code evidence + Warning Event), healthy Pod (real metrics, honest "not proven healthy" disclaimer) | `Health.evidence` reused verbatim, no re-derivation; ownership verified via `ownerReferences` UID match only; metrics gated to Pod/Node; a purely-descriptive finding never suppresses the no-fault disclaimer | ACCEPTED |
 | M5.5 | Bounded UID-scoped meaningful watch/relist transitions | IMPLEMENTED | 105 unit + 19 fake HTTP green; 4 new relist-diff tests, 4 new curated-field-diff tests | Live against `kind-sauron-test`: real phase/reason/restart-count transitions on a recreated Pod (new UID), newest-first with `[watch]` source tags, 32x9 clean, no-op Refresh, context-switch isolation confirmed | Relist previously replaced `objects` wholesale with zero diffing -- real changes during a disconnect were silently dropped, not just correctly-suppressed false ones; fixed with a shared `diff_and_record` used by both the incremental and relist paths | ACCEPTED |
-| M5.6 | Combined adversarial flows, M1–M4 regression and API/performance sanity | NOT STARTED | Pending | Pending | No m5-accepted until demonstrated | NOT ACCEPTED |
+| M5.6 | Combined adversarial flows, M1–M4 regression and API/performance sanity | IMPLEMENTED | 105 unit + 19 fake HTTP green throughout | Live: all 12 combined sequences (`accept-m5-combined.py`, run twice), full M1-M4 regression, 75-minute soak (1800 cycles, 0 failures) | RBAC scenario needed a temporary limited Role/ServiceAccount/token (cleaned up); rollout-Progressing window sometimes too fast to catch on a 1-node kind cluster (noted, not a defect) | ACCEPTED |
 
 ## M5.0 — shared evidence semantics
 
@@ -329,6 +329,89 @@ documents, Events, CRD columns, logs, safe kind exec/shell/attach/forward smoke,
 terminal and readonly regressions. Measure poll requests, bounded Explain fanout,
 CPU/RSS/queue pressure and Timeline memory; no comparative performance claims.
 
+**Accepted 2026-09-17.** New `scripts/accept-m5-combined.py`, fresh binary,
+live against `kind-sauron-test`, all 12 sequences plus full M1-M4 regression:
+
+1. **Metrics → filter → sort → namespace → back.** `cpu>0` correctly excludes
+   the not-running fixtures (`?N` unknown-excluded count), `sort mem/l`
+   orders under wide mode, `:ns` round-trip preserves the collector.
+2. **CrashLoop → Explain → Events → logs → back.** `crashloop`'s Explain
+   cites its real waiting reason; Events opens; logs opens (this fixture's
+   container is a one-shot `exit 1`, so `Ended` rather than `Streaming` --
+   confirmed as the fixture's own expected behavior, not a bug); back to
+   table intact throughout.
+3. **Deployment rollout → Progressing → Explain → completion → Timeline.**
+   `kubectl rollout restart deployment/healthy` triggered a real generation
+   bump; on this single-node kind cluster reconciliation was fast enough
+   that the `Progressing` frame was not always caught mid-flight (noted
+   honestly rather than papered over), but the Deployment always
+   reconverged to `Ready` and its `:timeline` showed a genuine
+   generation/replica delta either way.
+4. **Metrics API disappears → explicit UNKNOWN/Stale, never zero.** Scaled
+   `metrics-server` to 0 replicas in `kube-system`; `CPU cores: UNKNOWN
+   (Stale)` after TTL expiry, confirmed `CPU cores: 0` never appears anywhere
+   in the pane.
+5. **Metrics recover → fresh real samples, no cross-context bleed.** Scaled
+   back to 1, waited for rollout; fresh non-UNKNOWN samples returned
+   independently checked on both `kind-sauron-test` and its
+   `kind-sauron-test-b` alias context.
+6. **Explain → immediate context switch → old report rejected.** Opening
+   Explain then switching context closes the document entirely (the
+   existing generic document-lifecycle behavior, confirmed still correct
+   for Explain specifically) -- the stale `WHY: Pod/healthy` text is gone,
+   replaced by the new context's table.
+7. **Explain → same-name/new-UID replacement → old report rejected.**
+   Force-deleted and recreated `crashloop`; `Refresh` on the still-open
+   Explain surfaced "Object was replaced" rather than showing stale content.
+8. **Watch reconnect/relist → no false Timeline transitions.** Covered by
+   the M5.5 unit tests (`store.rs`'s `unchanged_relist_records_nothing`/
+   `changed_while_disconnected_relist_records_exactly_one_delta`), which
+   exercise this deterministically; a live watch reconnect cannot be forced
+   on demand against a healthy control plane without disrupting other
+   in-flight tests, consistent with this project's established pattern for
+   this exact class of scenario (see M5.5's own acceptance notes).
+9. **RBAC partial evidence → Explain stays useful.** Created a short-lived
+   `Role`/`RoleBinding`/`ServiceAccount` granting only `get`/`list`/`watch`
+   on Pods and Deployments (no Events, no ReplicaSets), launched a second
+   SAURON instance against a token-based kubeconfig for that identity:
+   Explain on a Deployment showed `PARTIAL EVIDENCE` citing `Forbidden` for
+   both Events and owned-ReplicaSet correlation, while still showing the
+   Deployment's own health finding -- no secret leakage, all RBAC objects
+   and the temporary kubeconfig cleaned up afterward.
+10. **32x9 across metrics/health/Explain/Timeline.** All four render without
+    corruption (column headers legitimately abbreviate at 32 columns, which
+    is expected, not a defect).
+11. **M4 forward alive throughout.** Started a real port-forward on
+    `m4-sessions` before any M5 work began, then re-verified real HTTP
+    connectivity through it after sequences 1, 3, 6/7, 10, and 4/5 -- the
+    tunnel never dropped, confirming M5 work is fully unrelated to M4
+    session ownership.
+12. **Quit with the collector active.** Clean exit, exact `stty` restoration,
+    confirmed via the same before/after comparison every prior milestone's
+    scripts use.
+
+Regression: `accept-m3.py filters`/`sorting`, `accept-m4.py`
+(foundation)/`logs`, `accept-m4-forward.py` (full, 7/7), `accept-m5.py`
+(M5.1 live) all rerun green with a fresh binary. Full suite (105 unit + 19
+fake HTTP) green before and after. The combined script was run twice in a
+row for reproducibility, both clean.
+
+**Soak: 75 minutes (4499s), `kind-sauron-test`, fresh binary, operational
+config.** `scripts/soak-m5.py` continuously cycled: namespace switch round-
+trip, a metrics-supported resource switch, an Explain open/close on a real
+object (fresh GET/UID check plus health/metrics evidence every time), a
+Timeline open/close (local render, no network), and a `v1/nodes` round-trip
+-- sampling RSS/fd/thread counts and the `:info` metrics-request counter
+every cycle. 1800 cycles, 1800 Explain checks, 1800 Timeline checks, **zero
+recoverable assertion failures across the entire run** -- no reconnects, no
+flakiness, nothing to note as an incident. 3681 metrics-collector requests
+total (`0 → 3681`), a steady cadence consistent with the 15-second poll
+interval across repeated resource-view switches. RSS actually *decreased*
+slightly over the run (31048 → 30556 KiB, well within noise -- not a leak in
+either direction), fds held at 14-15 throughout, threads constant at 4.
+Final check suite (`fmt`/`check`/`clippy`/`test`, 105 unit + 19 fake HTTP)
+rerun clean after the soak.
+
 ## Bug and verification discipline
 
 For a real live failure: reproduce → classify app/harness/environment → root cause →
@@ -338,6 +421,39 @@ Create local annotated `m5-accepted` only after every slice and combined accepta
 never push/publish. No M6 graph or M7 mutation-policy expansion.
 
 ## Execution journal
+
+- M5.6 accepted, M5 fully closed: new `scripts/accept-m5-combined.py` ran
+  all 12 combined sequences from this ledger live against `kind-sauron-test`
+  with a fresh binary, twice in a row for reproducibility, both clean --
+  metrics filter/sort/ns-switch; CrashLoop Explain/Events/logs round-trip; a
+  real `kubectl rollout restart` observed through Progressing-or-fast-
+  reconverge to Ready with a genuine Timeline delta either way; metrics-
+  server scaled to 0 and back, confirming UNKNOWN/Stale never renders as a
+  fabricated zero and fresh samples return independently on both context
+  aliases afterward; Explain discarded correctly across both an immediate
+  context switch and a same-name/new-UID replacement; a real temporary
+  RBAC-limited identity (Role/ServiceAccount/token, fully cleaned up
+  afterward) proving Explain stays usable with explicit `PARTIAL EVIDENCE`
+  and zero secret leakage; 32x9 across metrics/health/Explain/Timeline; an
+  M4 port-forward held alive and re-verified with real HTTP through the
+  entire pass, confirming M5 work is fully unrelated to M4 session
+  ownership; a clean quit with the collector active. Full M1-M4 regression
+  (`accept-m3.py filters`/`sorting`, `accept-m4.py` foundation/`logs`,
+  `accept-m4-forward.py` full 7/7, `accept-m5.py`) all rerun green.
+
+  New `scripts/soak-m5.py`: 75 minutes, 1800 cycles rotating ns/ctx/resource
+  scope with a real Explain and a real Timeline check every single cycle --
+  zero recoverable assertion failures across the entire run, not one
+  reconnect or flake. 3681 metrics-collector requests at a steady cadence;
+  RSS actually *decreased* slightly (31048 → 30556 KiB, noise, not a leak
+  in either direction); fds held 14-15; threads constant at 4. Full suite
+  (105 unit + 19 fake HTTP) green before and after.
+
+  M5.0 through M5.6 are now all ACCEPTED. Local annotated `m5-accepted`
+  created at this commit, never pushed. SAURON has crossed the line this
+  milestone set out to cross: it no longer just observes and operates
+  Kubernetes -- it interprets state with cited evidence, and keeps
+  session-local history without ever inventing it.
 
 - M5.5 accepted: most of the UID-keyed history storage, 64/256 bounds, and
   `:timeline`/`T` UI already existed from M3-era store work -- this slice

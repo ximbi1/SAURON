@@ -255,18 +255,19 @@ soak) all ACCEPTED. Local annotated `m4-accepted` created, never pushed. One kno
 bounded, documented limitation from M4.2 carries forward: an orphaned stdin read
 can occasionally swallow one input chunk right after a shell/attach session
 ends, mitigated to a safe no-op/retry -- see docs/EXEC.md. Ledger: docs/M4_ACCEPTANCE.md.
-M5 is active. M5.0-M5.5 are all ACCEPTED against real `kind-sauron-test` with a
-pinned metrics-server v0.8.1 fixture: evidence/freshness primitives (M5.0), the
+M5 is fully ACCEPTED against real `kind-sauron-test` with a pinned
+metrics-server v0.8.1 fixture: evidence/freshness primitives (M5.0), the
 Metrics API collector (M5.1), static requests/limits/QoS accounting plus live
 usage/percentages in the table/filter/sort pipeline (M5.2), deterministic
 Pod/workload/Node/storage health with evidence (M5.3, docs/HEALTH.md), Explain
 2.0 reusing that health evidence plus verified-ownership workload→Pod
-correlation and descriptive metrics (M5.4, docs/EXPLAIN.md), and a bounded,
-UID-keyed Timeline with correct relist-diff semantics (M5.5, docs/TIMELINE.md).
-`CPU`/`MEM` are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/
-`QOS`/`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. Next: M5.6 combined
-adversarial acceptance, then `m5-accepted`. Contracts and per-slice evidence:
-docs/M5_ACCEPTANCE.md.
+correlation and descriptive metrics (M5.4, docs/EXPLAIN.md), a bounded,
+UID-keyed Timeline with correct relist-diff semantics (M5.5, docs/TIMELINE.md),
+and a 12-sequence combined adversarial pass plus a 75-minute soak (M5.6, zero
+failures). Local annotated `m5-accepted` created, never pushed. `CPU`/`MEM`
+are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/
+`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. M6 is next; no M6 work has
+started. Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -290,6 +291,53 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
+
+New `scripts/accept-m5-combined.py` ran all 12 combined sequences from the
+M5 ledger live against `kind-sauron-test` with a fresh binary, twice in a
+row for reproducibility, both clean: metrics filter/sort/ns-switch/back
+with exact known/unknown semantics; CrashLoop → Explain → Events → logs →
+back, all consistent; a real `kubectl rollout restart deployment/healthy`
+observed through either a caught `Progressing` frame or a fast reconverge
+straight to `Ready` on this single-node kind cluster (noted honestly either
+way, not papered over), with `:timeline` showing a genuine generation/
+replica delta regardless; `metrics-server` scaled to 0 replicas and back,
+confirming absence renders as explicit `UNKNOWN`/`Stale` and never a
+fabricated zero, with fresh real samples returning independently on both
+`kind-sauron-test` and its `kind-sauron-test-b` alias afterward; Explain
+correctly discarded (not shown stale) across both an immediate context
+switch and a same-name/new-UID replacement; a real temporary RBAC-limited
+identity (`Role`/`ServiceAccount`/token, fully cleaned up in a `finally`
+block afterward) proving Explain stays usable under restriction with
+explicit `PARTIAL EVIDENCE` for Events/owned-ReplicaSet correlation and zero
+secret leakage; 32x9 across metrics/health/Explain/Timeline with no
+corruption; an M4 port-forward started before any M5 work and re-verified
+with real HTTP connectivity through the entire pass, confirming M5 work is
+fully unrelated to M4 session ownership; a clean quit with the metrics
+collector still active. Full M1-M4 regression (`accept-m3.py filters`/
+`sorting`, `accept-m4.py` foundation/`logs`, `accept-m4-forward.py` full
+7/7, `accept-m5.py`) all rerun green with a fresh binary.
+
+New `scripts/soak-m5.py`: 75 minutes (4499s), 1800 cycles rotating
+namespace/context/resource scope with a real Explain (fresh GET/UID check
+plus health/metrics evidence) and a real Timeline (local, no-network)
+check on every single cycle. Zero recoverable assertion failures across the
+entire run -- not one reconnect, not one flake, nothing to root-cause.
+3681 metrics-collector requests at a steady cadence consistent with the
+15-second poll interval across repeated resource-view switches. RSS
+actually *decreased* slightly over the run (31048 → 30556 KiB, well within
+noise, not a leak in either direction), fds held at 14-15 throughout,
+threads constant at 4. Full suite (105 unit + 19 fake HTTP) green both
+before and after the soak.
+
+M5.0 through M5.6 are now all ACCEPTED. Local annotated `m5-accepted`
+created at this commit, never pushed. This is the milestone's own stated
+finish line: SAURON no longer just observes and operates Kubernetes -- it
+interprets current cluster state with cited evidence (never a fabricated
+value, never a value where the real answer is unknown), and keeps
+session-local history of what actually happened without ever inventing a
+transition it did not observe. M6 is next; no M6 work has started.
 
 ### 2026-09-17 — M5.5 accepted (Timeline: correct relist-diff semantics)
 

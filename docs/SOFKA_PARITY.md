@@ -6,9 +6,13 @@ combined terms list explicit sub-capabilities. Research is not acceptance. P0 fo
 P1 operational core, P2 breadth, P3 integrations. Tests listed here are acceptance plans
 until an actual test/run is linked. Historical roadmap items are not claimed as shipped.
 
-SAURON status reconciled 2026-09-17: M1–M4 ACCEPTED; local annotated `m4-accepted`
-at `1ea0016`. M5.0 is now implementing; no M5 slice is accepted. M4 evidence and retained limitations:
-[acceptance ledger](M4_ACCEPTANCE.md). The Sofka research baseline above is unchanged.
+SAURON status reconciled 2026-09-17: M1–M5 ACCEPTED; local annotated
+`m5-accepted`. M5 added evidence-driven metrics (docs/METRICS.md), deterministic
+health (docs/HEALTH.md), Explain 2.0 (docs/EXPLAIN.md) and a UID-scoped Timeline
+(docs/TIMELINE.md), plus a 12-sequence combined pass and a 75-minute soak (zero
+failures) in [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md). M4 evidence and retained
+limitations: [M4_ACCEPTANCE.md](M4_ACCEPTANCE.md). The Sofka research baseline
+above is unchanged.
 
 | Area | Sofka capability | SAURON equivalent | Priority | Status | Test | Notes |
 | ---- | ---------------- | ----------------- | -------- | ------ | ---- | ----- |
@@ -141,7 +145,7 @@ at `1ea0016`. M5.0 is now implementing; no M5 slice is accepted. M4 evidence and
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Current gap review — M4 accepted, M5 starting, 2026-09-17
+## Current gap review — M5 accepted, 2026-09-17
 
 M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
 curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config
@@ -158,11 +162,22 @@ without restarting the run. These are bounded observations from that run, not a 
 proof of leak freedom or a comparative performance claim. See [M4 acceptance](M4_ACCEPTANCE.md)
 for the evidence and the Escape/Alt input ambiguity fixed in the test harness.
 
-M5 is active: evidence/freshness foundation, then optional metrics, stronger deterministic
-health/Explain and timeline. Track docs/M5_ACCEPTANCE.md; existing basic
-health/Explain/timeline is not full M5 acceptance.
+M5.0–M5.6 are ACCEPTED against isolated kind with a pinned metrics-server
+fixture: evidence/freshness primitives, an optional bounded Metrics API
+collector, static accounting plus live usage/percentages threaded into
+table/filter/sort, deterministic Pod/workload/Node/storage health with cited
+evidence, Explain 2.0 (reusing that health evidence, never a parallel
+diagnosis, plus verified-ownership workload→Pod correlation and descriptive
+metrics), a UID-scoped Timeline with correct relist-diff semantics, and a
+12-sequence combined adversarial pass plus a 75-minute soak (1800 cycles,
+zero failures). Recorded checks: 105 unit + 19 fake HTTP; fmt/check/clippy
+clean. See [M5 acceptance](M5_ACCEPTANCE.md) and docs/METRICS.md,
+docs/HEALTH.md, docs/EXPLAIN.md, docs/TIMELINE.md for the per-slice contracts.
+
 Remaining operational gaps include Service/workload log resolution, Service forwards,
 saved/reconnecting/autostart forwards, IPv6/public binding and fully cancellation-safe
 terminal stdin. The bounded post-shell/attach input loss remains documented in
-[EXEC.md](EXEC.md); M4 acceptance does not claim it is fully fixed. Relationships and
-the full mutation/guardrail policy remain later milestones.
+[EXEC.md](EXEC.md); M4 acceptance does not claim it is fully fixed. The full
+relationship graph, Xray/blast-radius, and the mutation/guardrail policy remain
+M6/M7 work; M5 explicitly stayed read-only and did not build toward the graph
+beyond Explain's own bounded, verified-ownership two-hop Pod correlation.

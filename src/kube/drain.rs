@@ -27,7 +27,12 @@ use tokio_util::sync::CancellationToken;
 /// every namespace -- the same 200-item cap `read_bounded` already uses
 /// elsewhere, so a pathologically large node cannot make Drain plan an
 /// unbounded number of steps.
-async fn pods_on_node(
+/// M8B.5 UI wiring: also used directly by the app layer to build the
+/// truthful preview shown before Drain is ever confirmed -- the real
+/// commit-time call inside `drain()` below always re-lists fresh, so a
+/// preview snapshot going stale between open and confirm is never a
+/// TOCTOU concern, only a display-freshness one.
+pub(crate) async fn pods_on_node(
     connection: &Connection,
     pod_resource: &Resource,
     node_name: &str,

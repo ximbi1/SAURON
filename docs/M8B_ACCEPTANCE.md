@@ -123,7 +123,7 @@ silently skipping multi-node drain coverage without saying so.
 | M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- `workflow::set_image` reconstructs the full `containers` array (option (b) from this document's own open question, resolved); dedicated `verify_set_image` name-keyed comparison added; live-verified against a real two-container Deployment, unrelated sidecar proven untouched |
 | M8B.3 | CronJob trigger (create a Job from a CronJob template) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- first real `MutationEffect::Create` in the executor; `MutationIntent.create_resource` added; `policy::evaluate`'s Create-bypasses-confirmation rule removed (a real bug in an untested speculative rule, found while implementing this); traceability via label/annotation, not a real `ownerReference` (matches `kubectl create job --from=cronjob` semantics) |
 | M8B.4 | Evict Pod (eviction subresource, PDB-aware) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- uses `POST .../pods/NAME/eviction`, never a plain DELETE; new `MutationOutcome::DisruptionBudgetDenied` for 429; live-verified real PDB denial + real success. Found and fixed a significant, codebase-wide bug: kube-rs's transport-level auto-retry (`default_retry`, on by default) silently retried 429/503/504 below every request this app has ever made, contradicting the "no automatic retry" guarantee -- now explicitly disabled |
-| M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | ENGINE ACCEPTED (unit/fake-HTTP only); NO `:drain` command/UI entry point exists yet, and live evidence is deliberately NOT planned (resolved open question, option (c)) -- both required before this slice can be folded into M8B.7's combined acceptance |
+| M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | ACCEPTED (engine + full UI wiring: preview/arm/confirm/cancel/report; live evidence deliberately out of scope by design, resolved open question, option (c)) |
 | M8B.6 | Force delete (highest risk; explicit, narrow, no default grace=0 leakage) | ACCEPTED |
 | M8B.7 | Combined adversarial acceptance, full M1-M8 regression, soak | PLANNED |
 
@@ -1000,7 +1000,8 @@ the authoritative record of M8's own bugs.
   - **Confirmation UX / multi-line preview format**: NOT decided or
     implemented in this pass -- there is no `:drain` command yet, so
     there is no preview text to design. Flagged explicitly below as
-    remaining work, not silently dropped.
+    remaining work, not silently dropped. (Resolved and implemented in a
+    follow-up pass the same day -- see the second 2026-09-19 entry below.)
   - **Live evidence**: resolved to option (c) from this document's own
     three alternatives -- fake-HTTP-only, no live single-node drain test,
     an explicit, permanent bounded limitation (not "TODO: add later").
@@ -1022,15 +1023,104 @@ the authoritative record of M8's own bugs.
   nothing at all and reports zero steps, never a fabricated "Drain
   succeeded" claim). Full locked suite: 224 unit + 63 fake HTTP,
   fmt/check/clippy (`-D warnings`) clean.
-  **Explicitly NOT done, blocking this slice's own full ACCEPTED status
-  and its inclusion in M8B.7's combined acceptance**: no `:drain`
-  command/grammar, no app-layer wiring (`Command::Drain`, a preview
-  renderer for the multi-line cordon-plus-N-Pods plan, the double-press
-  confirmation gate bound to the cordon's own `Confirmation`, live
-  progress reporting as each step resolves), no interactive evidence, no
-  live evidence (by design, per the resolved option (c) above). The
-  engine (`mutation::drain`, `kube::drain::drain()`) is real, tested, and
-  ready to be wired to a command -- that wiring is the remaining work.
+  **Explicitly NOT done as of this entry, blocking this slice's own full
+  ACCEPTED status and its inclusion in M8B.7's combined acceptance**: no
+  `:drain` command/grammar, no app-layer wiring (`Command::Drain`, a
+  preview renderer for the multi-line cordon-plus-N-Pods plan, the
+  double-press confirmation gate bound to the cordon's own
+  `Confirmation`), no interactive evidence. The engine (`mutation::drain`,
+  `kube::drain::drain()`) is real, tested, and ready to be wired to a
+  command -- that wiring is done in the follow-up entry immediately
+  below, which lifts this blocking condition.
+- 2026-09-19: M8B.5 (Drain) app-layer UI wiring completed -- ACCEPTED,
+  lifting the blocking condition from the entry immediately above. The
+  engine itself (`mutation::drain`, `kube::drain::drain()`) is unchanged;
+  this pass added the missing user-facing workflow the M8's own
+  confirmation-UX safety contract requires before a mutation this wide in
+  blast radius can be considered complete.
+  - **Shape reused, not duplicated**: `mutation::drain::DrainWorkflow`
+    mirrors `mutation::workflow::Workflow`'s exact arm/commit contract
+    (`armed` is UX state only, `requirement()` derives from the same
+    `PolicyEvaluation`) but wraps a cordon intent plus a live Pod plan
+    instead of one intent -- Drain's one documented exception to "one
+    user action, one intent", never a second confirmation subsystem.
+    `Document.drain: Option<DrainWorkflow>` sits alongside (never
+    replaces) `Document.workflow`, and `Action::MutationConfirm` -- the
+    SAME key every other mutation already uses -- dispatches to
+    `drain_confirm()` when a drain document is open, `mutation_confirm()`
+    otherwise. No new keybinding, no new Action variant, no new policy
+    code: the cordon intent already evaluates through the exact
+    `policy::evaluate` path M8B.1's own `:cordon` uses, which is why it
+    always resolves to `RequireStrongerConfirmation` with zero new
+    `PolicyReason`.
+  - **Preview truthfulness**: `:drain` on a Node opens the document
+    immediately in an explicit `DrainPreview::Loading` state (never a
+    silently-empty Pod list standing in for "not yet known"), then kicks
+    off exactly one bounded, read-only list (reusing `kube::drain`'s own
+    `pods_on_node`, now `pub(crate)`, so the preview and the real
+    commit-time list are the same bounded (200-item) call, never two
+    independently-maintained implementations). The rendered preview
+    (`mutation::view::drain_report`) shows, truthfully and only once the
+    list resolves: the target Node, the cordon step's own change text,
+    the exact eligible-for-eviction Pod list, the DaemonSet-excluded list
+    and the local-storage-excluded list each with their own reason, the
+    PDB-aware-eviction sentence, the no-rollback sentence, and the
+    cancellation-semantics sentence -- verbatim requirements from this
+    milestone's own UI-wiring task, none paraphrased away. A failed list
+    read renders as `DrainPreview::Failed` and explicitly refuses to
+    arm/confirm until retried (reopening), never falling back to an
+    empty-therefore-safe-looking plan.
+  - **Confirm/cancel semantics**: `drain_confirm()` denies on
+    `Deny`/`Unsupported` and on a stale epoch exactly like
+    `mutation_confirm()` does, refuses to confirm while the preview is
+    `Loading` or `Failed` (a distinct, explicit error, never a silent
+    no-op), arms on the first Strong press (zero requests), and only on
+    the second press spawns the one task that calls
+    `kube::drain::drain()` -- the same cancellation token
+    (`self.document`) every other mutation confirm already reuses, so
+    leaving/replacing the document cancels a running drain exactly like
+    it already cancels a running commit; `kube::drain::drain()`'s own
+    per-step cancellation check (already implemented in M8B.5's engine
+    pass) is what actually stops future evictions without touching
+    already-committed ones -- no new cancellation code was needed at the
+    UI layer, only wiring the existing token through.
+  - **Composite report rendering**: once `Payload::DrainCommit` arrives,
+    `drain_report` renders the cordon outcome plus one line per Pod
+    (`EXCLUDED (...)`/`NOT ATTEMPTED (...)`/the real `MutationOutcome`,
+    plus verification if attempted) and a `SUMMARY` line
+    (`committed/attempted`, excluded count, not-attempted count) --
+    deliberately never a single pass/fail boolean, matching M8B.5
+    engine's own `DrainReport` contract.
+  - **Live evidence**: still deliberately NOT added -- the resolved
+    option (c) bounded limitation from the engine entry above stands
+    unchanged; this pass is UI wiring only, verified against fake-HTTP
+    and app-level harnesses, never against the real single-node
+    `kind-sauron-test` cluster.
+  Evidence: 6 unit tests on `mutation::view::drain_report` (never shows a
+  Pod list before `Ready`; a `Failed` preview shows the failure and
+  blocks confirm; a `Ready` preview lists eligible/DaemonSet-excluded/
+  local-storage-excluded Pods with their reasons and the PDB-aware/no-
+  rollback/cancellation sentences; armed vs. unarmed confirmation text is
+  distinct; a `Deny` decision blocks confirm regardless of preview state;
+  a composite report with excluded/attempted/not-attempted steps mixed
+  renders each distinctly and a summary line that is never a single
+  boolean); 6 app-level tests (`src/app/mod.rs`: unsupported kind
+  rejected before building an intent; the preview shows target/cordon/
+  PDB/no-rollback/cancellation text truthfully and `mode_name()` reports
+  `"drain"`; readonly denies and sends zero requests; confirming while
+  `Loading` is refused and sends zero requests; the first Strong press
+  arms with zero requests and the second press spawns exactly one
+  orchestrator task); 1 new fake-HTTP test on the real orchestrator
+  (`drain_cancellation_mid_drain_stops_future_evictions_but_never_
+  reverses_completed_steps` -- cancels deterministically when the second
+  Pod's eviction request arrives, sequential-execution guarantees this is
+  race-free unlike an earlier abandoned attempt that cancelled from
+  inside the Pod-list handler; proves the first Pod's already-committed
+  eviction is never reversed and the third Pod is never attempted); 1
+  grammar test (`:drain` takes no arguments); 1 UI test rendering a full
+  Drain preview and a full composite report at a genuinely cramped 32x9
+  terminal, proving neither panics. Full locked suite: 243 unit + 66 fake
+  HTTP, fmt/check/clippy (`-D warnings`) clean.
 - 2026-09-19: M8B.6 (Force delete) implemented and ACCEPTED with live
   evidence. Resolved this document's own open questions as follows,
   adopting each section's own stated proposal as the final decision (no

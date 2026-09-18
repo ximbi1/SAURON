@@ -529,6 +529,7 @@ pub enum Command {
     Trigger,
     Evict,
     ForceDelete,
+    Drain,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -808,6 +809,10 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :force_delete");
             return Ok(Command::ForceDelete);
         }
+        "drain" => {
+            ensure!(tail.is_empty(), "Use :drain");
+            return Ok(Command::Drain);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -888,6 +893,7 @@ pub fn command_names() -> Vec<&'static str> {
         "trigger",
         "evict",
         "force_delete",
+        "drain",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1096,6 +1102,11 @@ fn force_delete_takes_no_arguments_and_is_its_own_distinct_command_from_delete()
     assert!(matches!(parse(":force_delete"), Ok(Command::ForceDelete)));
     assert!(parse(":force_delete now").is_err());
     assert!(matches!(parse(":delete"), Ok(Command::Delete)));
+}
+#[test]
+fn drain_takes_no_arguments() {
+    assert!(matches!(parse(":drain"), Ok(Command::Drain)));
+    assert!(parse(":drain now").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

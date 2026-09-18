@@ -5,6 +5,8 @@
 //! actual orchestrated execution (cordon, then evict each eligible Pod
 //! through the existing `kube::mutation::commit`/`verify`) lives in
 //! `kube::drain`, which is the only place that issues requests.
+use super::{MutationIntent, PolicyEvaluation};
+use crate::kube::discovery::Resource;
 use serde_json::Value;
 
 pub const DRAIN_KINDS: &[&str] = &["Node"];
@@ -111,6 +113,60 @@ pub struct DrainStep {
 pub struct DrainReport {
     pub cordon_outcome: super::MutationOutcome,
     pub steps: Vec<DrainStep>,
+}
+
+/// M8B.5 UI wiring: what a preview document knows about the Pods on the
+/// target Node before Drain runs -- never shows a specific plan until a
+/// fresh read has actually returned one. `Loading` and `Failed` are both
+/// explicit states, never rendered as an empty (and therefore misleading)
+/// eligible-Pods list.
+#[derive(Clone, Debug)]
+pub enum DrainPreview {
+    Loading,
+    Ready(Vec<PlannedPod>),
+    Failed(String),
+}
+
+/// M8B.5 UI wiring: Drain's own composite double-press workflow shell,
+/// mirroring `workflow::Workflow`'s exact arm/commit contract (`armed` is
+/// UX state only, authorizes nothing by itself) but wrapping a cordon
+/// intent plus a Node-wide eviction plan instead of one intent -- Drain's
+/// one documented exception to "one user action, one intent". Nothing
+/// here issues a request; the actual orchestrated commit happens only in
+/// `kube::drain::drain`, invoked on the second confirm press.
+pub struct DrainWorkflow {
+    pub cordon_intent: MutationIntent,
+    pub cordon_payload: Option<Value>,
+    pub cordon_change: String,
+    pub pod_resource: Resource,
+    pub evaluation: PolicyEvaluation,
+    pub preview: DrainPreview,
+    pub armed: bool,
+    pub report: Option<DrainReport>,
+}
+
+impl DrainWorkflow {
+    pub fn new(
+        cordon_intent: MutationIntent,
+        cordon_payload: Option<Value>,
+        cordon_change: String,
+        pod_resource: Resource,
+        evaluation: PolicyEvaluation,
+    ) -> Self {
+        Self {
+            cordon_intent,
+            cordon_payload,
+            cordon_change,
+            pod_resource,
+            evaluation,
+            preview: DrainPreview::Loading,
+            armed: false,
+            report: None,
+        }
+    }
+    pub fn requirement(&self) -> super::ConfirmationRequirement {
+        self.evaluation.decision.confirmation_requirement()
+    }
 }
 
 #[cfg(test)]

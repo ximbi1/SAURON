@@ -68,6 +68,12 @@ pub struct Document {
     /// Restart/Delete/Label/Annotate); `None` for every other document.
     /// Presence of this drives `mode_name()`'s `"mutation"` keymap.
     pub workflow: Option<crate::mutation::workflow::Workflow>,
+    /// M8B.5: set only for a Drain preview/confirm/report document; `None`
+    /// for every other document, including every other mutation. Mutually
+    /// exclusive with `workflow` -- Drain is the one documented exception
+    /// to "one user action, one intent", so it gets its own field rather
+    /// than forcing `workflow::Workflow`'s single-intent shape to fit it.
+    pub drain: Option<crate::mutation::drain::DrainWorkflow>,
     pub freshness: Freshness,
     pub truncated: bool,
     pub page_size: usize,
@@ -110,6 +116,7 @@ impl Document {
             follow: false,
             source: None,
             workflow: None,
+            drain: None,
             freshness: Freshness::Local,
             truncated: false,
             page_size: 20,

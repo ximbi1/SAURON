@@ -2,7 +2,9 @@
 //! Both are local: `policy_report` never touches the network, and
 //! `journal_report` only reads the already-loaded bounded journal tail.
 use super::{
-    ConfirmationRequirement, MutationEffect, MutationIntent, MutationRisk, MutationTarget,
+    ConfirmationRequirement, MutationEffect, MutationIntent, MutationOutcome, MutationRisk,
+    MutationTarget, PolicyDecision,
+    drain::{DrainPreview, DrainWorkflow, Exclusion, StepOutcome},
     journal::Record,
     policy::{self, PolicyContext},
     workflow::Workflow,
@@ -151,6 +153,169 @@ fn verification_line(verification: &Option<super::Verification>) -> String {
         }
         Some(Created(detail)) => format!("Created -- {detail}"),
     }
+}
+
+/// M8B.5: TARGET NODE/CORDON STEP/pod plan/POLICY/CONFIRMATION preview for
+/// a pending Drain, and (once run) its per-Pod composite result. Mirrors
+/// `workflow_report`'s exact shape and honesty rules -- never renders a
+/// specific Pod list before a fresh read has actually returned one, and
+/// never collapses a partial result into a single pass/fail boolean.
+pub fn drain_report(workflow: &DrainWorkflow) -> String {
+    let scope = &workflow.cordon_intent.target.scope;
+    let mut out = format!(
+        "TARGET NODE: {} {}\n  uid: {}\n\nACTION: drain (cordon the Node, then evict its eligible Pods)\n",
+        scope.resource, scope.name, scope.uid
+    );
+    out.push_str(&format!("CORDON STEP: {}\n\n", workflow.cordon_change));
+    match &workflow.preview {
+        DrainPreview::Loading => {
+            out.push_str("PODS ON THIS NODE: loading -- listing Pods scheduled here...\n\n");
+        }
+        DrainPreview::Failed(message) => {
+            out.push_str(&format!(
+                "PODS ON THIS NODE: FAILED to list -- {message}\n\
+                 Refusing to show a plan without a fresh Pod list; confirming is refused \
+                 until this is retried.\n\n"
+            ));
+        }
+        DrainPreview::Ready(planned) => {
+            let eligible: Vec<_> = planned.iter().filter(|p| p.exclusion.is_none()).collect();
+            let daemonset: Vec<_> = planned
+                .iter()
+                .filter(|p| p.exclusion == Some(Exclusion::DaemonSetOwned))
+                .collect();
+            let local_storage: Vec<_> = planned
+                .iter()
+                .filter(|p| p.exclusion == Some(Exclusion::LocalStorage))
+                .collect();
+            out.push_str(&format!(
+                "PODS PLANNED FOR EVICTION ({}):\n",
+                eligible.len()
+            ));
+            if eligible.is_empty() {
+                out.push_str("  (none)\n");
+            }
+            for p in &eligible {
+                out.push_str(&format!("  - {}/{}\n", p.namespace, p.name));
+            }
+            out.push_str(&format!(
+                "\nEXCLUDED -- DaemonSet-owned ({}): kept running on every node, never evicted \
+                 by default (matches kubectl drain):\n",
+                daemonset.len()
+            ));
+            for p in &daemonset {
+                out.push_str(&format!("  - {}/{}\n", p.namespace, p.name));
+            }
+            out.push_str(&format!(
+                "\nEXCLUDED -- local storage, emptyDir/hostPath ({}): eviction would lose that \
+                 data:\n",
+                local_storage.len()
+            ));
+            for p in &local_storage {
+                out.push_str(&format!("  - {}/{}\n", p.namespace, p.name));
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str(
+        "PDB-AWARE EVICTION: each eligible Pod is evicted individually through the eviction \
+         subresource; a Pod protected by a PodDisruptionBudget may be denied \
+         (DisruptionBudgetDenied) without blocking any other Pod's eviction.\n",
+    );
+    out.push_str(
+        "NO ROLLBACK: once the cordon or a Pod's eviction commits, it stays committed -- Drain \
+         never undoes an already-completed step.\n",
+    );
+    out.push_str(
+        "CANCELLATION: stops only *future* steps -- a step already completed keeps its real \
+         outcome exactly as committed; cancelling never retries or reverses it.\n\n",
+    );
+    out.push_str(&format!("POLICY: {:?}\n", workflow.evaluation.decision));
+    for reason in &workflow.evaluation.reasons {
+        out.push_str(&format!("  - {reason:?}\n"));
+    }
+    out.push('\n');
+    let confirmation_line = match workflow.requirement() {
+        ConfirmationRequirement::None => "CONFIRMATION: not required".to_string(),
+        ConfirmationRequirement::Standard => {
+            "CONFIRMATION: required (press confirm once)".to_string()
+        }
+        ConfirmationRequirement::Strong => {
+            if workflow.armed {
+                "CONFIRMATION: strong -- press confirm again to start draining".to_string()
+            } else {
+                "CONFIRMATION: strong -- press confirm twice to start draining".to_string()
+            }
+        }
+    };
+    out.push_str(&confirmation_line);
+    out.push('\n');
+    if matches!(
+        workflow.evaluation.decision,
+        PolicyDecision::Deny | PolicyDecision::Unsupported
+    ) {
+        out.push_str("This action is DENIED; confirming sends zero requests.\n");
+    } else if !matches!(workflow.preview, DrainPreview::Ready(_)) {
+        out.push_str("Confirming is refused until the Pod list finishes loading.\n");
+    }
+    if let Some(report) = &workflow.report {
+        out.push_str(&format!("\nCORDON RESULT: {:?}\n", report.cordon_outcome));
+        for step in &report.steps {
+            let outcome_text = match &step.outcome {
+                StepOutcome::Excluded(Exclusion::DaemonSetOwned) => {
+                    "EXCLUDED (DaemonSet-owned)".to_string()
+                }
+                StepOutcome::Excluded(Exclusion::LocalStorage) => {
+                    "EXCLUDED (local storage)".to_string()
+                }
+                StepOutcome::NotAttempted => {
+                    "NOT ATTEMPTED (drain stopped before this Pod's turn)".to_string()
+                }
+                StepOutcome::Attempted(outcome) => format!("{outcome:?}"),
+            };
+            let verification_text = step
+                .verification
+                .as_ref()
+                .map(|v| format!(" · verification: {v:?}"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  - {}/{}: {outcome_text}{verification_text}\n",
+                step.namespace, step.name
+            ));
+        }
+        let attempted = report
+            .steps
+            .iter()
+            .filter(|s| matches!(s.outcome, StepOutcome::Attempted(_)))
+            .count();
+        let committed = report
+            .steps
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.outcome,
+                    StepOutcome::Attempted(MutationOutcome::Committed)
+                        | StepOutcome::Attempted(MutationOutcome::CommittedButJournalIncomplete)
+                )
+            })
+            .count();
+        let excluded = report
+            .steps
+            .iter()
+            .filter(|s| matches!(s.outcome, StepOutcome::Excluded(_)))
+            .count();
+        let not_attempted = report
+            .steps
+            .iter()
+            .filter(|s| matches!(s.outcome, StepOutcome::NotAttempted))
+            .count();
+        out.push_str(&format!(
+            "\nSUMMARY: {committed}/{attempted} attempted evictions committed ({excluded} \
+             excluded, {not_attempted} not attempted). This is a partial-progress report, never \
+             a single pass/fail boolean.\n"
+        ));
+    }
+    out
 }
 
 /// Bounded, deterministic, most-recent-last. Never includes raw payload or
@@ -358,5 +523,189 @@ mod tests {
         let out = journal_report(&[record]);
         assert!(out.contains("m7-target"));
         assert!(out.contains("Committed"));
+    }
+
+    fn node_scope() -> Scope {
+        Scope {
+            epoch: 1,
+            request: 1,
+            context: "kind-sauron-test".into(),
+            cluster: "kind-sauron-test".into(),
+            resource: "v1/nodes".into(),
+            namespace: String::new(),
+            name: "node-1".into(),
+            uid: "node-uid".into(),
+        }
+    }
+    fn node_resource() -> Resource {
+        Resource {
+            api: ApiResource {
+                group: "".into(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Node".into(),
+                plural: "nodes".into(),
+            },
+            namespaced: false,
+            short_names: vec![],
+            verbs: vec!["patch".into()],
+        }
+    }
+    fn pod_resource() -> Resource {
+        Resource {
+            api: ApiResource {
+                group: "".into(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                plural: "pods".into(),
+            },
+            namespaced: true,
+            short_names: vec![],
+            verbs: vec!["delete".into()],
+        }
+    }
+    fn drain_workflow() -> DrainWorkflow {
+        use crate::mutation::{PolicyDecision, PolicyEvaluation, PolicyReason, workflow};
+        let built = workflow::cordon(node_scope(), node_resource(), 1).unwrap();
+        DrainWorkflow::new(
+            built.intent,
+            built.payload,
+            built.change,
+            pod_resource(),
+            PolicyEvaluation {
+                decision: PolicyDecision::RequireStrongerConfirmation,
+                reasons: vec![PolicyReason::StrongerConfirmationRequired],
+            },
+        )
+    }
+    fn planned_pod(
+        namespace: &str,
+        name: &str,
+        exclusion: Option<Exclusion>,
+    ) -> crate::mutation::drain::PlannedPod {
+        crate::mutation::drain::PlannedPod {
+            namespace: namespace.into(),
+            name: name.into(),
+            uid: format!("uid-{name}"),
+            exclusion,
+        }
+    }
+
+    #[test]
+    fn drain_report_never_shows_a_pod_list_before_a_fresh_read_returns_one() {
+        let report = drain_report(&drain_workflow());
+        assert!(report.contains("TARGET NODE: v1/nodes node-1"));
+        assert!(report.contains("CORDON STEP:"));
+        assert!(report.contains("loading"));
+        assert!(!report.contains("PODS PLANNED FOR EVICTION"));
+        assert!(report.contains("CONFIRMATION: strong -- press confirm twice"));
+    }
+
+    #[test]
+    fn drain_report_failed_preview_refuses_to_show_a_plan_and_blocks_confirm() {
+        let mut wf = drain_workflow();
+        wf.preview = DrainPreview::Failed("OutcomeUnknown".into());
+        let report = drain_report(&wf);
+        assert!(report.contains("FAILED to list"));
+        assert!(report.contains("OutcomeUnknown"));
+        assert!(report.contains("Confirming is refused"));
+    }
+
+    #[test]
+    fn drain_report_ready_preview_lists_eligible_and_excluded_pods_with_reasons() {
+        let mut wf = drain_workflow();
+        wf.preview = DrainPreview::Ready(vec![
+            planned_pod("default", "web-1", None),
+            planned_pod(
+                "kube-system",
+                "ds-1",
+                Some(super::Exclusion::DaemonSetOwned),
+            ),
+            planned_pod("default", "cache-1", Some(super::Exclusion::LocalStorage)),
+        ]);
+        let report = drain_report(&wf);
+        assert!(report.contains("PODS PLANNED FOR EVICTION (1):"));
+        assert!(report.contains("default/web-1"));
+        assert!(report.contains("EXCLUDED -- DaemonSet-owned (1):"));
+        assert!(report.contains("kube-system/ds-1"));
+        assert!(report.contains("EXCLUDED -- local storage, emptyDir/hostPath (1):"));
+        assert!(report.contains("default/cache-1"));
+        assert!(report.contains("PDB-AWARE EVICTION"));
+        assert!(report.contains("NO ROLLBACK"));
+        assert!(report.contains("CANCELLATION: stops only"));
+        assert!(!report.contains("Confirming is refused"));
+    }
+
+    #[test]
+    fn drain_report_armed_state_is_shown_distinctly_from_unarmed() {
+        let mut wf = drain_workflow();
+        wf.preview = DrainPreview::Ready(vec![]);
+        assert!(drain_report(&wf).contains("press confirm twice to start draining"));
+        wf.armed = true;
+        assert!(drain_report(&wf).contains("press confirm again to start draining"));
+    }
+
+    #[test]
+    fn drain_report_denied_decision_blocks_confirm_regardless_of_preview_state() {
+        use crate::mutation::{PolicyDecision, PolicyReason};
+        let mut wf = drain_workflow();
+        wf.evaluation.decision = PolicyDecision::Deny;
+        wf.evaluation.reasons = vec![PolicyReason::ReadonlyMode];
+        wf.preview = DrainPreview::Ready(vec![]);
+        let report = drain_report(&wf);
+        assert!(report.contains("DENIED; confirming sends zero requests"));
+    }
+
+    #[test]
+    fn drain_report_partial_outcomes_render_each_step_distinctly_never_one_boolean() {
+        use crate::mutation::drain::{DrainReport, DrainStep, StepOutcome};
+        let mut wf = drain_workflow();
+        wf.preview = DrainPreview::Ready(vec![]);
+        wf.report = Some(DrainReport {
+            cordon_outcome: MutationOutcome::Committed,
+            steps: vec![
+                DrainStep {
+                    namespace: "kube-system".into(),
+                    name: "ds-1".into(),
+                    uid: "uid-ds".into(),
+                    outcome: StepOutcome::Excluded(super::Exclusion::DaemonSetOwned),
+                    verification: None,
+                },
+                DrainStep {
+                    namespace: "default".into(),
+                    name: "ok-1".into(),
+                    uid: "uid-ok".into(),
+                    outcome: StepOutcome::Attempted(MutationOutcome::Committed),
+                    verification: Some(crate::mutation::Verification::DeletionInProgress),
+                },
+                DrainStep {
+                    namespace: "default".into(),
+                    name: "denied-1".into(),
+                    uid: "uid-denied".into(),
+                    outcome: StepOutcome::Attempted(MutationOutcome::DisruptionBudgetDenied),
+                    verification: None,
+                },
+                DrainStep {
+                    namespace: "default".into(),
+                    name: "never-1".into(),
+                    uid: "uid-never".into(),
+                    outcome: StepOutcome::NotAttempted,
+                    verification: None,
+                },
+            ],
+        });
+        let report = drain_report(&wf);
+        assert!(report.contains("CORDON RESULT: Committed"));
+        assert!(report.contains("kube-system/ds-1: EXCLUDED (DaemonSet-owned)"));
+        assert!(report.contains("default/ok-1: Committed · verification: DeletionInProgress"));
+        assert!(report.contains("default/denied-1: DisruptionBudgetDenied"));
+        assert!(report.contains("default/never-1: NOT ATTEMPTED"));
+        assert!(
+            report.contains(
+                "SUMMARY: 1/2 attempted evictions committed (1 excluded, 1 not attempted)"
+            ),
+            "a partial result must never collapse into a single pass/fail boolean: {report}"
+        );
     }
 }

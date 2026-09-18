@@ -424,4 +424,128 @@ mod tests {
                 .expect("render");
         }
     }
+
+    /// M8B.5: a real Drain preview/report is one of the longest documents
+    /// in the app (Node target, cordon step, a full Pod plan, every
+    /// safety-contract line, then a per-step composite result) -- proves
+    /// it renders without panicking even at a genuinely cramped 32x9
+    /// terminal, not just the wider sizes above.
+    #[test]
+    fn drain_preview_and_report_remain_usable_at_32_by_9() {
+        use kube::core::ApiResource;
+        let node_scope = crate::app::session::Scope {
+            epoch: 1,
+            request: 1,
+            context: "kind-sauron-test".into(),
+            cluster: "kind-sauron-test".into(),
+            resource: "v1/nodes".into(),
+            namespace: String::new(),
+            name: "node-1".into(),
+            uid: "node-uid".into(),
+        };
+        let node_resource = Resource {
+            api: ApiResource {
+                group: "".into(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Node".into(),
+                plural: "nodes".into(),
+            },
+            namespaced: false,
+            short_names: vec![],
+            verbs: vec!["patch".into()],
+        };
+        let pod_resource = Resource {
+            api: ApiResource {
+                group: "".into(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                plural: "pods".into(),
+            },
+            namespaced: true,
+            short_names: vec![],
+            verbs: vec!["delete".into()],
+        };
+        let built = crate::mutation::workflow::cordon(node_scope, node_resource, 1)
+            .expect("cordon supported for Node");
+        let evaluation = crate::mutation::policy::evaluate(
+            &crate::mutation::policy::PolicyContext {
+                readonly: false,
+                readonly_forced: false,
+                cluster_verified_for_mutation: true,
+                ..Default::default()
+            },
+            &built.intent,
+        );
+        let mut drain = crate::mutation::drain::DrainWorkflow::new(
+            built.intent,
+            built.payload,
+            built.change,
+            pod_resource,
+            evaluation,
+        );
+        drain.preview = crate::mutation::drain::DrainPreview::Ready(
+            (0..8)
+                .map(|i| crate::mutation::drain::PlannedPod {
+                    namespace: "default".into(),
+                    name: format!("web-{i}"),
+                    uid: format!("uid-{i}"),
+                    exclusion: match i % 3 {
+                        0 => None,
+                        1 => Some(crate::mutation::drain::Exclusion::DaemonSetOwned),
+                        _ => Some(crate::mutation::drain::Exclusion::LocalStorage),
+                    },
+                })
+                .collect(),
+        );
+        let text = crate::mutation::view::drain_report(&drain);
+        assert!(text.contains("PODS PLANNED FOR EVICTION"));
+        let mut doc = Document::new("Drain: node-1".into(), text);
+        doc.drain = Some(drain);
+        let mut state = State::new(
+            crate::kube::watch::Query {
+                resource: "nodes".into(),
+                ..Default::default()
+            },
+            &crate::config::Settings::default(),
+        )
+        .expect("state");
+        state.mode = Mode::Document(doc);
+        let backend = ratatui::backend::TestBackend::new(32, 9);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state, &[]))
+            .expect("render preview at 32x9");
+        // Now the composite, post-commit report -- a distinct, usually
+        // longer document (every step's outcome plus a summary line).
+        if let Mode::Document(doc) = &mut state.mode {
+            let drain = doc.drain.as_mut().expect("drain");
+            drain.report = Some(crate::mutation::drain::DrainReport {
+                cordon_outcome: crate::mutation::MutationOutcome::Committed,
+                steps: (0..8)
+                    .map(|i| crate::mutation::drain::DrainStep {
+                        namespace: "default".into(),
+                        name: format!("web-{i}"),
+                        uid: format!("uid-{i}"),
+                        outcome: match i % 3 {
+                            0 => crate::mutation::drain::StepOutcome::Attempted(
+                                crate::mutation::MutationOutcome::Committed,
+                            ),
+                            1 => crate::mutation::drain::StepOutcome::Excluded(
+                                crate::mutation::drain::Exclusion::DaemonSetOwned,
+                            ),
+                            _ => crate::mutation::drain::StepOutcome::NotAttempted,
+                        },
+                        verification: None,
+                    })
+                    .collect(),
+            });
+            let text = crate::mutation::view::drain_report(drain);
+            doc.replace(text);
+        }
+        terminal
+            .draw(|frame| render(frame, &mut state, &[]))
+            .expect("render report at 32x9");
+    }
 }

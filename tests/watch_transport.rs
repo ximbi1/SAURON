@@ -1899,6 +1899,110 @@ async fn drain_pre_cancelled_attempts_nothing_and_reports_zero_steps() {
 }
 
 #[tokio::test]
+async fn drain_cancellation_mid_drain_stops_future_evictions_but_never_reverses_completed_steps() {
+    use sauron::app::session::Scope;
+    // Pods are evicted strictly sequentially (never concurrently), so
+    // cancelling exactly when the SECOND Pod's eviction request arrives is
+    // deterministic: pod-a's whole step (commit + verify) has already
+    // fully resolved by then, and pod-c's step cannot even start until
+    // pod-b's step (whatever its own outcome) has also fully resolved --
+    // by which point the cancellation flag is unconditionally visible.
+    // This is the non-racy replacement for an earlier, abandoned attempt
+    // that cancelled from inside the Pod-list handler instead (see
+    // docs/M8B_ACCEPTANCE.md's M8B.5 journal entry).
+    let list_body = json!({
+        "apiVersion":"v1","kind":"PodList",
+        "items": [
+            {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"pod-a","uid":"uid-a"},"spec":{}},
+            {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"pod-b","uid":"uid-b"},"spec":{}},
+            {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"pod-c","uid":"uid-c"},"spec":{}},
+        ],
+    })
+    .to_string();
+    let cancel = CancellationToken::new();
+    let cancel_from_server = cancel.clone();
+    let server = Server::with_request(move |request| {
+        if request.starts_with("PATCH") {
+            (200, json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"node-1","uid":"node-uid"}}).to_string())
+        } else if request.contains("/eviction") {
+            if request.contains("pod-b") {
+                cancel_from_server.cancel();
+            }
+            (200, json!({"kind":"Status","apiVersion":"v1","status":"Success"}).to_string())
+        } else if request.starts_with("GET") && request.contains("fieldSelector") {
+            (200, list_body.clone())
+        } else if request.starts_with("GET") && request.contains("nodes/node-1") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"name":"node-1","uid":"node-uid","resourceVersion":"5"}}).to_string())
+        } else {
+            let (name, uid) = if request.contains("pod-a") {
+                ("pod-a", "uid-a")
+            } else {
+                ("pod-b", "uid-b")
+            };
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"default","name":name,"uid":uid,"resourceVersion":"5"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "node-uid".into(),
+    };
+    let mut node_resource = resource();
+    node_resource.api.group = String::new();
+    node_resource.api.kind = "Node".into();
+    node_resource.api.plural = "nodes".into();
+    node_resource.namespaced = false;
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let report = sauron::kube::drain::drain(
+        &connection,
+        &verified_policy_context(),
+        1,
+        node_scope,
+        node_resource,
+        pod_resource,
+        1,
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(
+        report.cordon_outcome,
+        sauron::mutation::MutationOutcome::Committed
+    );
+    assert_eq!(report.steps.len(), 3);
+    assert_eq!(
+        report.steps[0].outcome,
+        sauron::mutation::drain::StepOutcome::Attempted(
+            sauron::mutation::MutationOutcome::Committed
+        ),
+        "pod-a's eviction fully completed before any cancellation -- no rollback"
+    );
+    assert!(
+        matches!(
+            report.steps[1].outcome,
+            sauron::mutation::drain::StepOutcome::Attempted(_)
+        ),
+        "pod-b's eviction was already attempted when cancellation fired mid-request"
+    );
+    assert_eq!(
+        report.steps[2].outcome,
+        sauron::mutation::drain::StepOutcome::NotAttempted,
+        "pod-c must never be attempted once cancelled -- future steps stop, past ones are never reversed"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn mutation_evict_pdb_denial_is_distinct_and_never_falls_back_to_delete() {
     use sauron::kube::mutation::commit;
     use sauron::mutation::{Confirmation, workflow};

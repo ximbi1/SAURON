@@ -515,6 +515,27 @@ impl Runtime {
                     doc.replace(text);
                 }
             }
+            Payload::DrainPlanned { request, planned } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && let Some(drain) = doc.drain.as_mut()
+                {
+                    drain.preview = match planned {
+                        Ok(p) => crate::mutation::drain::DrainPreview::Ready(p),
+                        Err(e) => crate::mutation::drain::DrainPreview::Failed(e),
+                    };
+                    let text = crate::mutation::view::drain_report(drain);
+                    doc.replace(text);
+                }
+            }
+            Payload::DrainCommit { request, report } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && let Some(drain) = doc.drain.as_mut()
+                {
+                    drain.report = Some(report);
+                    let text = crate::mutation::view::drain_report(drain);
+                    doc.replace(text);
+                }
+            }
             Payload::DocumentError { request, error } if request == self.state.request => {
                 if let Some(doc) = self.active_document_mut() {
                     doc.replace(String::new());
@@ -1027,6 +1048,33 @@ impl Runtime {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Force delete: {}", object.name), built)
             }
+            Command::Drain => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                anyhow::ensure!(
+                    crate::mutation::drain::DRAIN_KINDS.contains(&resource.api.kind.as_str()),
+                    "drain is not supported for {}",
+                    resource.api.kind
+                );
+                let connection = self.connection.as_ref().context("Not connected")?;
+                let pod_resource = connection
+                    .catalog
+                    .resolve("v1/pods", &connection.settings.aliases)
+                    .context("Pod kind is not available on this cluster")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let cordon_built = crate::mutation::workflow::cordon(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_drain_document(
+                    format!("Drain: {}", object.name),
+                    cordon_built,
+                    pod_resource,
+                )
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -1240,6 +1288,7 @@ impl Runtime {
             Mode::Document(doc) if doc.forward_manager => "forwards",
             Mode::Document(doc) if doc.session.is_some() => "logs",
             Mode::Document(doc) if doc.workflow.is_some() => "mutation",
+            Mode::Document(doc) if doc.drain.is_some() => "drain",
             Mode::Document(_) => "document",
             _ => "table",
         }
@@ -1339,6 +1388,137 @@ impl Runtime {
         self.palette_document = None;
         Ok(())
     }
+    /// M8B.5: opens the Drain preview immediately (policy evaluated fresh,
+    /// same as `open_workflow_document`), then kicks off the one live read
+    /// (list Pods on this Node) needed to make the preview truthful. The
+    /// preview is never blocked open waiting on that read -- it opens in
+    /// an explicit `Loading` state first.
+    fn open_drain_document(
+        &mut self,
+        title: String,
+        cordon_built: crate::mutation::workflow::Built,
+        pod_resource: Resource,
+    ) -> Result<()> {
+        let policy_context = self.mutation_policy_context();
+        let evaluation = crate::mutation::policy::evaluate(&policy_context, &cordon_built.intent);
+        let drain = crate::mutation::drain::DrainWorkflow::new(
+            cordon_built.intent,
+            cordon_built.payload,
+            cordon_built.change,
+            pod_resource.clone(),
+            evaluation,
+        );
+        let text = crate::mutation::view::drain_report(&drain);
+        let mut doc = Document::new(title, text);
+        doc.drain = Some(drain);
+        self.state.mode = Mode::Document(doc);
+        self.palette_document = None;
+        self.start_drain_preview(pod_resource);
+        Ok(())
+    }
+    /// M8B.5: the one live read behind the Drain preview -- bounded,
+    /// read-only, and never authoritative for execution (`kube::drain::
+    /// drain` always re-lists fresh at commit time; this is display-
+    /// freshness only, never a TOCTOU shortcut).
+    fn start_drain_preview(&mut self, pod_resource: Resource) {
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        let Some(node_name) = self
+            .active_document_mut()
+            .and_then(|d| d.drain.as_ref())
+            .map(|d| d.cordon_intent.target.scope.name.clone())
+        else {
+            return;
+        };
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        self.tasks.spawn(async move {
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                result = crate::kube::drain::pods_on_node(&connection, &pod_resource, &node_name, &cancel) => result,
+            };
+            let planned = match result {
+                Ok(pods) => Ok(crate::mutation::drain::plan(&pods)),
+                Err(outcome) => Err(format!("{outcome:?}")),
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload: Payload::DrainPlanned { request, planned } }) => {},
+            }
+        });
+    }
+    /// M8B.5: Drain's own confirm handler -- the exact same arm/commit
+    /// contract `mutation_confirm` uses for a single intent
+    /// (`RequireStrongerConfirmation` arms on the first press, commits on
+    /// the second; `Deny`/`Unsupported` sends zero requests, ever), but
+    /// the "commit" here is the whole `kube::drain::drain` orchestrator --
+    /// never a second, parallel confirmation mechanism.
+    fn drain_confirm(&mut self) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected")?;
+        let epoch = self.state.epoch;
+        let doc = self
+            .active_document_mut()
+            .context("No mutation preview open")?;
+        let drain = doc.drain.as_mut().context("No drain preview open")?;
+        anyhow::ensure!(
+            !matches!(
+                drain.evaluation.decision,
+                crate::mutation::PolicyDecision::Deny
+                    | crate::mutation::PolicyDecision::Unsupported
+            ),
+            "DENIED: this action is not permitted, no request will be sent"
+        );
+        anyhow::ensure!(
+            drain.cordon_intent.target.scope.epoch == epoch,
+            "Target replaced or context changed; reopen the preview"
+        );
+        match &drain.preview {
+            crate::mutation::drain::DrainPreview::Ready(_) => {}
+            crate::mutation::drain::DrainPreview::Loading => {
+                anyhow::bail!(
+                    "Still listing Pods on this Node; wait for the plan before confirming"
+                )
+            }
+            crate::mutation::drain::DrainPreview::Failed(message) => {
+                anyhow::bail!("Cannot confirm: the Pod list failed to load ({message})")
+            }
+        }
+        if drain.requirement() == crate::mutation::ConfirmationRequirement::Strong && !drain.armed {
+            drain.armed = true;
+            let text = crate::mutation::view::drain_report(doc.drain.as_ref().unwrap());
+            doc.replace(text);
+            return Ok(());
+        }
+        let node_scope = drain.cordon_intent.target.scope.clone();
+        let node_resource = drain.cordon_intent.target.resource.clone();
+        let pod_resource = drain.pod_resource.clone();
+        let request_id = drain.cordon_intent.request_id;
+        drain.armed = false;
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        let policy_context = self.mutation_policy_context();
+        let journal = self.mutation_journal();
+        self.tasks.spawn(async move {
+            let report = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                report = crate::kube::drain::drain(&connection, &policy_context, epoch, node_scope, node_resource, pod_resource, request_id, &journal, &cancel) => report,
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload: Payload::DrainCommit { request, report } }) => {},
+            }
+        });
+        Ok(())
+    }
     /// M8.0: a server dry-run only -- never gated behind confirmation, but
     /// still fully gated behind policy: `Deny`/`Unsupported` sends zero
     /// requests, exactly like a real commit would refuse to.
@@ -1384,6 +1564,12 @@ impl Runtime {
     /// the second -- `armed` is UX state only, never authorization itself.
     /// `Deny`/`Unsupported` sends zero requests, ever.
     fn mutation_confirm(&mut self) -> Result<()> {
+        if self
+            .active_document_mut()
+            .is_some_and(|d| d.drain.is_some())
+        {
+            return self.drain_confirm();
+        }
         let connection = self.connection.clone().context("Not connected")?;
         let epoch = self.state.epoch;
         let doc = self
@@ -3083,6 +3269,161 @@ mod tests {
             "denied force_delete confirm must error, never silently no-op"
         );
         assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    fn open_node_drain_preview(rt: &mut Runtime) {
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Node".into();
+        resource.namespaced = false;
+        rt.state.resource = Some(resource);
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Node",
+            "metadata":{"name":"node-1","uid":"uid-1"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        rt.command(":drain")
+            .expect("drain preview opens even when denied");
+    }
+
+    #[tokio::test]
+    async fn command_drain_rejects_unsupported_kind_before_building_an_intent() {
+        let mut rt = runtime();
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"namespace":"test","name":"c","uid":"uid-1"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        assert!(rt.command(":drain").is_err());
+        assert!(!matches!(rt.state.mode, Mode::Document(_)));
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_preview_shows_target_cordon_step_and_pod_plan_semantics_truthfully() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_node_drain_preview(&mut rt);
+        let text = rt
+            .active_document_mut()
+            .expect("doc open")
+            .lines
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("TARGET NODE"));
+        assert!(text.contains("node-1"));
+        assert!(text.contains("CORDON STEP"));
+        assert!(text.contains("PDB-AWARE EVICTION"));
+        assert!(text.contains("NO ROLLBACK"));
+        assert!(text.contains("CANCELLATION"));
+        assert_eq!(rt.mode_name(), "drain");
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_drain_under_readonly_denies_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        open_node_drain_preview(&mut rt);
+        let drain = rt
+            .active_document_mut()
+            .and_then(|d| d.drain.as_ref())
+            .expect("drain set");
+        assert_eq!(
+            drain.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied drain confirm must error, never silently no-op"
+        );
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "a denied drain confirm must send zero requests"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_confirm_refuses_while_the_pod_list_is_still_loading() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_node_drain_preview(&mut rt);
+        assert!(matches!(
+            rt.active_document_mut()
+                .and_then(|d| d.drain.as_ref())
+                .expect("drain set")
+                .preview,
+            crate::mutation::drain::DrainPreview::Loading
+        ));
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "confirming before the plan loads must be refused"
+        );
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "a refused confirm while loading must send zero further requests"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_strong_confirmation_first_press_only_arms_second_press_starts_the_orchestrator()
+    {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_node_drain_preview(&mut rt);
+        // The real preview list is loaded asynchronously against a live
+        // connection; set it directly so this test is deterministic and
+        // does not depend on that unrelated read's real-world timing --
+        // `kube::drain::drain` always re-lists fresh at commit time
+        // regardless of what this preview snapshot says.
+        {
+            let doc = rt.active_document_mut().expect("doc");
+            let drain = doc.drain.as_mut().expect("drain");
+            drain.preview = crate::mutation::drain::DrainPreview::Ready(vec![]);
+        }
+        assert_eq!(
+            rt.active_document_mut()
+                .and_then(|d| d.drain.as_ref())
+                .expect("drain")
+                .requirement(),
+            crate::mutation::ConfirmationRequirement::Strong
+        );
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::MutationConfirm)
+            .expect("first press arms, does not error");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "arming a strong confirmation must send zero requests"
+        );
+        assert!(
+            rt.active_document_mut()
+                .and_then(|d| d.drain.as_ref())
+                .expect("drain")
+                .armed,
+            "first press must arm, not start the orchestrator"
+        );
+        rt.action(Action::MutationConfirm)
+            .expect("second press starts the drain orchestrator");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before + 1,
+            "the second press is the one that spawns exactly one drain orchestrator task"
+        );
         rt.shutdown().await;
     }
 

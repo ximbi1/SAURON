@@ -72,4 +72,17 @@ pub enum Payload {
         outcome: crate::mutation::MutationOutcome,
         verification: Option<crate::mutation::Verification>,
     },
+    /// M8B.5: the truthful, freshly-listed Drain preview finished loading
+    /// (or failed to). Never synthesized -- `Err` means the list itself
+    /// failed, not that the Node has zero Pods.
+    DrainPlanned {
+        request: u64,
+        planned: Result<Vec<crate::mutation::drain::PlannedPod>, String>,
+    },
+    /// M8B.5: the orchestrated cordon-then-evict run finished (fully or
+    /// partially -- `DrainReport` itself carries the per-step detail).
+    DrainCommit {
+        request: u64,
+        report: crate::mutation::drain::DrainReport,
+    },
 }

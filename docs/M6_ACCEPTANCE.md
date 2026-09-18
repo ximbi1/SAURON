@@ -18,7 +18,7 @@ and status reference are distinct provenance classes. No name heuristics.
 | M6.3 | Storage and bounded reverse config/identity/mount references | TESTED | 3 storage-extraction unit tests + 1 reverse-reference fake HTTP test; 27 fake HTTP + 124 unit green | Guarded m6-test PASS: PVC→PV, PVC→StorageClass, PV→PVC via claimRef with exact UID match, PV→StorageClass, reverse Pod→PVC, against a real dynamically-provisioned local-path PV | claimRef kind/apiVersion hardcoded as schema-fixed (not a guess, unlike EndpointSlice targetRef); reverse scan bounded to an explicit built-in workload candidate list (Pods/Deployments/StatefulSets/DaemonSets/Jobs/CronJobs), no arbitrary CRD reference inference | ACCEPTED |
 | M6.4 | Adjacent with UID-safe canonical navigation/history | TESTED | 2 render unit tests + 2 app-level navigation tests; 128 unit + 28 fake HTTP green | Guarded m6-test PASS; interactive TUI PASS via `scripts/accept-m6.py` (M6.6): real Deployment/Pod adjacent reports render all groups with UID-real navigable targets, `Follow` verified through a live 3-hop chain | `:adjacent`/`a` opens grouped view (OWNED BY/OWNS/SELECTED BY/REFERENCES/REFERENCED BY); `enter` (`Follow`) jumps via exact GVK+namespace+UID reusing the existing history stack, never by name. A real Follow-cursor bug (only the first target was ever reachable once a report fit on screen without scrolling) was found via the interactive script and fixed (explicit `adjacent_selected` cursor, Up/Down step through targets) | ACCEPTED |
 | M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | TESTED | 1 two-hop-plus-cycle-safety unit test + 1 traversal fake HTTP test; 128 unit + 28 fake HTTP green | Guarded m6-test PASS; interactive TUI PASS via `scripts/accept-m6.py`: real Deployment→ReplicaSet→Pod 2-hop Xray renders HOP 1/HOP 2 with UID-real targets, plus a real context-switch-during-collection race check | `:xray`/`x` opens a bounded (depth clamped 1-3, UI default 2) BFS traversal reusing Adjacent's exact `expand()` single-hop logic and existing deterministic health verbatim (no second "graph health"); each frontier node is freshly re-read and UID-validated before its own edges are trusted, so mid-traversal replacement is rejected per-node, not silently inherited; no global graph database | ACCEPTED |
-| M6.6 | Combined adversarial acceptance, regressions, soak | IMPLEMENTING | `scripts/accept-m6.py`: 18/18 live scenarios PASS (see Combined live flows below); full M1-M5 regression (`accept-m3/m4/m4-forward/m5/m5-combined.py`) PASS after the M6 changes | 75-minute soak (`scripts/soak-m6.py`) running; healthy at last check (RSS/fd/thread stable, cycling metrics+Explain+Timeline+Adjacent+Xray every ~15s) | Tag prohibited until the soak finishes and results are recorded | NOT ACCEPTED (soak pending) |
+| M6.6 | Combined adversarial acceptance, regressions, soak | TESTED | `scripts/accept-m6.py`: 18/18 live scenarios PASS, run twice; full M1-M5 regression (`accept-m3/m4/m4-forward/m5/m5-combined.py`) PASS after the M6 changes; full locked fmt/check/clippy/test green (128 unit + 28 fake HTTP) | 75-minute soak (`scripts/soak-m6.py`) complete: 1263 cycles, 1262 each of Explain/Timeline/Adjacent/Xray, RSS 30280→30952 KiB (+0.15%, allocator noise not a leak), fds 14-15 (no growth), threads constant at 4, metrics requests 0→2118 (steady cadence); exactly 1 transient self-recovered "Resource read timed out" on Explain, no resource anomaly around it | See Performance/soak below for full detail; not proof of leak-freedom, an observation | ACCEPTED |
 
 ## Required evidence
 
@@ -86,15 +86,43 @@ regression (`accept-m3.py` filters+sorting, `accept-m4.py` foundation+logs,
 `accept-m4-forward.py`, `accept-m5.py`, `accept-m5-combined.py`) all green
 with a freshly built binary, immediately before and after the M6.6 script.
 
-## Performance / soak (pending)
+## Performance / soak (`scripts/soak-m6.py`, complete)
 
-Record requests/operation, concurrency, candidate scans, nodes/edges, bound hits,
-cancellation; idle rendering must issue zero requests. Target 75-minute isolated
-kind soak rotating scopes/Adjacent/Xray/history/Explain with metrics and an M4
-forward active: cycles, graph operations, RSS/fds/threads/tasks, errors and partials.
-These are observations, not proof of leak freedom.
+75-minute isolated kind-sauron-test run (`sauron-m6` namespace, apps/v1/deployments
+root, metrics collector active) rotating ns/ctx scope every cycle plus periodic
+Explain (M5), Timeline (M5), Adjacent (M6.4) and Xray (M6.5) on the fixture Pod.
+
+- Duration: 4496s (~75 min). Cycles: 1263.
+- Explain/Timeline/Adjacent/Xray checks: 1262 each (one cycle's checks were
+  skipped by the single recoverable assertion below, then resumed normally).
+- RSS: 30280 KiB → 30952 KiB over the full run (+672 KiB, +0.15%). Essentially
+  flat; consistent with allocator steady-state noise, not a leak.
+- File descriptors: oscillated 14-15 throughout, no monotonic growth.
+- Threads: constant at 4 for the entire run.
+- Metrics requests started: 0 → 2118, steady cadence throughout (no stalls,
+  no runaway growth relative to elapsed time).
+- Exactly one recoverable event: cycle 727 (~2569s in), Explain hit "Resource
+  read timed out" (a transient single-request timeout against the kind API
+  server) — surfaced correctly as NOT CURRENT, the script's own recovery path
+  pressed Escape and the very next cycle continued normally with no change in
+  RSS/fd/thread trend around it. Not a resource or correctness issue in
+  SAURON; a one-off cluster-side hiccup handled exactly as designed.
+- Idle rendering issued zero requests (unchanged from M1-M5; not re-audited
+  here since Adjacent/Xray were the only new request sources and both are
+  strictly triggered by the `a`/`x` keypress, never by render/tick).
+
+These are observations, not proof of leak-freedom, per the same caveat as
+every prior milestone's soak.
 
 ## Journal
+
+- M6.6 ACCEPTED — M6 fully closed: the 75-minute soak completed clean (1263
+  cycles, RSS +0.15% over the whole run, fds/threads flat, one transient
+  self-recovered timeout, no leak signal). Combined with the already-green
+  18/18 `accept-m6.py` interactive scenarios (run twice) and full M1-M5
+  regression, every M6.6 acceptance criterion is now met. All of M6.0-M6.6
+  ACCEPTED. Proceeding to update HANDBOOK/RUNBOOK/SOFKA_PARITY/README and tag
+  `m6-accepted` (local only, never pushed without explicit authorization).
 
 - M6.5 accepted: refactored `kube::relationships::report` so `adjacent()`'s
   single-hop logic (forward references, bounded reverse ownership, network

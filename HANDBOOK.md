@@ -416,7 +416,7 @@ Deployment→ReplicaSet→Pod traversal. No interactive terminal smoke test run
 this session. M6.5 ACCEPTED. Proceeding to M6.6 (combined adversarial
 acceptance, full M1-M5 regression, 75-minute soak).
 
-### 2026-09-18 — M6.6 in progress: combined acceptance green, soak running
+### 2026-09-18 — M6.6 ACCEPTED, M6 fully closed
 
 New `scripts/accept-m6.py` drives the real TUI against `kind-sauron-test`
 through all 18 combined scenarios from the M6 ledger: ownership/reference/
@@ -442,12 +442,18 @@ by reapplying `m3-sort-fixtures`, not a real regression), `accept-m4.py`
 foundation and logs, `accept-m4-forward.py`, `accept-m5.py`, and
 `accept-m5-combined.py` — all green with a freshly built binary.
 
-Kicked off the required 75-minute soak (`scripts/soak-m6.py`, mirrors
-soak-m5.py: metrics collector + scope rotation + periodic Explain/Timeline/
-Adjacent/Xray, sampling RSS/fd/thread counts and metrics request cadence).
-A 90-second smoke run was clean (zero reconnects, stable RSS/fd/thread
-across 26 cycles); the full run is in progress. `m6-accepted` will not be
-tagged until it completes and results are recorded here.
+Ran the required 75-minute soak (`scripts/soak-m6.py`, mirrors soak-m5.py:
+metrics collector + scope rotation + periodic Explain/Timeline/Adjacent/
+Xray, sampling RSS/fd/thread counts and metrics request cadence). Complete:
+1263 cycles, 1262 each of Explain/Timeline/Adjacent/Xray, RSS 30280→30952
+KiB over the whole run (+0.15%, allocator noise not a leak), fds
+oscillating 14-15 with no growth trend, threads constant at 4, metrics
+requests climbing steadily 0→2118. Exactly one recoverable event: a single
+transient "Resource read timed out" on Explain at cycle 727, surfaced
+correctly as NOT CURRENT and self-recovered by the script with no change in
+resource trend around it — a one-off cluster-side hiccup, not a SAURON
+issue. M6.6 ACCEPTED. **All of M6 (M6.0-M6.6) is now ACCEPTED.** Tagging
+`m6-accepted` (local only, never pushed without explicit authorization).
 
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 

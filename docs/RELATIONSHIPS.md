@@ -1,7 +1,8 @@
-# Relationship contracts — M6 in progress
+# Relationship contracts — M6 ACCEPTED
 
-Relationships describe topology, not causes. Initial model is metadata only,
-not a second object store. No shipped Adjacent/Xray UI yet.
+Relationships describe topology, not causes. The model is metadata only,
+not a second object store. `:adjacent`/`a` and `:xray`/`x` are shipped;
+see [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md) for full evidence.
 
 Identity uses discovered `Resource::id()` (canonical API version/plural), runtime
 epoch, namespace/name and nonempty UID from `Object`. A different UID is a distinct
@@ -32,7 +33,7 @@ Namespaced owners must share the dependent's namespace; cluster-scoped dependent
 cannot have namespaced owners. Secret resolution will request PartialObjectMetadata
 only and must not fall back to fetching Secret bodies when negotiation fails.
 
-## M6.1 implementation in progress
+## M6.1: owner/Pod/workload references (ACCEPTED)
 
 `graph::references` shares one PodSpec extractor across Pods, apps/v1 Deployment,
 StatefulSet, DaemonSet, ReplicaSet, batch/v1 Job and CronJob. It preserves JSON
@@ -46,8 +47,9 @@ Unknown CRD spec fields are never interpreted; generic ownerReferences still app
 validates namespace rules and expected owner UID, and offers cancellable timed reads.
 Core Secret reads use kube's `get_metadata` with no full-object fallback. Errors retain
 Forbidden/NotFound/Unsupported/TargetReplaced/TimedOut rather than empty relationships.
-These helpers are not yet wired into UI; reverse scans and operation-wide budgets
-are now available in `kube::relationships::report`, UI remains pending.
+These helpers are wired into the UI via `:adjacent`/`a` and `:xray`/`x`
+(M6.4-M6.5); reverse scans and operation-wide budgets live in
+`kube::relationships::report`.
 
 Aggregate report budgets: sequential reads (concurrency 1), at most 49 logical
 read attempts including reserved final root validation, 30-second overall deadline;

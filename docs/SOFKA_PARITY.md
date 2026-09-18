@@ -104,12 +104,12 @@ above is unchanged.
 | Argo | Tracking metadata, multiple installations, remote destinations | Unambiguous context/ownership resolution | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Helm | Native release/revision/history/values/manifest/NOTES | Bounded Secret/ConfigMap decoder | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Helm | Rollback/uninstall (Sofka uses helm executable) | Native feasibility study, no fake patch-only rollback | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | Owners/children/Pod node/config/Secret/PVC/SA | Verified UID edges / explicit refs | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | PVC/PV/StorageClass/volume attributes class/reverse mounts | Storage relationship rules | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | Service selector/Endpoints/Ingress backends/TLS | Label-selection edges marked as inference | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | Configurable CRD children/refs/kind and namespace paths | Validated declarative graph rules | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
+| Relationships | Owners/children/Pod node/config/Secret/PVC/SA | Verified UID edges / explicit refs | P1 | TESTED | M6.0-M6.1/M6.4 unit+fake+live+interactive acceptance | Delivered (`:adjacent`/`a`) |
+| Relationships | PVC/PV/StorageClass/volume attributes class/reverse mounts | Storage relationship rules | P1 | TESTED | M6.3 unit+fake+live+interactive acceptance | Delivered; no VolumeAttributesClass (not requested live evidence) |
+| Relationships | Service selector/Endpoints/Ingress backends/TLS | Label-selection edges marked as inference | P1 | TESTED | M6.2 unit+fake+live+interactive acceptance | Delivered, selector matches always distinct from ownership |
+| Relationships | Configurable CRD children/refs/kind and namespace paths | Validated declarative graph rules | P2 | RESEARCHED | Pending: unit + scoped acceptance | Explicitly out of M6 core scope (optional P2, generic CRD ownerReferences already work) |
 | Relationships | On-demand generic CRD children search with budgets | Paged bounded owner-UID discovery | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | Xray ownership hierarchy | Graph traversal view | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Relationships | Xray ownership hierarchy | Graph traversal view | P1 | TESTED | M6.5 unit+fake+live+interactive acceptance | Delivered (`:xray`/`x`, bounded depth 1-3) |
 | Overview | Pulse refreshed health tiles | Bounded asynchronous overview | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Safety | Readonly global/context/cluster and flags | Layered config + hard CLI override at operation boundary | P0 | TESTED (subset) | M4 exec/attach/forward denial; reload regression + live | Full M7 guardrail/mutation service not implemented |
 | Safety | Guardrails deny/confirmation/type context/type name/bulk limits | Combine all restrictions deterministically | P0 | DESIGNED | Pending: deny/conflict/outcome regression | Not yet delivered |
@@ -145,11 +145,16 @@ above is unchanged.
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Current gap review — M5 accepted, 2026-09-17
+## Current gap review — M6 accepted, 2026-09-18
 
-M6 implementation started 2026-09-18: scoped graph identity/provenance/bounds
-foundation only. Adjacent, Xray and relationship transport are not yet implemented
-or accepted. Per-slice evidence and continuation: [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
+M6 (M6.0-M6.6) fully ACCEPTED 2026-09-18: bounded relationship graph
+(ownerReferences, explicit typed references, Service/Pod selectors,
+EndpointSlice/Ingress status references, PVC/PV/StorageClass storage
+references, bounded reverse Config/Secret/ServiceAccount/PVC scans), the
+`:adjacent` grouped-relationship view, and the `:xray` bounded (depth 1-3)
+cycle-safe traversal are all implemented, unit/fake/live-tested, and
+interactively verified end to end via `scripts/accept-m6.py` plus a
+75-minute soak. Per-slice evidence: [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
 
 M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
 curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config
@@ -181,7 +186,7 @@ docs/HEALTH.md, docs/EXPLAIN.md, docs/TIMELINE.md for the per-slice contracts.
 Remaining operational gaps include Service/workload log resolution, Service forwards,
 saved/reconnecting/autostart forwards, IPv6/public binding and fully cancellation-safe
 terminal stdin. The bounded post-shell/attach input loss remains documented in
-[EXEC.md](EXEC.md); M4 acceptance does not claim it is fully fixed. The full
-relationship graph, Xray/blast-radius, and the mutation/guardrail policy remain
-M6/M7 work; M5 explicitly stayed read-only and did not build toward the graph
-beyond Explain's own bounded, verified-ownership two-hop Pod correlation.
+[EXEC.md](EXEC.md); M4 acceptance does not claim it is fully fixed. The bounded relationship graph, `:adjacent` and `:xray` are now delivered as
+of M6 (see above); blast-radius prediction and the mutation/guardrail policy
+remain M7+ work. M5 explicitly stayed read-only and did not build toward the
+graph beyond Explain's own bounded, verified-ownership two-hop Pod correlation.

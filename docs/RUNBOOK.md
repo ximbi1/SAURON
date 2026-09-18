@@ -69,13 +69,16 @@ its edges are trusted. Live-verified with a real 2-hop
 Deployment→ReplicaSet→Pod traversal. Continuing to M6.6 (combined
 adversarial acceptance, full M1-M5 regression, soak) -- the final M6 slice.
 
-M6.6 in progress 2026-09-18: `scripts/accept-m6.py` (18 live scenarios) all
-PASS, run twice, against `kind-sauron-test`. Found and fixed a real Follow
-bug along the way (only the first Adjacent/Xray target was ever reachable
-once a report fit on screen without scrolling); now an explicit
-`adjacent_selected` cursor. Full M1-M5 regression re-run and green
+M6.6 ACCEPTED 2026-09-18 -- M6 fully closed: `scripts/accept-m6.py` (18 live
+scenarios) all PASS, run twice, against `kind-sauron-test`. Found and fixed
+a real Follow bug along the way (only the first Adjacent/Xray target was
+ever reachable once a report fit on screen without scrolling); now an
+explicit `adjacent_selected` cursor. Full M1-M5 regression re-run and green
 (`accept-m3/m4/m4-forward/m5/m5-combined.py`). 75-minute soak
-(`scripts/soak-m6.py`) running now; `m6-accepted` waits for it to finish.
+(`scripts/soak-m6.py`) complete: 1263 cycles, RSS +0.15% over the whole
+run, fds/threads flat, one transient self-recovered timeout. **All of M6
+(M6.0-M6.6) ACCEPTED.** Local tag `m6-accepted`, never pushed without
+explicit authorization.
 
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial

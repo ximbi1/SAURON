@@ -416,6 +416,39 @@ Deployment→ReplicaSet→Pod traversal. No interactive terminal smoke test run
 this session. M6.5 ACCEPTED. Proceeding to M6.6 (combined adversarial
 acceptance, full M1-M5 regression, 75-minute soak).
 
+### 2026-09-18 — M6.6 in progress: combined acceptance green, soak running
+
+New `scripts/accept-m6.py` drives the real TUI against `kind-sauron-test`
+through all 18 combined scenarios from the M6 ledger: ownership/reference/
+storage chains through Adjacent (Deployment→ReplicaSet→Pod,
+Pod↔ConfigMap/Secret/ServiceAccount/PVC↔PV↔StorageClass reverse mounts,
+Service↔Pod selector-vs-ownership, Service→EndpointSlice real targetRef,
+Ingress→Service/TLS-Secret), same-name/new-UID replacement rejection,
+context-switch-during-collection race safety, RBAC-restricted PARTIAL
+evidence with no Secret leak, 32x9, M4 forward and M5 Explain regression
+touchpoints, and quit-while-collecting cleanup. All 18 pass, run twice.
+Building the script surfaced a real bug: `Follow` could only ever reach the
+*first* Adjacent/Xray target once a report fit on screen without scrolling
+(it picked "the nearest target at/after the scroll position," and scroll
+never moves when nothing needs to scroll). Fixed with an explicit
+`Document.adjacent_selected` cursor: Up/Down step through targets directly
+whenever a document has any, with a reverse-video highlight on the current
+one; `Follow` uses that index unambiguously. Added 2 app-level tests. Full
+locked fmt/check/clippy/test green: 128 unit + 28 fake HTTP.
+
+Re-ran full M1-M5 regression after these changes: `accept-m3.py` filters
+and sorting (one unrelated stale-fixture hiccup from a prior session, fixed
+by reapplying `m3-sort-fixtures`, not a real regression), `accept-m4.py`
+foundation and logs, `accept-m4-forward.py`, `accept-m5.py`, and
+`accept-m5-combined.py` — all green with a freshly built binary.
+
+Kicked off the required 75-minute soak (`scripts/soak-m6.py`, mirrors
+soak-m5.py: metrics collector + scope rotation + periodic Explain/Timeline/
+Adjacent/Xray, sampling RSS/fd/thread counts and metrics request cadence).
+A 90-second smoke run was clean (zero reconnects, stable RSS/fd/thread
+across 26 cycles); the full run is in progress. `m6-accepted` will not be
+tagged until it completes and results are recorded here.
+
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 
 New `scripts/accept-m5-combined.py` ran all 12 combined sequences from the

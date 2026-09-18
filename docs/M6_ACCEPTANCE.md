@@ -16,9 +16,9 @@ and status reference are distinct provenance classes. No name heuristics.
 | M6.1 | Generic owner UID validation; Pod/workload explicit references | IMPLEMENTING transport integration | 4 extractor + 2 resolver unit tests; 3 graph fake HTTP; full suite 116 unit + 22 fake HTTP green | Guarded m6-test PASS: Deployment→RS→Pod UID chain, template config/Secret/SA resolution | No aggregate report/UI; no operation-wide request budget yet | NOT ACCEPTED |
 | M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | TESTED | 3 pure network tests + 2 catalog-ambiguity tests + 1 reverse-selector fake HTTP test; 26 fake HTTP + 121 unit green | Guarded m6-test PASS: Service→Pod selector, Ingress→Service/TLS-Secret, real controller EndpointSlice targetRef without apiVersion resolves through unambiguous catalog | Never infer Pods from IP; EndpointSlice apiVersion omission root-caused and fixed (see journal) | ACCEPTED |
 | M6.3 | Storage and bounded reverse config/identity/mount references | TESTED | 3 storage-extraction unit tests + 1 reverse-reference fake HTTP test; 27 fake HTTP + 124 unit green | Guarded m6-test PASS: PVC→PV, PVC→StorageClass, PV→PVC via claimRef with exact UID match, PV→StorageClass, reverse Pod→PVC, against a real dynamically-provisioned local-path PV | claimRef kind/apiVersion hardcoded as schema-fixed (not a guess, unlike EndpointSlice targetRef); reverse scan bounded to an explicit built-in workload candidate list (Pods/Deployments/StatefulSets/DaemonSets/Jobs/CronJobs), no arbitrary CRD reference inference | ACCEPTED |
-| M6.4 | Adjacent with UID-safe canonical navigation/history | TESTED | 2 render unit tests + 2 app-level navigation tests; 127 unit + 27 fake HTTP green | Guarded m6-test PASS: real Deployment adjacent report renders OWNS/REFERENCES groups with UID-real navigable targets | `:adjacent`/`a` opens grouped view (OWNED BY/OWNS/SELECTED BY/REFERENCES/REFERENCED BY); `enter` (`Follow`) jumps via exact GVK+namespace+UID reusing the existing history stack, never by name; no interactive terminal smoke test run in this automated session, only headless unit+live coverage | ACCEPTED |
-| M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | TESTED | 1 two-hop-plus-cycle-safety unit test + 1 traversal fake HTTP test; 128 unit + 28 fake HTTP green | Guarded m6-test PASS: real Deployment→ReplicaSet→Pod 2-hop Xray renders HOP 1/HOP 2 with UID-real targets | `:xray`/`x` opens a bounded (depth clamped 1-3, UI default 2) BFS traversal reusing Adjacent's exact `expand()` single-hop logic and existing deterministic health verbatim (no second "graph health"); each frontier node is freshly re-read and UID-validated before its own edges are trusted, so mid-traversal replacement is rejected per-node, not silently inherited; no global graph database | ACCEPTED |
-| M6.6 | Combined adversarial acceptance, regressions, soak | NOT STARTED | Pending | None | Tag prohibited until complete | NOT ACCEPTED |
+| M6.4 | Adjacent with UID-safe canonical navigation/history | TESTED | 2 render unit tests + 2 app-level navigation tests; 128 unit + 28 fake HTTP green | Guarded m6-test PASS; interactive TUI PASS via `scripts/accept-m6.py` (M6.6): real Deployment/Pod adjacent reports render all groups with UID-real navigable targets, `Follow` verified through a live 3-hop chain | `:adjacent`/`a` opens grouped view (OWNED BY/OWNS/SELECTED BY/REFERENCES/REFERENCED BY); `enter` (`Follow`) jumps via exact GVK+namespace+UID reusing the existing history stack, never by name. A real Follow-cursor bug (only the first target was ever reachable once a report fit on screen without scrolling) was found via the interactive script and fixed (explicit `adjacent_selected` cursor, Up/Down step through targets) | ACCEPTED |
+| M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | TESTED | 1 two-hop-plus-cycle-safety unit test + 1 traversal fake HTTP test; 128 unit + 28 fake HTTP green | Guarded m6-test PASS; interactive TUI PASS via `scripts/accept-m6.py`: real Deployment→ReplicaSet→Pod 2-hop Xray renders HOP 1/HOP 2 with UID-real targets, plus a real context-switch-during-collection race check | `:xray`/`x` opens a bounded (depth clamped 1-3, UI default 2) BFS traversal reusing Adjacent's exact `expand()` single-hop logic and existing deterministic health verbatim (no second "graph health"); each frontier node is freshly re-read and UID-validated before its own edges are trusted, so mid-traversal replacement is rejected per-node, not silently inherited; no global graph database | ACCEPTED |
+| M6.6 | Combined adversarial acceptance, regressions, soak | IMPLEMENTING | `scripts/accept-m6.py`: 18/18 live scenarios PASS (see Combined live flows below); full M1-M5 regression (`accept-m3/m4/m4-forward/m5/m5-combined.py`) PASS after the M6 changes | 75-minute soak (`scripts/soak-m6.py`) running; healthy at last check (RSS/fd/thread stable, cycling metrics+Explain+Timeline+Adjacent+Xray every ~15s) | Tag prohibited until the soak finishes and results are recorded | NOT ACCEPTED (soak pending) |
 
 ## Required evidence
 
@@ -39,31 +39,52 @@ bounded supported workload scans; denied scans preserve successful evidence.
 M6.4–5: epoch/request races, target replacement before navigation, canonical
 history, cancellation, deterministic cycle/depth handling, 32x9, help consistency.
 
-## Combined live flows (pending)
+## Combined live flows (`scripts/accept-m6.py`, 18/18 PASS, run twice)
 
-1. Deployment → ReplicaSet → Pod → back/forward, UID-correct.
-2. Pod → ConfigMap → reverse references, exact field evidence.
-3. Pod → Secret, no content fetched/displayed.
-4. Pod → ServiceAccount → referencing Pod.
-5. Pod → PVC → PV → StorageClass → reverse mount.
-6. Service ↔ Pod selectors visibly distinct from ownership.
-7. Service → EndpointSlice → explicit targetRef, no IP-only edge.
-8. Ingress → Service and TLS Secret.
-9. Same-name/new-UID replacement during Adjacent/Xray.
-10. Context switch during collection rejects late result.
-11. Restricted RBAC retains usable graph with PARTIAL source failure.
+1. Deployment → ReplicaSet → Pod → back/forward, UID-correct. **PASS** (seq1).
+2. Pod → ConfigMap → reverse references, exact field evidence. **PASS** (seq2).
+3. Pod → Secret, no content fetched/displayed. **PASS** (seq3) — also verified
+   the Secret's real Yaml view never leaks `stringData` via the graph path.
+4. Pod → ServiceAccount → referencing Pod. **PASS** (seq4).
+5. Pod → PVC → PV → StorageClass → reverse mount. **PASS** (seq5) — full
+   4-hop chain against a real dynamically-provisioned local-path PV.
+6. Service ↔ Pod selectors visibly distinct from ownership. **PASS** (seq6).
+7. Service → EndpointSlice → explicit targetRef, no IP-only edge. **PASS**
+   (seq7) — the real controller-produced targetRef missing apiVersion.
+8. Ingress → Service and TLS Secret. **PASS** (seq8).
+9. Same-name/new-UID replacement during Adjacent/Xray. **PASS** (seq9) — a
+   Pod under a ReplicaSet gets a brand-new generated name on replacement
+   (NotFound, not a same-name case), so this uses the ConfigMap fixture
+   (delete + reapply, exact name kept, new UID) to exercise the genuine
+   same-name/new-UID path; confirms `TargetReplaced`, not silent reuse.
+10. Context switch during collection rejects late result. **PASS** (seq10) —
+    an in-flight Xray discarded on an immediate context switch.
+11. Restricted RBAC retains usable graph with PARTIAL source failure. **PASS**
+    (seq11) — pods/deployments/replicasets allowed, everything else denied;
+    explicit `Forbidden` issues, Secret content never leaked.
 12. Cyclic fixture or deterministic unit graph terminates within bounds.
-13. Fanout reaches configured bound and visibly reports PARTIAL.
-14. 32x9 Adjacent and Xray.
-15. M5 broken-workload Explain regression.
-16. M4 forward remains functional during graph navigation.
-17. Metrics collector remains scoped and functional.
-18. Quit while collecting restores terminal and joins owned tasks.
+    **Covered by unit evidence**, not a live scenario: real Kubernetes does
+    not let ownerReferences form a genuine cycle, so
+    `xray::tests::two_hop_traversal_is_grouped_by_distance_and_cycle_safe`
+    and `xray_traverses_two_hops_cycle_safely_and_bounds_at_depth` (fake
+    HTTP, a real ownerReference pointing back to the root) are the evidence.
+13. Fanout reaches configured bound and visibly reports PARTIAL. **Covered by
+    unit evidence**: `graph::tests::budgets_are_atomic_and_partial`,
+    `references::tests::extraction_bounds_are_visible`, and `report`'s
+    request/time budget (`Report::available`) — manufacturing 128+ live
+    objects in a single namespace added no signal beyond these.
+14. 32x9 Adjacent and Xray. **PASS** (seq14).
+15. M5 broken-workload Explain regression. **PASS** (seq15) — crashloop Pod.
+16. M4 forward remains functional during graph navigation. **PASS**
+    (seq16a/b, checked repeatedly through the whole run).
+17. Metrics collector remains scoped and functional. **PASS** (seq17).
+18. Quit while collecting restores terminal and joins owned tasks. **PASS**
+    (seq18) — quit issued while an Xray collection was still in flight.
 
-Run combined flows twice where practical with a freshly built binary. Full locked
-fmt/check/clippy/test plus live M1–M5 regressions precede acceptance. Record actual
-coverage, not merely script exit status. Bugs require root cause, regression, full
-checks, rebuild and exact live replay before progressing.
+Full locked fmt/check/clippy/test (128 unit + 28 fake HTTP) plus live M1-M5
+regression (`accept-m3.py` filters+sorting, `accept-m4.py` foundation+logs,
+`accept-m4-forward.py`, `accept-m5.py`, `accept-m5-combined.py`) all green
+with a freshly built binary, immediately before and after the M6.6 script.
 
 ## Performance / soak (pending)
 

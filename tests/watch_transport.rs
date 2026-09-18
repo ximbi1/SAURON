@@ -652,6 +652,378 @@ async fn graph_response_allocation_is_bounded_before_json_decode() {
         Unknown::Partial
     );
 }
+fn mutation_intent(
+    uid: &str,
+    effect: sauron::mutation::MutationEffect,
+) -> sauron::mutation::MutationIntent {
+    use sauron::{app::session::Scope, mutation::MutationTarget};
+    sauron::mutation::MutationIntent {
+        request_id: 1,
+        target: MutationTarget {
+            scope: Scope {
+                epoch: 1,
+                request: 1,
+                context: "fake".into(),
+                cluster: "fake".into(),
+                resource: "v1/configmaps".into(),
+                namespace: "sauron-m7".into(),
+                name: "m7-target".into(),
+                uid: uid.into(),
+            },
+            resource: {
+                let mut r = resource();
+                r.api.kind = "ConfigMap".into();
+                r.api.plural = "configmaps".into();
+                r
+            },
+            expected_resource_version: None,
+        },
+        effect,
+        risk: sauron::mutation::MutationRisk::Routine,
+        summary: "metadata.annotations[\"m7-proof\"]".into(),
+        payload_sha256: Some("hash".into()),
+        source_action: "test".into(),
+    }
+}
+fn verified_policy_context() -> sauron::mutation::policy::PolicyContext {
+    sauron::mutation::policy::PolicyContext {
+        readonly: false,
+        readonly_forced: false,
+        cluster_verified_for_mutation: true,
+        ..Default::default()
+    }
+}
+fn test_journal() -> (sauron::mutation::journal::Journal, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "sauron-mutation-test-{}-{}",
+        std::process::id(),
+        std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let path = dir.join("journal.jsonl");
+    (sauron::mutation::journal::Journal::new(&path), dir)
+}
+
+#[tokio::test]
+async fn mutation_policy_denial_sends_zero_http_writes() {
+    use sauron::kube::mutation::commit;
+    let server = Server::new(|_| panic!("policy denial must never reach the transport")).await;
+    let connection = connection(server.client());
+    let mut ctx = verified_policy_context();
+    ctx.readonly = true;
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let outcome = commit(
+        &connection,
+        &ctx,
+        1,
+        &intent,
+        None,
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Denied);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_missing_confirmation_sends_zero_http_writes() {
+    use sauron::kube::mutation::commit;
+    let server =
+        Server::new(|_| panic!("missing confirmation must never reach the transport")).await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        None,
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Denied);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_uid_mismatch_before_commit_sends_zero_mutation_request() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server = Server::with_request(|request| {
+        assert!(
+            request.starts_with("GET"),
+            "a UID mismatch on the revalidation GET must prevent any write request: {request}"
+        );
+        (
+            200,
+            json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"replaced-uid","resourceVersion":"9"}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::TargetReplaced);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_precommit_journal_failure_sends_zero_http_writes() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server =
+        Server::new(|_| panic!("a pre-commit journal failure must fail closed before any write"))
+            .await;
+    let connection = connection(server.client());
+    // A path that cannot be created (parent is a regular file, not a
+    // directory) reliably fails every append() without touching the network.
+    let blocked =
+        std::env::temp_dir().join(format!("sauron-mutation-blocked-{}", std::process::id()));
+    std::fs::write(&blocked, "not a directory").unwrap();
+    let journal = sauron::mutation::journal::Journal::new(blocked.join("journal.jsonl"));
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Denied);
+    std::fs::remove_file(&blocked).ok();
+}
+
+#[tokio::test]
+async fn mutation_commit_revalidates_then_patches_and_journals() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(!request.contains("dryRun"), "a real commit must not carry dryRun: {request}");
+            (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    let records = journal.recent(10);
+    assert!(records.iter().any(
+        |r| r.phase == sauron::mutation::journal::Phase::CommitResult
+            && r.outcome.as_deref() == Some("Committed")
+    ));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_dry_run_preflight_never_commits_and_is_journaled_distinctly() {
+    use sauron::kube::mutation::preflight;
+    let server = Server::with_request(|request| {
+        assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+        assert!(request.contains("dryRun=All"), "preflight must request a server dry-run: {request}");
+        (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string())
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let outcome = preflight(
+        &connection,
+        &intent,
+        Some(&json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    let records = journal.recent(10);
+    assert!(
+        records
+            .iter()
+            .any(|r| r.phase == sauron::mutation::journal::Phase::PreflightResult)
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|r| r.phase == sauron::mutation::journal::Phase::CommitResult),
+        "a dry-run preflight must never be journaled as a commit"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_conflict_and_forbidden_are_explicit_never_forced() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    for (status, expected) in [
+        (409, sauron::mutation::MutationOutcome::Conflict),
+        (403, sauron::mutation::MutationOutcome::Forbidden),
+    ] {
+        let server = Server::with_request(move |request| {
+            if request.starts_with("GET") {
+                (
+                    200,
+                    json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+                )
+            } else {
+                (status, json!({"kind":"Status","apiVersion":"v1","status":"Failure","code":status}).to_string())
+            }
+        })
+        .await;
+        let connection = connection(server.client());
+        let (journal, dir) = test_journal();
+        let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+        let confirmation = Confirmation {
+            request_id: intent.request_id,
+            scope: intent.target.scope.clone(),
+            effect: intent.effect,
+            payload_sha256: intent.payload_sha256.clone(),
+            requirement: sauron::mutation::ConfirmationRequirement::Standard,
+        };
+        let outcome = commit(
+            &connection,
+            &verified_policy_context(),
+            1,
+            &intent,
+            Some(&confirmation),
+            Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+            &journal,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome, expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[tokio::test]
+async fn mutation_epoch_change_before_commit_is_rejected_as_replaced() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server = Server::new(|_| panic!("an epoch mismatch must never reach the transport")).await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        99, // current epoch differs from intent.target.scope.epoch == 1
+        &intent,
+        Some(&confirmation),
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::TargetReplaced);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_cancellation_before_commit_sends_zero_writes() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server = Server::with_request(|request| {
+        assert!(request.starts_with("GET"), "cancellation before revalidation must never patch: {request}");
+        (
+            200,
+            json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        Some(json!({"metadata":{"annotations":{"m7-proof":"nonce"}}})),
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Cancelled);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn resource() -> Resource {
     Resource {
         api: ApiResource {

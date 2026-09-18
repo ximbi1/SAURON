@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 /// kube's request builder preserves native metadata negotiation, while streaming
 /// the body ourselves enforces a byte cap before JSON allocation. API error bodies
 /// are never read or included in reports.
-async fn read_bounded(
+pub(crate) async fn read_bounded(
     connection: &Connection,
     url: &str,
     name: Option<&str>,

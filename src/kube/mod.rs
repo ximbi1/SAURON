@@ -4,6 +4,7 @@ pub mod exec;
 pub mod forward;
 pub mod logs;
 pub mod metrics;
+pub mod mutation;
 pub mod printer;
 pub mod relationships;
 pub mod watch;

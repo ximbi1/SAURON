@@ -27,9 +27,9 @@ kubeconfig. No production mutation, ever, including dry-run.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | M7.0 | Mutation identity/effect/risk model | `src/mutation.rs`: `MutationTarget` reuses `session::Scope` (context/cluster/resource/namespace/name/UID/epoch, the same incarnation-safe convention as logs/exec/forward) + `Resource`; `Confirmation::authorizes` binds request_id/scope/effect/payload hash exactly | 1 unit test (7 assertions: UID replacement, namespace, context, effect, payload, request, resource all invalidate) | n/a (pure model) | n/a yet | none | IMPLEMENTING |
 | M7.1 | Central policy engine, hard guardrails | `src/mutation/policy.rs`: pure `evaluate(context, intent)`, fixed deterministic gate order, accumulates every applicable reason (never stops at first), UNKNOWN (unverified cluster) always denies | 12 unit tests: readonly/override, unverified cluster, missing UID, protected namespace, cluster-critical kind, privilege-sensitive kind, destructive delete, routine confirmation, Create-allowed, deterministic repeat | n/a (pure, no transport) | n/a yet | none | IMPLEMENTING |
-| M7.2 | Preview / server dry-run / confirmation contract | | | | | | NOT ACCEPTED |
-| M7.3 | Single mutation execution gateway | | | | | | NOT ACCEPTED |
-| M7.4 | Durable redacted mutation journal | | | | | | NOT ACCEPTED |
+| M7.2 | Preview / server dry-run / confirmation contract | `MutationPreview` (local, no network) is separate from `kube::mutation::preflight` (server `dryRun=All`, journaled `PreflightStarted`/`PreflightResult`) and from `commit` (real write); `Confirmation` from M7.0 binds the exact intent | covered by M7.0's confirmation test + M7.3's dry-run test | 1 (dry-run never commits, journaled distinctly) | n/a yet | none | IMPLEMENTING |
+| M7.3 | Single mutation execution gateway | `kube::mutation::commit`: re-evaluates policy at commit time, requires an authorizing confirmation, checks epoch, revalidates UID/resourceVersion via a fresh metadata GET (TOCTOU), journals before sending, issues exactly one bounded/cancellable PATCH or DELETE, classifies the result (`Committed`/`Forbidden`/`NotFound`/`Conflict`/`TargetReplaced`/`Cancelled`/`OutcomeUnknown`/`TransportFailure`), journals the result | n/a (integration-level) | 9 tests: policy-denied zero-write, missing-confirmation zero-write, UID-mismatch zero-write, precommit-journal-failure zero-write, real revalidate+patch+journal, dry-run never commits, 409/403 explicit, epoch-change rejected, cancellation-before-commit zero-write | n/a yet | Create effect is an explicit `Unsupported` bounded limitation (needs a full object body + different identity semantics; M8 scope, not silently half-implemented) | IMPLEMENTING |
+| M7.4 | Durable redacted mutation journal | `src/mutation/journal.rs`: JSONL, schema-versioned, bounded field sizes (2048B, 32 reasons), append-only; `Record` has no field capable of holding raw payload/Secret content by construction | 5 unit tests: round-trip order, malformed-line-skipped, missing-file-is-empty, oversized-field-bounded, no-secret-shaped-field | covered via M7.3's journal assertions | n/a yet | none | IMPLEMENTING |
 | M7.5 | TUI policy/journal surfaces | | | | | | NOT ACCEPTED |
 | M7.6 | Combined adversarial acceptance, regressions, soak | | | | | | NOT ACCEPTED |
 
@@ -122,6 +122,40 @@ unexpected vs. transient-recovered errors, bound hits. Observations, not
 proof of leak-freedom.
 
 ## Journal
+
+- 2026-09-18: M7.2/M7.3/M7.4 implementing. Added `src/mutation/journal.rs`
+  (JSONL, schema-versioned, bounded, malformed-line-tolerant) and
+  `src/kube/mutation.rs` (the single executor: `preflight`/`commit`).
+  `commit` re-evaluates policy at commit time rather than trusting an
+  earlier preview decision, requires a confirmation that exactly authorizes
+  the intent when policy demands one, checks the caller's epoch, then
+  revalidates the target's live UID/resourceVersion via a fresh
+  metadata-only GET immediately before mutating (reusing
+  `kube::relationships::read_bounded`, now `pub(crate)`). Journal writes
+  happen before the real request (fail-closed on write failure) and after
+  it (a post-commit journal failure is reported as
+  `CommittedButJournalIncomplete`, never silently lost). Transport
+  ambiguity after a request is dispatched (connection drop, timeout waiting
+  for a response, a stream error while draining the body) is classified as
+  `OutcomeUnknown`, never `Failed` or `Success` without proof; cancellation
+  *before* dispatch is `Cancelled`, kept structurally distinct from
+  `TargetReplaced` (epoch mismatch). Added `http = "1"` as a direct
+  dependency (previously only transitive via kube) since the executor needs
+  to name `http::Request` explicitly, unlike the report/relationships code
+  which never spells out the type. Added `PartialEq`/`Eq` to
+  `kube::discovery::Resource` (needed for M7.0's model equality checks).
+  9 new fake-HTTP tests, all passing on first real run: policy-denial,
+  missing-confirmation, UID-mismatch, precommit-journal-failure (via an
+  unwritable path) all assert zero HTTP writes (the fake server panics if
+  called at all); a real revalidate-then-patch-then-journal path; a
+  dry-run that is journaled under `PreflightResult`, never `CommitResult`;
+  explicit 409/403; an epoch change rejected before any write; cancellation
+  before commit. Full locked fmt/check/clippy/test green: 147 unit + 37
+  fake HTTP. Create effect intentionally returns `Unsupported` (documented
+  bounded limitation, not silently half-implemented) since it needs a full
+  object body and different identity semantics -- M8 scope. No live
+  evidence yet -- next: M7.5 TUI surfaces (`:policy`/`:mutations`), then
+  M7.6 live acceptance/regression/soak.
 
 - 2026-09-18: M7.0/M7.1 implementing. Added `src/mutation.rs` (pure model:
   `MutationTarget`/`MutationEffect`/`MutationRisk`/`MutationIntent`/

@@ -103,6 +103,10 @@ case "${1:-check}" in
     # test can prove the unrelated sidecar container is never touched.
     kube_test apply -f "$repo_dir/tests/fixtures/m8b-set-image.yaml"
     kube_test rollout status deployment/m8b-multi -n sauron-m8b --timeout=120s
+    # M8B.3 (CronJob trigger): a dedicated CronJob whose own schedule never
+    # fires during a test run (once a year), so any Job present was
+    # created only by a live trigger test, never the controller itself.
+    kube_test apply -f "$repo_dir/tests/fixtures/m8b-cronjob.yaml"
     ;;
   m8b-reset)
     # Uncordon every node -- idempotent, safe even if nothing is cordoned.
@@ -111,6 +115,10 @@ case "${1:-check}" in
     done
     kube_test apply -f "$repo_dir/tests/fixtures/m8b-set-image.yaml"
     kube_test rollout status deployment/m8b-multi -n sauron-m8b --timeout=120s
+    kube_test apply -f "$repo_dir/tests/fixtures/m8b-cronjob.yaml"
+    # Remove every Job a live trigger test created, keeping repeated runs
+    # deterministic.
+    kube_test delete job -n sauron-m8b -l sauron.io/triggered-from=m8b-nightly --ignore-not-found
     ;;
   m8b-test)
     cd "$repo_dir"

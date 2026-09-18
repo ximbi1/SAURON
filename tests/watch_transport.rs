@@ -706,6 +706,7 @@ fn mutation_intent(
         summary: "metadata.annotations[\"m7-proof\"]".into(),
         payload_sha256: Some("hash".into()),
         source_action: "test".into(),
+        create_resource: None,
     }
 }
 fn verified_policy_context() -> sauron::mutation::policy::PolicyContext {
@@ -1347,6 +1348,199 @@ async fn mutation_set_image_commit_sends_the_full_reconstructed_containers_array
     .await;
     assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+fn cronjob_and_job_resources() -> (
+    sauron::app::session::Scope,
+    sauron::kube::discovery::Resource,
+    sauron::kube::discovery::Resource,
+) {
+    use sauron::app::session::Scope;
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "batch/v1/cronjobs".into(),
+        namespace: "sauron-m8b".into(),
+        name: "nightly".into(),
+        uid: "cronjob-uid-1".into(),
+    };
+    let mut cronjob_resource = resource();
+    cronjob_resource.api.group = "batch".into();
+    cronjob_resource.api.kind = "CronJob".into();
+    cronjob_resource.api.plural = "cronjobs".into();
+    let mut job_resource = resource();
+    job_resource.api.group = "batch".into();
+    job_resource.api.kind = "Job".into();
+    job_resource.api.plural = "jobs".into();
+    (scope, cronjob_resource, job_resource)
+}
+
+#[tokio::test]
+async fn mutation_trigger_cronjob_requires_confirmation_and_posts_the_job_manifest() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::{Confirmation, PolicyDecision, policy, workflow};
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m8b","name":"nightly","uid":"cronjob-uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("POST"), "unexpected method: {request}");
+            assert!(
+                request.contains("\"kind\":\"Job\"") && request.contains("nightly-trigger-1"),
+                "the exact generated Job manifest must be posted: {request}"
+            );
+            (201, json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"namespace":"sauron-m8b","name":"nightly-trigger-1","uid":"job-uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (scope, cronjob_resource, job_resource) = cronjob_and_job_resources();
+    let template =
+        json!({"template": {"spec": {"containers": [{"name":"worker","image":"busybox:1.37"}]}}});
+    let built = workflow::trigger_cronjob(
+        scope,
+        cronjob_resource,
+        job_resource,
+        &template,
+        "nightly-trigger-1",
+        1,
+    )
+    .expect("trigger supported for CronJob");
+    let evaluation = policy::evaluate(&verified_policy_context(), &built.intent);
+    assert_eq!(
+        evaluation.decision,
+        PolicyDecision::RequireConfirmation,
+        "Create must not silently bypass confirmation"
+    );
+    let (journal, dir) = test_journal();
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_trigger_cronjob_dry_run_never_commits() {
+    use sauron::kube::mutation::preflight;
+    use sauron::mutation::workflow;
+    let server = Server::with_request(|request| {
+        assert!(request.starts_with("POST"), "unexpected method: {request}");
+        assert!(
+            request.contains("dryRun=All"),
+            "preflight must request a server dry-run: {request}"
+        );
+        (201, json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"namespace":"sauron-m8b","name":"nightly-trigger-1","uid":"job-uid-1"}}).to_string())
+    })
+    .await;
+    let connection = connection(server.client());
+    let (scope, cronjob_resource, job_resource) = cronjob_and_job_resources();
+    let template =
+        json!({"template": {"spec": {"containers": [{"name":"worker","image":"busybox:1.37"}]}}});
+    let built = workflow::trigger_cronjob(
+        scope,
+        cronjob_resource,
+        job_resource,
+        &template,
+        "nightly-trigger-1",
+        1,
+    )
+    .expect("trigger supported for CronJob");
+    let (journal, dir) = test_journal();
+    let outcome = preflight(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn verify_trigger_cronjob_confirms_the_created_job_by_its_exact_name() {
+    use sauron::kube::mutation::verify;
+    use sauron::mutation::workflow;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"namespace":"sauron-m8b","name":"nightly-trigger-1","uid":"job-uid-1"}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (scope, cronjob_resource, job_resource) = cronjob_and_job_resources();
+    let template =
+        json!({"template": {"spec": {"containers": [{"name":"worker","image":"busybox:1.37"}]}}});
+    let built = workflow::trigger_cronjob(
+        scope,
+        cronjob_resource,
+        job_resource,
+        &template,
+        "nightly-trigger-1",
+        1,
+    )
+    .expect("trigger supported for CronJob");
+    let outcome = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        sauron::mutation::Verification::Created(_)
+    ));
+}
+
+#[tokio::test]
+async fn verify_trigger_cronjob_reports_pending_when_the_job_is_not_yet_visible() {
+    use sauron::kube::mutation::verify;
+    use sauron::mutation::workflow;
+    let server = Server::new(|_| (404, String::new())).await;
+    let connection = connection(server.client());
+    let (scope, cronjob_resource, job_resource) = cronjob_and_job_resources();
+    let template =
+        json!({"template": {"spec": {"containers": [{"name":"worker","image":"busybox:1.37"}]}}});
+    let built = workflow::trigger_cronjob(
+        scope,
+        cronjob_resource,
+        job_resource,
+        &template,
+        "nightly-trigger-1",
+        1,
+    )
+    .expect("trigger supported for CronJob");
+    let outcome = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Pending);
 }
 
 #[tokio::test]

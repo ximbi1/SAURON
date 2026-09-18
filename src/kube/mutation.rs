@@ -3,14 +3,14 @@
 //! one patch" call site. No mutation network request may occur from
 //! rendering or an idle frame; callers own cancellation. A lock is never held
 //! across an await here.
-use super::{Connection, relationships::read_bounded};
+use super::{Connection, discovery::Resource, relationships::read_bounded};
 use crate::mutation::{
     Confirmation, MutationEffect, MutationIntent, MutationOutcome, MutationTarget, PolicyDecision,
     Verification,
     journal::{Journal, Phase, Record},
     policy::{self, PolicyContext},
 };
-use kube::api::{DeleteParams, Patch, PatchParams, Preconditions};
+use kube::api::{DeleteParams, Patch, PatchParams, PostParams, Preconditions};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -133,6 +133,37 @@ async fn delete_request(
     classify(dispatch(connection, request, cancel).await)
 }
 
+/// M8B.3: the only `Create` request path. `create_resource` is the
+/// resource being created (e.g. Job) -- deliberately NOT
+/// `target.resource` (the source object, e.g. CronJob, whose UID is
+/// TOCTOU-revalidated elsewhere); `payload` is a full object manifest,
+/// never a patch.
+async fn create_request(
+    connection: &Connection,
+    create_resource: &Resource,
+    namespace: &str,
+    payload: &Value,
+    dry_run: bool,
+    cancel: &CancellationToken,
+) -> MutationOutcome {
+    let ns = create_resource.namespaced.then_some(namespace);
+    let api = create_resource.api(connection.client.clone(), ns);
+    let builder = kube::core::Request::new(api.resource_url());
+    let params = PostParams {
+        dry_run,
+        field_manager: Some("sauron".into()),
+    };
+    let data = match serde_json::to_vec(payload) {
+        Ok(d) => d,
+        Err(_) => return MutationOutcome::Unsupported,
+    };
+    let request = match builder.create(&params, data) {
+        Ok(r) => r,
+        Err(_) => return MutationOutcome::Unsupported,
+    };
+    classify(dispatch(connection, request, cancel).await)
+}
+
 /// Server dry-run only. On the isolated fixture cluster during acceptance,
 /// or wherever policy has already allowed it -- callers must not interpret
 /// success here as proof a later commit will succeed (DRY-RUN SUCCESS ≠
@@ -163,10 +194,24 @@ pub async fn preflight(
             Some(p) => patch_request(connection, &intent.target, p, true, cancel).await,
             None => MutationOutcome::Unsupported,
         },
-        // Create needs a full object body and different identity semantics;
-        // out of M7's bounded scope (documented limitation, not silently
-        // half-implemented). M8 may extend this.
-        MutationEffect::Create => MutationOutcome::Unsupported,
+        // M8B.3: the first real Create -- needs both a full object body
+        // and the resource actually being created, distinct from
+        // `target.resource` (see `MutationIntent::create_resource`'s own
+        // doc comment).
+        MutationEffect::Create => match (&intent.create_resource, payload) {
+            (Some(create_resource), Some(p)) => {
+                create_request(
+                    connection,
+                    create_resource,
+                    &intent.target.scope.namespace,
+                    p,
+                    true,
+                    cancel,
+                )
+                .await
+            }
+            _ => MutationOutcome::Unsupported,
+        },
     };
     let _ = journal.append(record(
         intent,
@@ -331,7 +376,20 @@ pub async fn commit(
             Some(p) => patch_request(connection, &intent.target, p, false, cancel).await,
             None => MutationOutcome::Unsupported,
         },
-        MutationEffect::Create => MutationOutcome::Unsupported,
+        MutationEffect::Create => match (&intent.create_resource, &payload) {
+            (Some(create_resource), Some(p)) => {
+                create_request(
+                    connection,
+                    create_resource,
+                    &intent.target.scope.namespace,
+                    p,
+                    false,
+                    cancel,
+                )
+                .await
+            }
+            _ => MutationOutcome::Unsupported,
+        },
     };
     let wrote = journal
         .append(record(
@@ -510,7 +568,59 @@ pub async fn verify(
             }
             None => Verification::Unknown,
         },
-        MutationEffect::Create => Verification::Unknown,
+        MutationEffect::Create => match (&intent.create_resource, payload) {
+            (Some(create_resource), Some(p)) => {
+                verify_create(
+                    connection,
+                    create_resource,
+                    &intent.target.scope.namespace,
+                    p,
+                    cancel,
+                )
+                .await
+            }
+            _ => Verification::Unknown,
+        },
+    }
+}
+
+/// M8B.3: confirms the newly created object exists under its own
+/// deterministic, previously-generated name (read from the payload's own
+/// `metadata.name`, never re-derived) -- a fresh GET, exactly once,
+/// bounded and cancellable like every other verification path. `Pending`
+/// on a 404 (creation just accepted, not yet visible), never treated as
+/// failure.
+async fn verify_create(
+    connection: &Connection,
+    create_resource: &Resource,
+    namespace: &str,
+    payload: &Value,
+    cancel: &CancellationToken,
+) -> Verification {
+    let Some(name) = payload.pointer("/metadata/name").and_then(Value::as_str) else {
+        return Verification::Unknown;
+    };
+    let ns = create_resource.namespaced.then_some(namespace);
+    let api = create_resource.api(connection.client.clone(), ns);
+    let fetch = read_bounded(connection, api.resource_url(), Some(name), false);
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Verification::Unknown,
+        result = tokio::time::timeout(connection.timeout(), fetch) => result,
+    };
+    match result {
+        Ok(Ok(value)) => {
+            let observed_name = value.pointer("/metadata/name").and_then(Value::as_str);
+            if observed_name == Some(name) {
+                Verification::Created(format!("{name} exists"))
+            } else {
+                Verification::ObservedDifferent(format!(
+                    "expected name {name}, observed {observed_name:?}"
+                ))
+            }
+        }
+        Ok(Err(crate::evidence::Unknown::NotFound)) => Verification::Pending,
+        _ => Verification::Unknown,
     }
 }
 

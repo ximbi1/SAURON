@@ -51,6 +51,12 @@ pub struct MutationIntent {
     /// confirmation to the exact requested change without storing it.
     pub payload_sha256: Option<String>,
     pub source_action: String,
+    /// M8B.3: only meaningful for `MutationEffect::Create` -- the
+    /// resource actually being *created* (e.g. Job), distinct from
+    /// `target.resource` (the source object, e.g. CronJob, whose UID is
+    /// TOCTOU-revalidated before the create is sent). `None` for every
+    /// other effect.
+    pub create_resource: Option<Resource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -191,6 +197,11 @@ pub enum Verification {
     /// Delete-specific: a fresh GET returned 404, or returned 200 with a
     /// different UID under the same name (the previewed object is gone).
     ObservedGone,
+    /// Create-specific (M8B.3): a fresh GET confirms the newly created
+    /// object exists, correctly traceable back to its source. The String
+    /// is a bounded, redacted description of the confirmed identity --
+    /// never a raw object dump.
+    Created(String),
 }
 
 #[cfg(test)]
@@ -233,6 +244,7 @@ mod tests {
             summary: "annotate m7-target".into(),
             payload_sha256: hash.map(str::to_owned),
             source_action: "m7_proof".into(),
+            create_resource: None,
         }
     }
 

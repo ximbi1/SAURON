@@ -43,6 +43,7 @@ pub fn policy_report(context: &PolicyContext, scope: &Scope, resource: &Resource
             summary: format!("hypothetical {effect:?}"),
             payload_sha256: None,
             source_action: "policy_view".into(),
+            create_resource: None,
         };
         let evaluation = policy::evaluate(context, &intent);
         out.push_str(&format!("{effect:?}: {:?}\n", evaluation.decision));
@@ -148,6 +149,7 @@ fn verification_line(verification: &Option<super::Verification>) -> String {
         Some(ObservedGone) => {
             "ObservedGone -- a fresh read confirms the object no longer exists".into()
         }
+        Some(Created(detail)) => format!("Created -- {detail}"),
     }
 }
 

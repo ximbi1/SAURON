@@ -964,6 +964,43 @@ impl Runtime {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Set image: {}", object.name), built)
             }
+            Command::Trigger => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let job_template_spec = object
+                    .value
+                    .pointer("/spec/jobTemplate/spec")
+                    .cloned()
+                    .context("This object has no spec.jobTemplate.spec")?;
+                let connection = self.connection.as_ref().context("Not connected")?;
+                let job_resource = connection
+                    .catalog
+                    .resolve("batch/v1/jobs", &connection.settings.aliases)
+                    .context("Job kind is not available on this cluster")?;
+                // Generated exactly once here, when the intent is first built
+                // -- never regenerated on a later render of the same preview,
+                // matching Restart's own timestamp discipline.
+                let mut job_name =
+                    format!("{}-trigger-{}", object.name, chrono::Utc::now().timestamp());
+                job_name.truncate(63);
+                job_name = job_name.trim_end_matches('-').to_string();
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::trigger_cronjob(
+                    scope,
+                    resource,
+                    job_resource,
+                    &job_template_spec,
+                    &job_name,
+                    request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Trigger: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2910,6 +2947,48 @@ mod tests {
         assert!(
             rt.action(Action::MutationConfirm).is_err(),
             "denied cordon confirm must error, never silently no-op"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_trigger_under_readonly_denies_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut cronjob_resource = rt.state.resource.clone().expect("resource");
+        cronjob_resource.api.group = "batch".into();
+        cronjob_resource.api.api_version = "batch/v1".into();
+        cronjob_resource.api.kind = "CronJob".into();
+        cronjob_resource.api.plural = "cronjobs".into();
+        rt.state.resource = Some(cronjob_resource.clone());
+        let mut job_resource = cronjob_resource.clone();
+        job_resource.api.kind = "Job".into();
+        job_resource.api.plural = "jobs".into();
+        rt.connection.as_mut().expect("connected").catalog.resources =
+            vec![cronjob_resource, job_resource];
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"batch/v1","kind":"CronJob",
+            "metadata":{"namespace":"sauron-m8b","name":"nightly","uid":"uid-1"},
+            "spec":{"jobTemplate":{"spec":{"template":{"spec":{"containers":[{"name":"worker","image":"busybox:1.37"}]}}}}}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        rt.command(":trigger")
+            .expect("trigger preview opens even when denied");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied trigger confirm must error, never silently no-op"
         );
         assert_eq!(rt.tasks.len(), tasks_before);
         rt.shutdown().await;

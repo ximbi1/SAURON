@@ -121,7 +121,7 @@ silently skipping multi-node drain coverage without saying so.
 | M8B.0 | Shared advanced-operation extensions to the M7/M8 model (new `PolicyReason`s, node-target support in `MutationTarget`/`Scope`, `Job`-creation support in the executor, any new `Verification`/`Phase` variants needed across multiple operations below) | IN PROGRESS -- node-target support confirmed to need zero new code; `kube::mutation::verify`'s boolean-comparison logic extended (see M8B.1's real bug); no new `PolicyReason`/`Phase` variant added yet, none needed so far |
 | M8B.1 | Cordon / Uncordon (Node) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7, matching M8.2's own precedent -- `workflow::cordon`/`workflow::uncordon` wired to `:cordon`/`:uncordon`; live-verified twice against the real (single) node of `kind-sauron-test`, briefly cordoned then immediately uncordoned in one sequential test, per explicit user sign-off |
 | M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- `workflow::set_image` reconstructs the full `containers` array (option (b) from this document's own open question, resolved); dedicated `verify_set_image` name-keyed comparison added; live-verified against a real two-container Deployment, unrelated sidecar proven untouched |
-| M8B.3 | CronJob trigger (create a Job from a CronJob template) | PLANNED |
+| M8B.3 | CronJob trigger (create a Job from a CronJob template) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- first real `MutationEffect::Create` in the executor; `MutationIntent.create_resource` added; `policy::evaluate`'s Create-bypasses-confirmation rule removed (a real bug in an untested speculative rule, found while implementing this); traceability via label/annotation, not a real `ownerReference` (matches `kubectl create job --from=cronjob` semantics) |
 | M8B.4 | Evict Pod (eviction subresource, PDB-aware) | PLANNED |
 | M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | PLANNED |
 | M8B.6 | Force delete (highest risk; explicit, narrow, no default grace=0 leakage) | PLANNED |
@@ -822,6 +822,83 @@ the authoritative record of M8's own bugs.
   own values are non-empty strings, never Kubernetes' boolean zero value,
   so the fix's scope was correctly limited to booleans and did not need
   broadening for this slice).
+- 2026-09-18: M8B.3 (CronJob trigger) implemented and ACCEPTED (unit/
+  fake-HTTP/live; interactive deferred to M8B.7) -- the first real
+  `MutationEffect::Create` in `kube::mutation`, resolving this document's
+  own open questions:
+  - `MutationIntent` gained one new field, `create_resource:
+    Option<Resource>` -- the resource actually being *created* (Job),
+    distinct from `target.resource` (the CronJob, whose UID is
+    TOCTOU-revalidated exactly like every other operation, via the
+    already-generic `revalidate()`, unchanged). Every existing
+    `MutationIntent` literal (six call sites, mostly single shared test
+    helpers) got `create_resource: None`; zero behavior change for any
+    existing effect.
+  - `kube::mutation::create_request` (new) POSTs the full object manifest
+    via `PostParams`/`Request::create`; wired into both `preflight`
+    (dry-run) and `commit` (real), matching `patch_request`/
+    `delete_request`'s own shape.
+  - Traceability back to the source CronJob uses a label
+    (`sauron.io/triggered-from`) + annotation
+    (`sauron.io/triggered-from-uid`), deliberately NOT a real
+    `ownerReference` -- a real owner reference would make the triggered
+    Job subject to garbage collection if the CronJob is later deleted,
+    which `kubectl create job --from=cronjob/X` itself also avoids for
+    the same reason.
+  - `Verification::Created(String)` added (a fresh GET confirms the new
+    object exists under its own deterministic, previously-generated
+    name -- `verify_create`, a fourth verification shape alongside
+    `verify_modify`/`verify_set_image`/`verify_delete`); `Pending` on a
+    404 (creation accepted, not yet visible), never treated as failure.
+  - **Real bug found and fixed, not in M8B.3's own new code but in M7's
+    original `policy::evaluate`**: the rule `confirmation_needed = strong
+    || destructive || (effect != Create)` meant a `Routine`-risk Create
+    silently bypassed confirmation entirely (`PolicyDecision::Allow`) --
+    untested in practice, since M7 shipped no real Create path (always
+    `Unsupported`). Now that Create means something real (running
+    workload code via a triggered Job), silently allowing it without
+    confirmation would be wrong. Removed the `effect != Create` escape
+    hatch; every current effect now requires at least standard
+    confirmation, matching Scale/Restart/Label/Annotate/Set Image's own
+    tier. Updated the one existing test that depended on the old
+    behavior (`create_with_routine_risk_is_allowed_without_confirmation`
+    -> `create_with_routine_risk_still_requires_confirmation`). Verified
+    this does not regress any shipped M8/M8B behavior: Modify/Delete were
+    never affected by the removed clause (their own `effect != Create`
+    was always `true` already); only Create's previously-untested,
+    never-shipped path changes. `PolicyDecision::Allow` remains a
+    legitimate model value, just unreachable by anything this codebase
+    currently produces.
+  - A second, genuinely live-cluster-only bug was found and fixed in the
+    live test itself (not the app): the first live run asserted the
+    created Job's label via `created.data.pointer("/metadata/labels/...")`
+    -- `DynamicObject.data` holds only non-metadata fields; `metadata` is
+    a separate typed `ObjectMeta` field, so the pointer always returned
+    `None` regardless of the (correct) real label being present, as
+    confirmed independently via `kubectl get -o jsonpath`. Fixed by
+    reading `created.metadata.labels` directly. Classified as a harness/
+    test bug, not an app bug -- the same class of `DynamicObject.data`
+    vs. typed-field confusion already hit once in this same file for the
+    Node cordon test's earlier `.spec` mistake.
+  Live evidence: `tests/fixtures/m8b-cronjob.yaml` (CronJob `m8b-nightly`,
+  schedule `0 0 1 1 *` so it never fires on its own during a test run,
+  keeping any observed Job attributable only to a live trigger);
+  `m8b-fixtures` applies it, `m8b-reset` also deletes every
+  label-matching triggered Job so repeated runs stay deterministic;
+  `live_trigger_creates_a_job_traceable_to_the_source_cronjob` in
+  `tests/mutation_m8b_live.rs` triggers a real Job, commits, verifies
+  `Created`, and confirms the label back to the source. Run twice via
+  `scripts/test-cluster.sh m8b-test` (alongside the M8B.1/M8B.2 live
+  tests in the same file), both clean, fixtures reset to pristine
+  between runs.
+  5 unit tests (`mutation::workflow::tests`: unsupported-kind rejection,
+  invalid-generated-name rejection, `Create` effect + `create_resource`
+  set correctly, exact payload name/template, distinct hashes for
+  distinct generated names), 4 fake-HTTP tests (commit posts the exact
+  manifest and requires confirmation, dry-run never commits, verify
+  reports `Created`, verify reports `Pending` on 404), 1 grammar test, 1
+  app-level zero-write-under-readonly test. Full locked suite: 212 unit +
+  58 fake HTTP, fmt/check/clippy (`-D warnings`) clean.
 
 ## Final acceptance conditions (proposed, mirroring M8's own structure)
 

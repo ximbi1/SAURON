@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: m8b-nightly
+  namespace: sauron-m8b
+spec:
+  schedule: "0 0 1 1 *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: worker
+              image: registry.k8s.io/pause:3.9
+              resources:
+                requests:
+                  cpu: 5m
+                  memory: 8Mi

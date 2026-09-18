@@ -1,13 +1,15 @@
 //! Run only through the identity-guarded `scripts/test-cluster.sh m8b-test`.
 //! Proves M8B.1 (Cordon/Uncordon) against the real Node of
-//! `kind-sauron-test` and M8B.2 (Set Image) against a dedicated
-//! two-container Deployment fixture. The cordon test cordons and
-//! immediately uncordons the cluster's ONE node, briefly and within one
-//! sequential test function -- never left cordoned, never held cordoned
-//! across multiple test functions (which would race under cargo's default
-//! parallel test execution, matching every other `*_live.rs` file's own
-//! precedent). The set_image test targets a distinct object (`m8b-multi`),
-//! so it is a separate test function without racing the cordon test.
+//! `kind-sauron-test`, M8B.2 (Set Image) against a dedicated two-container
+//! Deployment fixture, and M8B.3 (CronJob trigger) against a dedicated
+//! CronJob whose own schedule never fires during a test run. The cordon
+//! test cordons and immediately uncordons the cluster's ONE node, briefly
+//! and within one sequential test function -- never left cordoned, never
+//! held cordoned across multiple test functions (which would race under
+//! cargo's default parallel test execution, matching every other
+//! `*_live.rs` file's own precedent). Set Image and CronJob trigger each
+//! target a distinct object, so they are separate test functions without
+//! racing the cordon test or each other.
 use sauron::{
     app::session::Scope,
     config::Config,
@@ -266,6 +268,109 @@ async fn live_set_image_changes_only_the_named_container() {
         sidecar_after,
         Some(sidecar_image_before.as_str()),
         "the unrelated sidecar container's image must survive untouched"
+    );
+}
+
+#[tokio::test]
+#[ignore = "explicit isolated kind config and m8b-fixtures (m8b-nightly CronJob) required"]
+async fn live_trigger_creates_a_job_traceable_to_the_source_cronjob() {
+    let path = std::env::var_os("SAURON_TEST_KUBECONFIG").expect("explicit test kubeconfig");
+    let c = kube::connect(
+        ConnectOptions {
+            kubeconfig: Some(path.into()),
+            context: Some("kind-sauron-test".into()),
+            force_readonly: false,
+            mutation_test_cluster_verified: false,
+        },
+        Config::default(),
+    )
+    .await
+    .expect("connect");
+    let cronjob_resource = c
+        .catalog
+        .resolve("batch/v1/cronjobs", &c.settings.aliases)
+        .expect("canonical cronjob");
+    let job_resource = c
+        .catalog
+        .resolve("batch/v1/jobs", &c.settings.aliases)
+        .expect("canonical job");
+    let cronjob_api = cronjob_resource.api(c.client.clone(), Some("sauron-m8b"));
+    let cronjob = Object::new(
+        serde_json::to_value(cronjob_api.get("m8b-nightly").await.expect("m8b-nightly")).unwrap(),
+    );
+    let job_template_spec = cronjob
+        .value
+        .pointer("/spec/jobTemplate/spec")
+        .cloned()
+        .expect("m8b-nightly has a jobTemplate.spec");
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: c.context.clone(),
+        cluster: c.cluster.clone(),
+        resource: cronjob_resource.id(),
+        namespace: cronjob.namespace.clone(),
+        name: cronjob.name.clone(),
+        uid: cronjob.uid.clone(),
+    };
+    let cancel = CancellationToken::new();
+    let job_name = format!(
+        "m8b-nightly-trigger-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
+
+    let built = workflow::trigger_cronjob(
+        scope,
+        cronjob_resource,
+        job_resource.clone(),
+        &job_template_spec,
+        &job_name,
+        1,
+    )
+    .expect("trigger is supported for CronJob");
+    let evaluation = policy::evaluate(&verified_policy(), &built.intent);
+    assert_eq!(evaluation.decision, PolicyDecision::RequireConfirmation);
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let (journal, dir) = new_journal("trigger");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    let verification = executor::verify(&c, &built.intent, built.payload.as_ref(), &cancel).await;
+    assert!(
+        matches!(verification, Verification::Created(_)),
+        "expected Created, got {verification:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    let job_api = job_resource.api(c.client.clone(), Some("sauron-m8b"));
+    let created = job_api.get(&job_name).await.expect("created Job");
+    assert_eq!(
+        created
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("sauron.io/triggered-from"))
+            .map(String::as_str),
+        Some("m8b-nightly"),
+        "the created Job must be traceable back to its source CronJob"
     );
 }
 

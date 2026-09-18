@@ -143,9 +143,17 @@ pub fn evaluate(context: &PolicyContext, intent: &MutationIntent) -> PolicyEvalu
     ) || context.cluster_critical_kinds.contains(kind)
         || context.privilege_sensitive_kinds.contains(kind)
         || intent.effect == MutationEffect::Delete;
-    let confirmation_needed = strong
-        || matches!(intent.risk, MutationRisk::Destructive)
-        || intent.effect != MutationEffect::Create;
+    // M8B.3: `Create` no longer bypasses confirmation. The original rule
+    // ("any effect other than Create always needs confirmation") was
+    // speculative -- M7 shipped no real Create action, so it was never
+    // exercised for real. CronJob trigger is the first one, and creating
+    // a Job means running real workload code, which is not obviously
+    // lower-stakes than a Modify; it must not be silently Allowed. Every
+    // current effect therefore always needs at least standard
+    // confirmation -- `PolicyDecision::Allow` stays a legitimate value in
+    // the model for a possible future rule/effect, just not reachable by
+    // anything this codebase produces today.
+    let confirmation_needed = true;
 
     if strong {
         reasons.push(PolicyReason::StrongerConfirmationRequired);
@@ -213,6 +221,7 @@ mod tests {
             summary: "test".into(),
             payload_sha256: None,
             source_action: "test".into(),
+            create_resource: None,
         }
     }
     fn verified() -> PolicyContext {
@@ -347,12 +356,15 @@ mod tests {
     }
 
     #[test]
-    fn create_with_routine_risk_is_allowed_without_confirmation() {
+    fn create_with_routine_risk_still_requires_confirmation() {
+        // M8B.3: Create no longer bypasses confirmation -- see evaluate()'s
+        // own comment. Creating a real object (e.g. a triggered Job) is not
+        // obviously lower-stakes than a Modify.
         let eval = evaluate(
             &verified(),
             &intent("sauron-m7", "ConfigMap", "u", MutationEffect::Create),
         );
-        assert_eq!(eval.decision, PolicyDecision::Allow);
+        assert_eq!(eval.decision, PolicyDecision::RequireConfirmation);
     }
 
     #[test]

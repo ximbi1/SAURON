@@ -61,6 +61,7 @@ fn intent(
         summary,
         payload_sha256: payload.as_ref().map(payload_hash),
         source_action: source_action.into(),
+        create_resource: None,
     }
 }
 
@@ -334,6 +335,73 @@ pub fn set_image(
             request_id,
         ),
         payload,
+        change,
+    })
+}
+
+pub const CRONJOB_TRIGGER_KINDS: &[&str] = &["CronJob"];
+/// Traceability metadata on a triggered Job -- deliberately a label +
+/// annotation, never a real `ownerReference`: a real Kubernetes
+/// `ownerReference` would make the triggered Job subject to garbage
+/// collection if the CronJob is later deleted, which `kubectl create job
+/// --from=cronjob/X` itself also deliberately avoids.
+pub const TRIGGERED_FROM_LABEL: &str = "sauron.io/triggered-from";
+pub const TRIGGERED_FROM_UID_ANNOTATION: &str = "sauron.io/triggered-from-uid";
+
+/// M8B.3: the first `MutationEffect::Create` workflow. `job_name` must be
+/// generated exactly once by the caller (like Restart's timestamp) and
+/// reused verbatim across preview/dry-run/commit; a new preview after
+/// cancellation gets a new name. `job_template_spec` is the CronJob's own
+/// `spec.jobTemplate.spec`, read fresh from the already-synced object,
+/// never reconstructed. `job_resource` is the Job kind's own `Resource`
+/// (batch/v1 jobs) -- the caller resolves it, since this pure builder has
+/// no catalog access; it becomes `MutationIntent::create_resource`, used
+/// by the executor to know where to POST, distinct from `cronjob_resource`
+/// (used for TOCTOU-revalidating the source before commit).
+pub fn trigger_cronjob(
+    scope: Scope,
+    cronjob_resource: Resource,
+    job_resource: Resource,
+    job_template_spec: &Value,
+    job_name: &str,
+    request_id: u64,
+) -> Result<Built, String> {
+    let kind = cronjob_resource.api.kind.clone();
+    if !CRONJOB_TRIGGER_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("trigger", &kind));
+    }
+    if !valid_dns_label_part(job_name) {
+        return Err(format!("invalid generated Job name: {job_name}"));
+    }
+    let payload = serde_json::json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": job_name,
+            "namespace": scope.namespace,
+            "labels": {TRIGGERED_FROM_LABEL: scope.name},
+            "annotations": {TRIGGERED_FROM_UID_ANNOTATION: scope.uid},
+        },
+        "spec": job_template_spec,
+    });
+    let change = format!(
+        "create Job \"{job_name}\" from CronJob \"{}\"'s jobTemplate",
+        scope.name
+    );
+    let mut built_intent = intent(
+        scope,
+        cronjob_resource,
+        MutationEffect::Create,
+        MutationRisk::Routine,
+        format!("create Job \"{job_name}\""),
+        &Some(payload.clone()),
+        "trigger",
+        request_id,
+    );
+    built_intent.create_resource = Some(job_resource);
+    Ok(Built {
+        intent: built_intent,
+        payload: Some(payload),
         change,
     })
 }
@@ -728,6 +796,118 @@ mod tests {
             &containers(&[("web", "nginx:1.26"), ("sidecar", "envoy:1.30")]),
             Some("sidecar"),
             "nginx:1.27",
+            1,
+        )
+        .unwrap();
+        assert_ne!(a.intent.payload_sha256, b.intent.payload_sha256);
+    }
+
+    fn cronjob_resource() -> Resource {
+        let mut r = resource("CronJob");
+        r.api.group = "batch".into();
+        r.api.api_version = "batch/v1".into();
+        r.api.plural = "cronjobs".into();
+        r
+    }
+    fn job_resource() -> Resource {
+        let mut r = resource("Job");
+        r.api.group = "batch".into();
+        r.api.api_version = "batch/v1".into();
+        r.api.plural = "jobs".into();
+        r
+    }
+    fn job_template() -> Value {
+        serde_json::json!({"template": {"spec": {"containers": [{"name": "worker", "image": "busybox:1.37"}]}}})
+    }
+
+    #[test]
+    fn trigger_cronjob_unsupported_kind_is_rejected_before_building_an_intent() {
+        assert!(
+            trigger_cronjob(
+                scope(),
+                resource("Deployment"),
+                job_resource(),
+                &job_template(),
+                "m8b-nightly-trigger-1",
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn trigger_cronjob_rejects_an_invalid_generated_name() {
+        assert!(
+            trigger_cronjob(
+                scope(),
+                cronjob_resource(),
+                job_resource(),
+                &job_template(),
+                "Not_Valid!",
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn trigger_cronjob_uses_create_effect_and_carries_the_job_resource() {
+        let built = trigger_cronjob(
+            scope(),
+            cronjob_resource(),
+            job_resource(),
+            &job_template(),
+            "m8b-nightly-trigger-1",
+            1,
+        )
+        .unwrap();
+        assert_eq!(built.intent.effect, MutationEffect::Create);
+        assert_eq!(
+            built
+                .intent
+                .create_resource
+                .as_ref()
+                .map(|r| r.api.kind.as_str()),
+            Some("Job")
+        );
+        // TOCTOU/policy identity stays the CronJob (the source), never the
+        // not-yet-created Job.
+        assert_eq!(built.intent.target.resource.api.kind, "CronJob");
+    }
+
+    #[test]
+    fn trigger_cronjob_payload_carries_the_exact_generated_name_and_template() {
+        let built = trigger_cronjob(
+            scope(),
+            cronjob_resource(),
+            job_resource(),
+            &job_template(),
+            "m8b-nightly-trigger-1",
+            1,
+        )
+        .unwrap();
+        let payload = built.payload.unwrap();
+        assert_eq!(payload["metadata"]["name"], "m8b-nightly-trigger-1");
+        assert_eq!(payload["spec"], job_template());
+    }
+
+    #[test]
+    fn trigger_cronjob_different_names_produce_different_hashes() {
+        let a = trigger_cronjob(
+            scope(),
+            cronjob_resource(),
+            job_resource(),
+            &job_template(),
+            "m8b-nightly-trigger-1",
+            1,
+        )
+        .unwrap();
+        let b = trigger_cronjob(
+            scope(),
+            cronjob_resource(),
+            job_resource(),
+            &job_template(),
+            "m8b-nightly-trigger-2",
             1,
         )
         .unwrap();

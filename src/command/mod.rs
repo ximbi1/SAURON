@@ -526,6 +526,7 @@ pub enum Command {
         container: Option<String>,
         image: String,
     },
+    Trigger,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -790,6 +791,10 @@ pub fn parse(s: &str) -> Result<Command> {
             };
             return Ok(Command::SetImage { container, image });
         }
+        "trigger" => {
+            ensure!(tail.is_empty(), "Use :trigger");
+            return Ok(Command::Trigger);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -867,6 +872,7 @@ pub fn command_names() -> Vec<&'static str> {
         "cordon",
         "uncordon",
         "set_image",
+        "trigger",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1059,6 +1065,11 @@ fn set_image_parses_bare_image_or_container_equals_image() {
     assert!(parse(":set_image a b").is_err());
     assert!(parse(":set_image =nginx:1.27").is_err());
     assert!(parse(":set_image web=").is_err());
+}
+#[test]
+fn trigger_takes_no_arguments() {
+    assert!(matches!(parse(":trigger"), Ok(Command::Trigger)));
+    assert!(parse(":trigger now").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

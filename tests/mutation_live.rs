@@ -91,6 +91,7 @@ async fn live_proof_mutation_and_replacement_rejection() {
         summary: "metadata.annotations[\"m7-proof\"]".into(),
         payload_sha256: Some(payload_hash),
         source_action: "m7_live_proof".into(),
+        create_resource: None,
     };
 
     // 1: preview -- pure local policy evaluation, no network.
@@ -190,6 +191,7 @@ async fn live_proof_mutation_and_replacement_rejection() {
         summary: "metadata.annotations[\"m7-proof\"]".into(),
         payload_sha256: Some("hash".into()),
         source_action: "m7_live_proof".into(),
+        create_resource: None,
     };
     let replacement_confirmation = Confirmation {
         request_id: replacement_intent.request_id,

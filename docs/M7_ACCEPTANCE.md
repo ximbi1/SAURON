@@ -30,7 +30,7 @@ kubeconfig. No production mutation, ever, including dry-run.
 | M7.2 | Preview / server dry-run / confirmation contract | `MutationPreview` (local, no network) is separate from `kube::mutation::preflight` (server `dryRun=All`, journaled `PreflightStarted`/`PreflightResult`) and from `commit` (real write); `Confirmation` from M7.0 binds the exact intent | covered by M7.0's confirmation test + M7.3's dry-run test | 1 (dry-run never commits, journaled distinctly) | n/a yet | none | IMPLEMENTING |
 | M7.3 | Single mutation execution gateway | `kube::mutation::commit`: re-evaluates policy at commit time, requires an authorizing confirmation, checks epoch, revalidates UID/resourceVersion via a fresh metadata GET (TOCTOU), journals before sending, issues exactly one bounded/cancellable PATCH or DELETE, classifies the result (`Committed`/`Forbidden`/`NotFound`/`Conflict`/`TargetReplaced`/`Cancelled`/`OutcomeUnknown`/`TransportFailure`), journals the result | n/a (integration-level) | 9 tests: policy-denied zero-write, missing-confirmation zero-write, UID-mismatch zero-write, precommit-journal-failure zero-write, real revalidate+patch+journal, dry-run never commits, 409/403 explicit, epoch-change rejected, cancellation-before-commit zero-write | n/a yet | Create effect is an explicit `Unsupported` bounded limitation (needs a full object body + different identity semantics; M8 scope, not silently half-implemented) | IMPLEMENTING |
 | M7.4 | Durable redacted mutation journal | `src/mutation/journal.rs`: JSONL, schema-versioned, bounded field sizes (2048B, 32 reasons), append-only; `Record` has no field capable of holding raw payload/Secret content by construction | 5 unit tests: round-trip order, malformed-line-skipped, missing-file-is-empty, oversized-field-bounded, no-secret-shaped-field | covered via M7.3's journal assertions | n/a yet | none | IMPLEMENTING |
-| M7.5 | TUI policy/journal surfaces | | | | | | NOT ACCEPTED |
+| M7.5 | TUI policy/journal surfaces | `:policy`/`u`: read-only, synchronous, zero network -- renders hypothetical Modify/Delete policy decisions for the selected object via `mutation::view::policy_report`; runtime `PolicyContext.cluster_verified_for_mutation` is always `false` (no in-app mechanism exists to set it), so this view honestly denies everywhere SAURON actually runs. `:mutations`/`m`: bounded (200) read of the local journal file, zero Kubernetes requests | 5 unit tests (`mutation::view`: never-Allow-without-verified-cluster, both-effects-shown, journal-empty/non-empty) + 2 app-level tests (zero tasks spawned by either action) | n/a (no transport) | n/a yet | none | IMPLEMENTING |
 | M7.6 | Combined adversarial acceptance, regressions, soak | | | | | | NOT ACCEPTED |
 
 ## Required evidence
@@ -122,6 +122,28 @@ unexpected vs. transient-recovered errors, bound hits. Observations, not
 proof of leak-freedom.
 
 ## Journal
+
+- 2026-09-18: M7.5 implementing. Added `src/mutation/view.rs` (pure
+  rendering, no I/O beyond what the caller already loaded) and wired
+  `:policy`/`u` and `:mutations`/`m` (table mode) into `app/mod.rs` as fully
+  synchronous actions -- no async task, no network, matching the
+  requirement that policy/journal rendering issue zero Kubernetes requests.
+  `open_policy_view` builds a `session::Scope` for the selected object from
+  the live connection/state (same convention as every other single-object
+  action) and evaluates both a hypothetical Modify and Delete through the
+  real `policy::evaluate`. Since SAURON has no in-app setting to mark a
+  cluster as "verified for mutation" (that verification is deliberately
+  kept external, per the stricter development/acceptance safety contract),
+  the view will show `UnverifiedCluster` and never `Allow` no matter what
+  cluster is connected -- this is correct and expected for M7, which ships
+  no mutation workflow. `open_mutations_view` reads the bounded local
+  journal (`$XDG_CONFIG_HOME/sauron/mutations.jsonl` or
+  `~/.config/sauron/mutations.jsonl`) via `Journal::recent(200)`; a missing
+  file reads as empty, never an error. 5 new `mutation::view` unit tests +
+  2 app-level tests asserting neither action spawns a task. Full locked
+  fmt/check/clippy/test green: 152 unit + 37 fake HTTP. No live evidence
+  yet -- next: M7.6 (fake HTTP already covers the executor; remaining work
+  is the live proof mutation, full M1-M6 regression, and the soak).
 
 - 2026-09-18: M7.2/M7.3/M7.4 implementing. Added `src/mutation/journal.rs`
   (JSONL, schema-versioned, bounded, malformed-line-tolerant) and

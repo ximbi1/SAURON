@@ -4,6 +4,7 @@
 //! executor. NO MUTATION WITHOUT POLICY. UNKNOWN never silently means Allow.
 pub mod journal;
 pub mod policy;
+pub mod view;
 
 use crate::{app::session::Scope, kube::discovery::Resource};
 

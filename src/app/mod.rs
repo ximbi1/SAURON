@@ -849,6 +849,8 @@ impl Runtime {
             Help => self.open_static("Keyboard reference", self.state.keymap.help()),
             Yaml | Describe | Explain | Events | Adjacent | Xray => self.open_document(action)?,
             Follow => self.follow_adjacent()?,
+            Policy => self.open_policy_view()?,
+            Mutations => self.open_mutations_view()?,
             Timeline => {
                 let object = self.state.selected_object().context("Select a row first")?;
                 let uid = object.uid.clone();
@@ -1026,6 +1028,49 @@ impl Runtime {
             .take()
             .map(Mode::Document)
             .unwrap_or(Mode::Table);
+    }
+    /// M7.5: read-only, local, no network. SAURON has no in-app mechanism to
+    /// mark a cluster as verified for mutation (that is an external,
+    /// out-of-band guarantee -- see scripts/test-cluster.sh); the runtime
+    /// `PolicyContext` therefore always leaves `cluster_verified_for_mutation`
+    /// false, so this view honestly shows every hypothetical mutation as
+    /// denied everywhere SAURON actually runs. M7 is infrastructure only.
+    fn open_policy_view(&mut self) -> Result<()> {
+        let object = self.state.selected_object().context("Select a row first")?;
+        let resource = self
+            .state
+            .resource
+            .clone()
+            .context("No resource selected")?;
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let scope = session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: resource.id(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let policy_context = crate::mutation::policy::PolicyContext {
+            readonly: self.state.settings.readonly,
+            readonly_forced: self.options.force_readonly,
+            ..Default::default()
+        };
+        let text = crate::mutation::view::policy_report(&policy_context, &scope, &resource);
+        self.open_static(&format!("Policy: {}", object.name), text);
+        Ok(())
+    }
+    fn mutation_journal(&self) -> crate::mutation::journal::Journal {
+        crate::mutation::journal::Journal::new(crate::config::directory().join("mutations.jsonl"))
+    }
+    /// M7.5: bounded, read-only, local file read -- zero Kubernetes requests.
+    fn open_mutations_view(&mut self) -> Result<()> {
+        let records = self.mutation_journal().recent(200);
+        let text = crate::mutation::view::journal_report(&records);
+        self.open_static("Mutation journal", text);
+        Ok(())
     }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
@@ -2300,6 +2345,42 @@ mod tests {
         let sort = rt.state.sort.clone();
         assert!(rt.command("sort name:wrong").is_err());
         assert_eq!(rt.state.sort, sort);
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn policy_view_is_read_only_and_denies_without_verified_cluster() {
+        let mut rt = runtime();
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"p","uid":"root-uid"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("root-uid".into());
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::Policy).expect("policy view");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "policy view issues no network task"
+        );
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("UnverifiedCluster"));
+        assert!(!text.contains("Modify: Allow"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn mutations_view_is_read_only_and_handles_a_missing_journal() {
+        let mut rt = runtime();
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::Mutations).expect("mutations view");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "mutations view issues no task"
+        );
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Mutation journal");
         rt.shutdown().await;
     }
     #[tokio::test]

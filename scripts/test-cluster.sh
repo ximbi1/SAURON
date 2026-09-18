@@ -62,6 +62,19 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test relationships_live -- --ignored --nocapture
     ;;
+  m7-fixtures)
+    kube_test apply -f "$repo_dir/tests/fixtures/m7-mutation.yaml"
+    ;;
+  m7-reset)
+    # The live proof mutation patches an annotation; restore the exact
+    # pristine fixture state so repeated live/soak runs stay deterministic.
+    kube_test apply -f "$repo_dir/tests/fixtures/m7-mutation.yaml"
+    kube_test annotate configmap m7-target -n sauron-m7 m7-proof- --overwrite 2>/dev/null || true
+    ;;
+  m7-test)
+    cd "$repo_dir"
+    SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_live -- --ignored --nocapture
+    ;;
   m4-recreate)
     kube_test delete pod m4-sessions -n sauron-fixtures --wait=true --timeout=45s
     kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"

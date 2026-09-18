@@ -294,6 +294,68 @@ clients need separately owned forwarding connections. No new dependency chosen y
 
 ## Journal
 
+### 2026-09-18 — M7.0-M7.5 implemented (M6.6 baseline, before M7 combined acceptance/soak)
+
+M7 builds the mandatory mutation infrastructure (policy, confirmation,
+execution gateway, journal) every future M8 mutation must pass through.
+M7 ships no user-facing mutation workflow itself.
+
+Added `src/mutation.rs` (pure model: `MutationTarget` reuses
+`app::session::Scope` for incarnation-safe identity, the same convention
+already used by logs/exec/forward; `Confirmation::authorizes` binds
+request_id/scope/effect/payload hash exactly, invalidated by any change to
+any of them) and `src/mutation/policy.rs` (pure, deterministic
+`evaluate()`, no transport dependency, accumulates every applicable
+`PolicyReason` rather than stopping at the first). Unverified cluster
+identity, readonly, missing UID and protected namespaces are hard denies;
+cluster-critical/privilege-sensitive kinds and destructive effects require
+stronger confirmation. UNKNOWN never silently means Allow.
+
+Added `src/mutation/journal.rs` (durable append-only JSONL, schema-
+versioned, bounded field sizes, malformed-line-tolerant, no field capable
+of holding Secret content by construction) and `src/kube/mutation.rs`
+(the single executor: `preflight`/`commit`). `commit` re-evaluates policy
+at commit time, requires an authorizing confirmation, checks the caller's
+epoch, revalidates the target's live UID/resourceVersion via a fresh
+metadata-only GET immediately before mutating (TOCTOU), journals before
+sending (fail-closed on write failure) and after (a post-commit journal
+failure is `CommittedButJournalIncomplete`, never silently lost). Transport
+ambiguity after dispatch is `OutcomeUnknown`; cancellation before dispatch
+is `Cancelled`, kept distinct from `TargetReplaced` (epoch mismatch). Added
+`http` as a direct dependency and `PartialEq`/`Eq` to
+`kube::discovery::Resource` for model equality checks. `Create` returns
+`Unsupported` (documented bounded limitation — needs a full object body
+and different identity semantics; M8 scope).
+
+Added `src/mutation/view.rs` and wired `:policy`/`u` and `:mutations`/`m`
+(table mode): both fully synchronous, zero network. `:policy` shows what a
+hypothetical Modify/Delete on the selected object would do under the real
+policy engine; since SAURON has no in-app setting to mark a cluster as
+verified for mutation (kept deliberately external, per the stricter
+development/acceptance safety contract), this view denies everywhere the
+app actually runs — correct for M7. `:mutations` reads the bounded local
+journal file.
+
+9 fake-HTTP executor tests (zero-write assertions for policy denial,
+missing confirmation, UID mismatch, precommit journal failure; a real
+revalidate-then-patch-then-journal path; dry-run journaled distinctly from
+commit; explicit 409/403; epoch-change rejection; cancellation before
+commit), plus unit tests for the model/policy/journal/view layers. Full
+locked fmt/check/clippy/test green throughout: 152 unit + 37 fake HTTP.
+
+Added the one narrowly-scoped internal proof mutation
+(`tests/mutation_live.rs`, `tests/fixtures/m7-mutation.yaml`: `sauron-m7`
+namespace, `m7-target` ConfigMap) guarded through
+`scripts/test-cluster.sh m7-fixtures`/`m7-reset`/`m7-test`, exactly
+matching the M6 guard pattern. One sequential live test (multiple
+`#[tokio::test]` functions sharing a live fixture object would race under
+cargo's default parallel execution — learned this directly when the first
+two-function version raced a delete against a concurrent patch). Phase 1
+proves preview→dry-run→confirmation→commit→fresh-GET-verify→journal-verify
+against the real cluster; phase 2 proves same-name/new-UID replacement is
+rejected, never silently applied to the replacement object. Live-verified
+twice.
+
 ### 2026-09-18 — M6.0 started
 
 Created M6 ledger before code. Added `src/graph.rs`: topology metadata only,

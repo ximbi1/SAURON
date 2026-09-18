@@ -111,8 +111,8 @@ above is unchanged.
 | Relationships | On-demand generic CRD children search with budgets | Paged bounded owner-UID discovery | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Relationships | Xray ownership hierarchy | Graph traversal view | P1 | TESTED | M6.5 unit+fake+live+interactive acceptance | Delivered (`:xray`/`x`, bounded depth 1-3) |
 | Overview | Pulse refreshed health tiles | Bounded asynchronous overview | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Safety | Readonly global/context/cluster and flags | Layered config + hard CLI override at operation boundary | P0 | TESTED (subset) | M4 exec/attach/forward denial; reload regression + live | Full M7 guardrail/mutation service not implemented |
-| Safety | Guardrails deny/confirmation/type context/type name/bulk limits | Combine all restrictions deterministically | P0 | DESIGNED | Pending: deny/conflict/outcome regression | Not yet delivered |
+| Safety | Readonly global/context/cluster and flags | Layered config + hard CLI override at operation boundary | P0 | TESTED | M4 exec/attach/forward denial; M7 policy readonly/override gates; reload regression + live | Delivered; M7 adds the central policy layer, M8 still owns the actual mutation UX |
+| Safety | Guardrails deny/confirmation/type context/type name/bulk limits | Combine all restrictions deterministically | P0 | TESTED | M7.0-M7.3 unit+fake+live: `mutation::policy::evaluate` (deterministic, structured `PolicyReason`s, UNKNOWN never Allow) + `Confirmation` binding + `kube::mutation::commit`'s TOCTOU revalidation | Delivered as infrastructure (no user-facing mutation command yet — M8) |
 | Safety | Managed object warnings | Evidence of controlling manager in preview | P1 | RESEARCHED | Pending: deny/conflict/outcome regression | Not yet delivered |
 | Safety | can-i rules and action review; partial authorizers | SSAR + explicit incomplete reviews | P1 | RESEARCHED | Pending: deny/conflict/outcome regression | Not yet delivered |
 | Safety | Action journal and optional rotated export | Started + completed/failed/uncertain outcomes | P1 | DESIGNED | Pending: deny/conflict/outcome regression | Not yet delivered |
@@ -145,7 +145,7 @@ above is unchanged.
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Current gap review — M6 accepted, 2026-09-18
+## Current gap review — M7 implementing, 2026-09-18
 
 M6 (M6.0-M6.6) fully ACCEPTED 2026-09-18: bounded relationship graph
 (ownerReferences, explicit typed references, Service/Pod selectors,
@@ -155,6 +155,14 @@ references, bounded reverse Config/Secret/ServiceAccount/PVC scans), the
 cycle-safe traversal are all implemented, unit/fake/live-tested, and
 interactively verified end to end via `scripts/accept-m6.py` plus a
 75-minute soak. Per-slice evidence: [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
+
+M7 (mutation policy/guardrails/journal infrastructure) is implementing as
+of this same date: central deterministic policy engine, incarnation-safe
+mutation identity, confirmation contract, single execution gateway with
+TOCTOU revalidation, redacted append-only journal, and read-only
+`:policy`/`:mutations` surfaces. M7 deliberately ships **no user-facing
+mutation workflow** — that is M8. Per-slice evidence:
+[M7_ACCEPTANCE.md](M7_ACCEPTANCE.md).
 
 M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
 curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config

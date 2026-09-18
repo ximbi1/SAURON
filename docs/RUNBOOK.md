@@ -80,6 +80,23 @@ run, fds/threads flat, one transient self-recovered timeout. **All of M6
 (M6.0-M6.6) ACCEPTED.** Local tag `m6-accepted`, never pushed without
 explicit authorization.
 
+M7 (mutation policy/guardrails/journal infrastructure, no user-facing
+workflow) started 2026-09-18 from accepted M6. M7.0-M7.5 implemented and
+unit/fake-HTTP tested (see [M7_ACCEPTANCE.md](M7_ACCEPTANCE.md)): mutation
+model + central policy engine (`src/mutation.rs`, `src/mutation/policy.rs`),
+the single execution gateway with TOCTOU revalidation
+(`src/kube/mutation.rs`), the redacted append-only journal
+(`src/mutation/journal.rs`), and the read-only `:policy`/`:mutations` TUI
+surfaces (`src/mutation/view.rs`). The one internal proof mutation
+(`tests/mutation_live.rs`, `sauron-m7` fixture) live-verified twice against
+`kind-sauron-test` only: preview→dry-run→confirmation→commit→verify→journal,
+plus same-name/new-UID replacement rejection. `scripts/accept-m7.py` (13
+scenarios covering `:policy`/`:mutations` plus M4/M5/M6 regression
+touchpoints, since M7 exposes no mutation-triggering keybinding) PASS twice.
+Full M1-M6 regression re-run and green after all M7 changes. 75-minute soak
+(`scripts/soak-m7.py`) in progress. `m7-accepted` will not be tagged until
+it completes and combined docs are reconciled.
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated

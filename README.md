@@ -25,11 +25,11 @@ action without passing explicit safety and policy boundaries.
 
 SAURON is being built as a 12-milestone project.
 
-M1 through M7 are currently **ACCEPTED**, with local annotated milestone
-tags (`m1-accepted` through `m7-accepted`) and live verification against an
+M1 through M8 are currently **ACCEPTED**, with local annotated milestone
+tags (`m1-accepted` through `m8-accepted`) and live verification against an
 isolated Kubernetes `kind` cluster.
 
-M8 is the next milestone and has not started yet.
+M9 is the next milestone and has not started yet.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -40,7 +40,7 @@ M8 is the next milestone and has not started yet.
 | M5 | Evidence-driven metrics, deterministic health, Explain 2.0, Timeline | ACCEPTED |
 | M6 | Relationship graph, adjacent resources, Xray | ACCEPTED |
 | M7 | Central mutation policy, guardrails and operation journal (infrastructure only — no mutation workflow yet) | ACCEPTED |
-| M8 | Guarded mutation workflows | NOT STARTED |
+| M8 | Guarded mutation workflows: Scale, Restart, Delete, Label, Annotate, with post-commit verification | ACCEPTED |
 | M9 | Flux, Argo CD and Helm integrations | NOT STARTED |
 | M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | NOT STARTED |
 | M11 | Eye, Pulse, evidence bundles, context diff and blast-radius analysis | NOT STARTED |
@@ -468,37 +468,60 @@ problem — relationship is not causation.
 
 ---
 
-## Mutation policy infrastructure (M7)
+## Guarded mutation workflows (M8)
 
-SAURON does not yet ship a mutation workflow — there is no delete, scale,
-restart, or edit command. M7 instead builds the mandatory pipeline every
-future mutation (M8) will have to pass through: a central, deterministic
-policy engine, an incarnation-safe mutation identity model, a confirmation
-contract bound to the exact intent, a single execution gateway with
-before-mutation revalidation, and a durable, redacted local journal.
+SAURON ships five guarded, user-facing mutation workflows, each a
+first-class semantic operation — never a generic patch console, never
+kubectl passthrough:
 
-Two read-only views exist today so this infrastructure is inspectable:
+    :scale N            -- Deployment / StatefulSet / ReplicaSet
+    :restart            -- Deployment / StatefulSet / DaemonSet (rolling restart)
+    :delete             -- Pod / Deployment / StatefulSet / DaemonSet / ReplicaSet / Job / CronJob / ConfigMap
+    :label KEY=VALUE / KEY-      -- set or remove one label
+    :annotate KEY=VALUE / KEY-   -- set or remove one annotation
+
+Every one of them walks through the exact same pipeline: intent → policy
+→ preview → optional server dry-run → confirmation (a double key-press
+for destructive/cluster-critical operations, a single press otherwise) →
+the single execution gateway with fresh before-mutation revalidation →
+a redacted, append-only local journal → exactly one bounded, cancellable
+post-commit verification. Commit outcome and verification outcome are
+always shown as two distinct facts (`COMMIT RESULT` / `VERIFICATION`) —
+a verification that times out or observes something unexpected never
+retroactively turns a successful commit into a failure, and readiness/
+health stays a separate concern (see Explain/Timeline above), never
+conflated with "the write was accepted."
+
+SAURON has no in-app setting that marks a cluster as verified for
+mutation from its name alone; that verification is deliberately kept
+external (an explicit `--mutation-test-cluster-verified` flag, set only
+by the guarded test-cluster script after independently proving cluster
+identity via Docker/API introspection). Production stays hard-denied by
+the existing default-readonly posture regardless.
+
+Two read-only views remain available for inspecting the pipeline itself:
 
     :policy
     u
 
 shows what a hypothetical Modify or Delete on the selected object would do
-under the real policy engine — fully local, zero network. SAURON has no
-setting anywhere that marks a cluster as verified for mutation; that
-verification is deliberately kept external to the running application. This
-view therefore denies every hypothetical mutation on every cluster it is
-run against, including the isolated development cluster — this is correct,
-not a bug, for a milestone that ships no mutation workflow.
+under the real policy engine — fully local, zero network.
 
     :mutations
     m
 
-shows the bounded, most-recent local mutation journal — also fully local,
-zero network. On a fresh installation it is empty.
+shows the bounded, most-recent local mutation journal (including the
+verification record correlated to each commit) — also fully local, zero
+network. On a fresh installation it is empty.
 
-See [`docs/MUTATION_POLICY.md`](docs/MUTATION_POLICY.md) and
+See [`docs/M8_ACCEPTANCE.md`](docs/M8_ACCEPTANCE.md),
+[`docs/MUTATION_POLICY.md`](docs/MUTATION_POLICY.md) and
 [`docs/MUTATION_JOURNAL.md`](docs/MUTATION_JOURNAL.md) for the full
-contract.
+contract. [`docs/M8B_ACCEPTANCE.md`](docs/M8B_ACCEPTANCE.md) and
+[`docs/FUTURE_MUTATIONS.md`](docs/FUTURE_MUTATIONS.md) capture planning
+for possible future extensions (cordon/drain/set-image/etc. and
+intentionally deferred families like Secret/RBAC mutation) — neither is
+started, and neither is a roadmap commitment.
 
 ---
 
@@ -686,18 +709,21 @@ Operational capabilities such as:
 
 must pass policy before establishing their operational connection.
 
-Future mutations will pass through a central pipeline:
+Every mutation (Scale/Restart/Delete/Label/Annotate, M8) passes through
+one central pipeline:
 
     intent
       -> policy
-      -> RBAC
       -> preview
+      -> optional server dry-run
       -> confirmation
       -> identity revalidation
       -> Kubernetes API
       -> outcome journal
+      -> post-commit verification
 
-This central mutation gateway is planned for M7.
+This central mutation gateway was built in M7 and is exercised by every
+M8 workflow — none of them call the Kubernetes API directly.
 
 ---
 
@@ -990,29 +1016,41 @@ Local annotated tag:
 
 The tag has not been published.
 
-No mutation workflow bypasses this layer, because no mutation workflow
-exists yet.
+No M8 mutation workflow bypasses this layer — every one of them
+(Scale/Restart/Delete/Label/Annotate) is built strictly on top of it.
 
 ---
 
-### M8 — Mutation workflows
+### M8 — Guarded mutation workflows
 
-Not started.
+**ACCEPTED.**
 
-Planned workflows include:
+Shipped: `:scale`, `:restart`, `:delete`, `:label`, `:annotate` — see
+[Guarded mutation workflows (M8)](#guarded-mutation-workflows-m8) above
+and [`docs/M8_ACCEPTANCE.md`](docs/M8_ACCEPTANCE.md) for full evidence.
 
-- delete
-- scale
-- rollout restart
-- set image
-- editor-based resource changes
-- CronJob trigger
-- suspend/resume
-- Node cordon/uncordon
-- drain
-- selected bulk actions
+Combined acceptance summary:
 
-Every workflow must use the M7 safety pipeline.
+    scripts/accept-m8.py (14 scenarios), run twice
+    full M1-M7 regression
+    75-minute soak
+    604 soak cycles
+    0 reconnects, 0 transient errors
+    RSS +2.3% over the full run (allocator noise, not a leak)
+    stable file descriptors, stable thread count
+
+Local annotated tag:
+
+    m8-accepted
+
+The tag has not been published.
+
+A possible future extension (cordon/uncordon, set image, CronJob trigger,
+evict, drain, force delete) is captured as planning-only in
+[`docs/M8B_ACCEPTANCE.md`](docs/M8B_ACCEPTANCE.md) — not started, not a
+roadmap commitment. Bulk actions remain scoped to M10; editor-based/
+arbitrary resource changes are catalogued as intentionally deferred in
+[`docs/FUTURE_MUTATIONS.md`](docs/FUTURE_MUTATIONS.md).
 
 ---
 

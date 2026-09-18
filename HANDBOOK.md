@@ -294,6 +294,87 @@ clients need separately owned forwarding connections. No new dependency chosen y
 
 ## Journal
 
+### 2026-09-18 — M8.6 ACCEPTED, M8 fully closed
+
+`scripts/accept-m8.py` (14 scenarios: readonly-then-`:reload`-enabled
+scale denial, scale/restart/label/annotate live round-trips with
+verification, Escape-before-commit zero-write, delete double-press, live
+same-name/new-UID replacement rejection, M4 forward held across 5
+checkpoints, rapid namespace churn, M5/M6/M7 regression touchpoints,
+32x9, terminal restoration) PASS twice against `kind-sauron-test`. Full
+M1-M7 regression re-run and green: `accept-m3.py filters`, `accept-m4.py`,
+`accept-m4-forward.py`, `accept-m5.py`, `accept-m5-combined.py`,
+`accept-m6.py`, `accept-m7.py`.
+
+75-minute soak (`scripts/soak-m8.py`) complete: 604 cycles, **zero
+reconnects, zero transient errors**, RSS +2.3% (allocator noise), fds/
+threads flat, M4 forward alive for all 604 checks with zero failures.
+Found and fixed a real bug in the soak harness itself (not the app)
+during the first attempt: a single `try/except` wrapping the entire
+per-cycle body meant one recoverable failure (a fixture-recreation
+timeout after a real delete commit) silently skipped every remaining
+check in that cycle — Explain/Timeline/Adjacent/Xray/forward-liveness —
+for the rest of the 75 minutes, without raising any error. SAURON itself
+behaved correctly throughout (it genuinely had no pod to select, since the
+recreation had failed). Fixed by splitting the cycle into independent
+per-section `try/except` blocks and adding a self-healing
+`ensure_m8_pod_exists()` check (3 retries, longer timeout) run every
+cycle, not only right after a commit. Verified with a 150-second dry run
+before relaunching the full 75-minute soak, which then completed with
+every per-category counter landing at exactly 604/604 — no section
+silently skipped.
+
+Full locked suite re-confirmed clean one final time: 192 unit + 48 fake
+HTTP, fmt/check/clippy (`-D warnings`). Fixtures reset to pristine and
+verified directly via `kubectl` (no leftover soak/accept/smoke keys).
+**All of M8 (M8.0-M8.6) ACCEPTED.** Local tag `m8-accepted`, never pushed
+without explicit authorization.
+
+### 2026-09-18 — M8.0-M8.5 ACCEPTED (shared mutation shell + Scale/Restart/Delete/Label/Annotate + post-commit verification)
+
+M8 adds the first real user-facing mutation workflows on top of M7's
+infrastructure. `mutation::workflow::{Built,Workflow}` is the one shared
+shell every action (`:scale N`, `:restart`, `:delete`, `:label KEY=VALUE`/
+`KEY-`, `:annotate`) builds on; `Document.workflow` + a `"mutation"` keymap
+mode render it. Correction made before any wiring: `cluster_verified_for_mutation`
+is a distinct state from `readonly`, never `!readonly` — a new
+`--mutation-test-cluster-verified` CLI flag, set only by
+`scripts/test-cluster.sh` after its own Docker/API identity proof, carries
+it; production stays hard-denied by the existing default-readonly posture
+regardless.
+
+M8.5 closes the loop: `mutation::Verification` (`Verified`/`Pending`/
+`Unknown`/`ObservedDifferent`/`TargetReplaced`/`DeletionInProgress`/
+`ObservedGone`) is a fact distinct from `MutationOutcome` — a later-unknown
+or later-differing verification never downgrades a `Committed` outcome.
+`kube::mutation::verify` walks the payload's own single-leaf JSON pointer
+path (`leaf_path_and_value`, RFC 6901-escaped for annotation keys
+containing literal `/`) for Modify, or checks `deletionTimestamp`/404 for
+Delete — exactly one bounded, cancellable attempt, never retried, and it
+never touches the watch-derived store (so it structurally cannot fabricate
+a Timeline entry). `workflow_report` always renders COMMIT RESULT and
+VERIFICATION as two separate lines.
+
+Full locked suite: 192 unit + 48 fake HTTP, fmt/check/clippy (`-D warnings`)
+clean. Live: `tests/mutation_workflows_live.rs` exercises all five
+workflows against real `kind-sauron-test` (scale round-trip, restart exact
+annotation, label/annotate set+remove with unrelated-metadata preservation,
+delete → bounded poll → `ObservedGone`), run twice, clean. Interactive:
+`scripts/smoke-m8.py`, a tmux-automated real-terminal pass (recorded
+honestly as automated, not manually observed) covering preview rendering,
+cancel, dry-run vs commit, double-press strong confirmation for delete,
+32x9, and exact terminal restoration.
+
+Three harness/script bugs found while building the smoke pass, zero app
+bugs: wrong resource id (`v1/deployments` vs `apps/v1/deployments`);
+row-selection ambiguity from Kubernetes' own auto-injected
+`kube-root-ca.crt` ConfigMap in every namespace (fixed with the existing
+`name=X` filter grammar, matching prior scripts' convention); `q` clearing
+an active filter before quitting (correct, pre-existing Back behavior,
+just needed a second press in the script). Full detail:
+`docs/M8_ACCEPTANCE.md`. M8.6 (combined adversarial acceptance, M1-M7
+regression, soak) not started until M8.5 closed, per explicit instruction.
+
 ### 2026-09-18 — M7.6 ACCEPTED, M7 fully closed
 
 `scripts/accept-m7.py` (13 scenarios: `:policy`/`:mutations` read-only

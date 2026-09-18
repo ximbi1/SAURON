@@ -102,6 +102,33 @@ tagging. **All of M7 (M7.0-M7.6) ACCEPTED.** Local tag `m7-accepted`,
 never pushed without explicit authorization. M7 ships no user-facing
 mutation workflow by design; M8 has not started.
 
+M8 (guarded user-facing mutation workflows) started 2026-09-18 from
+accepted M7. M8.0-M8.5 ACCEPTED (see [M8_ACCEPTANCE.md](M8_ACCEPTANCE.md)):
+shared `mutation::workflow::Workflow` shell + `"mutation"` keymap mode +
+`:scale`/`:restart`/`:delete`/`:label`/`:annotate` grammar; a new distinct
+`ConnectOptions.mutation_test_cluster_verified` (via
+`--mutation-test-cluster-verified`, never derived from `readonly` or
+context name) for guarded live testing; M8.5 post-commit verification
+(`mutation::Verification`, `kube::mutation::verify`) rendering COMMIT
+RESULT and VERIFICATION as two separate, never-collapsed facts. Full
+locked suite 192 unit + 48 fake HTTP green. Live:
+`tests/mutation_workflows_live.rs` against dedicated `sauron-m8` fixtures
+(all five workflows), run twice. Interactive: `scripts/smoke-m8.py`
+(tmux-automated), full pass including 32x9. Three harness/script bugs
+found and fixed, zero app bugs.
+
+M8.6 ACCEPTED 2026-09-18 -- M8 fully closed: `scripts/accept-m8.py` (14
+scenarios) all PASS, run twice, against `kind-sauron-test`. Full M1-M7
+regression re-run and green. 75-minute soak (`scripts/soak-m8.py`)
+complete: 604 cycles, zero reconnects, zero transient errors, RSS +2.3%,
+fds/threads flat, M4 forward alive throughout with zero failures. Found
+and fixed a real bug in the soak harness itself (a single wide
+`try/except` silently skipped the rest of a cycle's checks after one
+recoverable failure; fixed with per-section isolation and a self-healing
+fixture-recreation check) -- zero SAURON app bugs found. **All of M8
+(M8.0-M8.6) ACCEPTED.** Local tag `m8-accepted`, never pushed without
+explicit authorization. M9 has not started.
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated

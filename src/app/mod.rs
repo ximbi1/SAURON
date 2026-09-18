@@ -938,6 +938,32 @@ impl Runtime {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Uncordon: {}", object.name), built)
             }
+            Command::SetImage { container, image } => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let containers = object
+                    .value
+                    .pointer("/spec/template/spec/containers")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::set_image(
+                    scope,
+                    resource,
+                    &containers,
+                    container.as_deref(),
+                    &image,
+                    request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Set image: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards

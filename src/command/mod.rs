@@ -522,6 +522,10 @@ pub enum Command {
     },
     Cordon,
     Uncordon,
+    SetImage {
+        container: Option<String>,
+        image: String,
+    },
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -765,6 +769,27 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :uncordon");
             return Ok(Command::Uncordon);
         }
+        // "IMAGE" for the sole container, or "CONTAINER=IMAGE" to name one
+        // explicitly -- image references never contain '=', so the split
+        // is never ambiguous.
+        "set_image" => {
+            ensure!(tail.len() == 1, "Use :set_image [CONTAINER=]IMAGE");
+            let arg = &tail[0];
+            let (container, image) = match arg.split_once('=') {
+                Some((c, i)) => {
+                    ensure!(
+                        !c.is_empty() && !i.is_empty(),
+                        "Use :set_image [CONTAINER=]IMAGE"
+                    );
+                    (Some(c.to_owned()), i.to_owned())
+                }
+                None => {
+                    ensure!(!arg.is_empty(), "Use :set_image [CONTAINER=]IMAGE");
+                    (None, arg.clone())
+                }
+            };
+            return Ok(Command::SetImage { container, image });
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -826,8 +851,22 @@ pub fn parse(s: &str) -> Result<Command> {
 /// second list to remember to update.
 pub fn command_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = vec![
-        "ctx", "ns", "info", "reload", "sort", "exec", "shell", "attach", "scale", "restart",
-        "delete", "label", "annotate", "cordon", "uncordon",
+        "ctx",
+        "ns",
+        "info",
+        "reload",
+        "sort",
+        "exec",
+        "shell",
+        "attach",
+        "scale",
+        "restart",
+        "delete",
+        "label",
+        "annotate",
+        "cordon",
+        "uncordon",
+        "set_image",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1005,6 +1044,21 @@ fn cordon_and_uncordon_take_no_arguments() {
     assert!(matches!(parse(":uncordon"), Ok(Command::Uncordon)));
     assert!(parse(":cordon node-1").is_err());
     assert!(parse(":uncordon node-1").is_err());
+}
+#[test]
+fn set_image_parses_bare_image_or_container_equals_image() {
+    assert!(matches!(
+        parse(":set_image nginx:1.27"),
+        Ok(Command::SetImage { container: None, image }) if image == "nginx:1.27"
+    ));
+    assert!(matches!(
+        parse(":set_image web=nginx:1.27"),
+        Ok(Command::SetImage { container: Some(c), image }) if c == "web" && image == "nginx:1.27"
+    ));
+    assert!(parse(":set_image").is_err());
+    assert!(parse(":set_image a b").is_err());
+    assert!(parse(":set_image =nginx:1.27").is_err());
+    assert!(parse(":set_image web=").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

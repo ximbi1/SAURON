@@ -94,18 +94,23 @@ case "${1:-check}" in
     SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_workflows_live -- --ignored --nocapture
     ;;
   m8b-fixtures)
-    # M8B.1 (Cordon/Uncordon) targets the Node directly; no namespaced
-    # fixture object is needed for this slice. Ensure it starts
+    # M8B.1 (Cordon/Uncordon) targets the Node directly; ensure it starts
     # schedulable so live tests begin from a known state.
     for node in $(kube_test get nodes -o jsonpath='{.items[*].metadata.name}'); do
       kube_test uncordon "$node" 2>/dev/null || true
     done
+    # M8B.2 (Set Image): a dedicated two-container Deployment so a live
+    # test can prove the unrelated sidecar container is never touched.
+    kube_test apply -f "$repo_dir/tests/fixtures/m8b-set-image.yaml"
+    kube_test rollout status deployment/m8b-multi -n sauron-m8b --timeout=120s
     ;;
   m8b-reset)
     # Uncordon every node -- idempotent, safe even if nothing is cordoned.
     for node in $(kube_test get nodes -o jsonpath='{.items[*].metadata.name}'); do
       kube_test uncordon "$node"
     done
+    kube_test apply -f "$repo_dir/tests/fixtures/m8b-set-image.yaml"
+    kube_test rollout status deployment/m8b-multi -n sauron-m8b --timeout=120s
     ;;
   m8b-test)
     cd "$repo_dir"

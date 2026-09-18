@@ -120,7 +120,7 @@ silently skipping multi-node drain coverage without saying so.
 | --- | --- | --- |
 | M8B.0 | Shared advanced-operation extensions to the M7/M8 model (new `PolicyReason`s, node-target support in `MutationTarget`/`Scope`, `Job`-creation support in the executor, any new `Verification`/`Phase` variants needed across multiple operations below) | IN PROGRESS -- node-target support confirmed to need zero new code; `kube::mutation::verify`'s boolean-comparison logic extended (see M8B.1's real bug); no new `PolicyReason`/`Phase` variant added yet, none needed so far |
 | M8B.1 | Cordon / Uncordon (Node) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7, matching M8.2's own precedent -- `workflow::cordon`/`workflow::uncordon` wired to `:cordon`/`:uncordon`; live-verified twice against the real (single) node of `kind-sauron-test`, briefly cordoned then immediately uncordoned in one sequential test, per explicit user sign-off |
-| M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | PLANNED |
+| M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- `workflow::set_image` reconstructs the full `containers` array (option (b) from this document's own open question, resolved); dedicated `verify_set_image` name-keyed comparison added; live-verified against a real two-container Deployment, unrelated sidecar proven untouched |
 | M8B.3 | CronJob trigger (create a Job from a CronJob template) | PLANNED |
 | M8B.4 | Evict Pod (eviction subresource, PDB-aware) | PLANNED |
 | M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | PLANNED |
@@ -776,6 +776,52 @@ the authoritative record of M8's own bugs.
   deferred to M8B.7's combined script, matching M8.2 (Restart)'s own
   precedent of not requiring every individual slice to carry its own
   dedicated interactive scenario.
+- 2026-09-18: M8B.2 (Set Image) implemented and ACCEPTED (unit/fake-HTTP/
+  live; interactive deferred to M8B.7). This document's own open question
+  ("Patch::Strategic vs. builder-side full-array reconstruction") was
+  resolved in favor of option (b): `workflow::set_image` takes the
+  object's own full, live `spec.template.spec.containers` array, rejects
+  an unknown container name or an ambiguous (multi-container, unnamed)
+  request explicitly, and reconstructs the complete array with only the
+  named container's `image` field changed -- every other field of every
+  container (including the target's own `resources`/`env`/etc.) is
+  preserved verbatim via `Value::clone()`, never re-derived or
+  simplified. This keeps `kube::mutation::patch_request` on the single
+  `Patch::Merge` mechanism every other M8/M8B operation already uses --
+  no `Patch::Strategic` introduced, no second patch code path.
+  `leaf_path_and_value`'s single-scalar-leaf assumption does NOT apply to
+  an array-valued payload, exactly as predicted -- added a dedicated
+  `verify_set_image` (dispatched in `kube::mutation::verify` by checking
+  `intent.source_action == "set_image"` before falling through to the
+  generic path) that compares every container named in the payload
+  against the freshly-observed object by name-match, not array index or
+  whole-array equality -- this incidentally also re-verifies every
+  *unrelated* container matches too, catching an accidental cross-
+  container corruption from the builder's own reconstruction, not just
+  the one container that was supposed to change.
+  Live evidence: `tests/fixtures/m8b-set-image.yaml` (a dedicated
+  `sauron-m8b` namespace, two-container Deployment `m8b-multi`);
+  `m8b-fixtures`/`m8b-reset` extended to apply/roll it out;
+  `live_set_image_changes_only_the_named_container` in
+  `tests/mutation_m8b_live.rs` changes the `web` container's image and
+  asserts, via a fresh `kubectl`-equivalent GET, that `sidecar`'s image
+  and every other field survived byte-for-byte. Run twice via
+  `scripts/test-cluster.sh m8b-test`, both clean, fixtures reset to
+  pristine between runs.
+  6 unit tests (`mutation::workflow::tests`: unsupported-kind rejection,
+  unknown-container rejection, ambiguous-multi-container rejection,
+  single-container default-without-naming, unrelated-container/field
+  preservation, distinct payload hashes for different target containers),
+  3 fake-HTTP tests (verify success, verify `ObservedDifferent` when an
+  unrelated container unexpectedly changed, commit sending the full
+  reconstructed array with the unrelated container's exact image string
+  still present in the request body), 1 grammar test. Full locked suite:
+  205 unit + 54 fake HTTP, fmt/check/clippy (`-D warnings`) clean.
+  No SAURON app bugs found in this slice (M8B.1's `omitempty`-false fix
+  from the previous entry already generalized correctly here: Set Image's
+  own values are non-empty strings, never Kubernetes' boolean zero value,
+  so the fix's scope was correctly limited to booleans and did not need
+  broadening for this slice).
 
 ## Final acceptance conditions (proposed, mirroring M8's own structure)
 

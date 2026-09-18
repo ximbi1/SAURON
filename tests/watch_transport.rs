@@ -1188,6 +1188,167 @@ async fn verify_uncordon_treats_an_omitted_false_field_as_verified_not_different
     );
 }
 
+fn deployment_scope_and_resource(
+    uid: &str,
+) -> (
+    sauron::app::session::Scope,
+    sauron::kube::discovery::Resource,
+) {
+    use sauron::app::session::Scope;
+    (
+        Scope {
+            epoch: 1,
+            request: 1,
+            context: "fake".into(),
+            cluster: "fake".into(),
+            resource: "apps/v1/deployments".into(),
+            namespace: "sauron-m8b".into(),
+            name: "m8b-deploy".into(),
+            uid: uid.into(),
+        },
+        {
+            let mut r = resource();
+            r.api.group = "apps".into();
+            r.api.kind = "Deployment".into();
+            r.api.plural = "deployments".into();
+            r
+        },
+    )
+}
+
+#[tokio::test]
+async fn verify_set_image_confirms_the_named_container_and_leaves_others_untouched() {
+    use sauron::kube::mutation::verify;
+    use sauron::mutation::workflow;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({
+                "apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"namespace":"sauron-m8b","name":"m8b-deploy","uid":"uid-1"},
+                "spec":{"template":{"spec":{"containers":[
+                    {"name":"web","image":"nginx:1.27"},
+                    {"name":"sidecar","image":"envoy:1.30"}
+                ]}}}
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (scope, resource) = deployment_scope_and_resource("uid-1");
+    let current = vec![
+        json!({"name":"web","image":"nginx:1.26"}),
+        json!({"name":"sidecar","image":"envoy:1.30"}),
+    ];
+    let built = workflow::set_image(scope, resource, &current, Some("web"), "nginx:1.27", 1)
+        .expect("set_image supported for Deployment");
+    let outcome = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
+#[tokio::test]
+async fn verify_set_image_reports_observed_different_when_the_sidecar_unexpectedly_changed() {
+    use sauron::kube::mutation::verify;
+    use sauron::mutation::workflow;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({
+                "apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"namespace":"sauron-m8b","name":"m8b-deploy","uid":"uid-1"},
+                "spec":{"template":{"spec":{"containers":[
+                    {"name":"web","image":"nginx:1.27"},
+                    {"name":"sidecar","image":"envoy:1.31"}
+                ]}}}
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (scope, resource) = deployment_scope_and_resource("uid-1");
+    let current = vec![
+        json!({"name":"web","image":"nginx:1.26"}),
+        json!({"name":"sidecar","image":"envoy:1.30"}),
+    ];
+    let built = workflow::set_image(scope, resource, &current, Some("web"), "nginx:1.27", 1)
+        .expect("set_image supported for Deployment");
+    let outcome = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        sauron::mutation::Verification::ObservedDifferent(_)
+    ));
+}
+
+#[tokio::test]
+async fn mutation_set_image_commit_sends_the_full_reconstructed_containers_array() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    use sauron::mutation::workflow;
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m8b","name":"m8b-deploy","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(
+                request.contains("\"sidecar\"") && request.contains("envoy:1.30"),
+                "the unrelated sidecar container must still be present in the patch body: {request}"
+            );
+            assert!(
+                request.contains("nginx:1.27"),
+                "the exact requested image must be sent: {request}"
+            );
+            (200, json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"namespace":"sauron-m8b","name":"m8b-deploy","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let (scope, resource) = deployment_scope_and_resource("uid-1");
+    let current = vec![
+        json!({"name":"web","image":"nginx:1.26"}),
+        json!({"name":"sidecar","image":"envoy:1.30"}),
+    ];
+    let built = workflow::set_image(scope, resource, &current, Some("web"), "nginx:1.27", 1)
+        .expect("set_image supported for Deployment");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[tokio::test]
 async fn verify_restart_confirms_the_exact_template_annotation_value() {
     use sauron::kube::mutation::verify;

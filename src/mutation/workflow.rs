@@ -257,6 +257,87 @@ pub fn uncordon(scope: Scope, resource: Resource, request_id: u64) -> Result<Bui
     set_unschedulable(scope, resource, false, request_id, "uncordon")
 }
 
+pub const SET_IMAGE_KINDS: &[&str] = &["Deployment", "StatefulSet", "DaemonSet"];
+
+/// M8B.2: `current_containers` must be the object's own full, live
+/// `spec.template.spec.containers` array (every field, not just name/
+/// image) -- the payload below replaces the ENTIRE array (a JSON merge
+/// patch on a list is atomic, unlike Kubernetes' own strategic-merge
+/// container semantics), so every unrelated container and every other
+/// field of the targeted one must be reconstructed verbatim or they would
+/// be silently dropped. `container` of `None` is only valid when exactly
+/// one container exists -- multiple containers with no name given is an
+/// explicit "ambiguous" error, never a guess at index 0.
+pub fn set_image(
+    scope: Scope,
+    resource: Resource,
+    current_containers: &[Value],
+    container: Option<&str>,
+    image: &str,
+    request_id: u64,
+) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !SET_IMAGE_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("set_image", &kind));
+    }
+    if current_containers.is_empty() {
+        return Err("no containers found on this object".into());
+    }
+    fn name_of(c: &Value) -> Option<&str> {
+        c.get("name").and_then(Value::as_str)
+    }
+    let target_name = match container {
+        Some(name) => name,
+        None if current_containers.len() == 1 => name_of(&current_containers[0])
+            .ok_or_else(|| "the single container has no name".to_string())?,
+        None => {
+            return Err(
+                "ambiguous: this object has multiple containers, name one explicitly".into(),
+            );
+        }
+    };
+    let current = current_containers
+        .iter()
+        .find(|c| name_of(c) == Some(target_name))
+        .ok_or_else(|| format!("no container named \"{target_name}\" on this object"))?;
+    let old_image = current
+        .get("image")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let new_containers: Vec<Value> = current_containers
+        .iter()
+        .map(|c| {
+            if name_of(c) == Some(target_name) {
+                let mut c = c.clone();
+                c["image"] = Value::String(image.to_owned());
+                c
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    let payload =
+        Some(serde_json::json!({"spec": {"template": {"spec": {"containers": new_containers}}}}));
+    let change = format!(
+        "containers[\"{target_name}\"].image: {} -> {image}",
+        old_image.as_deref().unwrap_or("UNKNOWN")
+    );
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::Routine,
+            format!("spec.template.spec.containers[\"{target_name}\"].image"),
+            &payload,
+            "set_image",
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
 fn valid_dns_label_part(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
@@ -530,6 +611,127 @@ mod tests {
             cordoned.intent.payload_sha256,
             uncordoned.intent.payload_sha256
         );
+    }
+
+    fn containers(pairs: &[(&str, &str)]) -> Vec<Value> {
+        pairs
+            .iter()
+            .map(|(name, image)| {
+                serde_json::json!({"name": name, "image": image, "resources": {"requests": {"cpu": "5m"}}})
+            })
+            .collect()
+    }
+
+    #[test]
+    fn set_image_unsupported_kind_is_rejected_before_building_an_intent() {
+        assert!(
+            set_image(
+                scope(),
+                resource("ConfigMap"),
+                &containers(&[("web", "nginx:1.26")]),
+                None,
+                "nginx:1.27",
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn set_image_unknown_container_name_is_rejected() {
+        assert!(
+            set_image(
+                scope(),
+                resource("Deployment"),
+                &containers(&[("web", "nginx:1.26")]),
+                Some("sidecar"),
+                "nginx:1.27",
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn set_image_ambiguous_multi_container_without_a_name_is_rejected() {
+        assert!(
+            set_image(
+                scope(),
+                resource("Deployment"),
+                &containers(&[("web", "nginx:1.26"), ("sidecar", "envoy:1.30")]),
+                None,
+                "nginx:1.27",
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn set_image_single_container_defaults_without_naming_it() {
+        let built = set_image(
+            scope(),
+            resource("Deployment"),
+            &containers(&[("web", "nginx:1.26")]),
+            None,
+            "nginx:1.27",
+            1,
+        )
+        .unwrap();
+        assert!(built.change.contains("nginx:1.26 -> nginx:1.27"));
+    }
+
+    #[test]
+    fn set_image_preserves_unrelated_containers_and_unrelated_fields() {
+        let built = set_image(
+            scope(),
+            resource("Deployment"),
+            &containers(&[("web", "nginx:1.26"), ("sidecar", "envoy:1.30")]),
+            Some("web"),
+            "nginx:1.27",
+            1,
+        )
+        .unwrap();
+        let payload = built.payload.unwrap();
+        let containers = payload
+            .pointer("/spec/template/spec/containers")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(containers.len(), 2);
+        let web = containers
+            .iter()
+            .find(|c| c["name"] == "web")
+            .expect("web container present");
+        assert_eq!(web["image"], "nginx:1.27");
+        assert_eq!(web["resources"]["requests"]["cpu"], "5m");
+        let sidecar = containers
+            .iter()
+            .find(|c| c["name"] == "sidecar")
+            .expect("sidecar container untouched");
+        assert_eq!(sidecar["image"], "envoy:1.30");
+    }
+
+    #[test]
+    fn set_image_exact_container_change_produces_distinct_hash_from_other_targets() {
+        let a = set_image(
+            scope(),
+            resource("Deployment"),
+            &containers(&[("web", "nginx:1.26"), ("sidecar", "envoy:1.30")]),
+            Some("web"),
+            "nginx:1.27",
+            1,
+        )
+        .unwrap();
+        let b = set_image(
+            scope(),
+            resource("Deployment"),
+            &containers(&[("web", "nginx:1.26"), ("sidecar", "envoy:1.30")]),
+            Some("sidecar"),
+            "nginx:1.27",
+            1,
+        )
+        .unwrap();
+        assert_ne!(a.intent.payload_sha256, b.intent.payload_sha256);
     }
 
     #[test]

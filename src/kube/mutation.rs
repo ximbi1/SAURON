@@ -495,6 +495,15 @@ pub async fn verify(
 ) -> Verification {
     match intent.effect {
         MutationEffect::Delete => verify_delete(connection, &intent.target, cancel).await,
+        // set_image's payload replaces the whole `containers` array (see
+        // its builder's own doc comment), so `leaf_path_and_value`'s
+        // single-scalar-leaf assumption does not apply -- it needs its
+        // own name-keyed comparison, checked first and explicitly, never
+        // silently falling through to the generic path below.
+        MutationEffect::Modify if intent.source_action == "set_image" => match payload {
+            Some(p) => verify_set_image(connection, &intent.target, p, cancel).await,
+            None => Verification::Unknown,
+        },
         MutationEffect::Modify => match payload.and_then(leaf_path_and_value) {
             Some((path, expected)) => {
                 verify_modify(connection, &intent.target, &path, &expected, cancel).await
@@ -503,6 +512,77 @@ pub async fn verify(
         },
         MutationEffect::Create => Verification::Unknown,
     }
+}
+
+/// M8B.2: verifies every container named in the payload's own
+/// reconstructed `containers` array matches the live object's container
+/// of the same name by `image` -- not just the one that changed, so an
+/// accidental cross-container corruption from the builder's own
+/// full-array reconstruction would also be caught here, not only by unit
+/// tests. Container order is never assumed stable; matching is by `name`.
+async fn verify_set_image(
+    connection: &Connection,
+    target: &MutationTarget,
+    payload: &Value,
+    cancel: &CancellationToken,
+) -> Verification {
+    let expected_containers = match payload.pointer("/spec/template/spec/containers") {
+        Some(Value::Array(containers)) => containers,
+        _ => return Verification::Unknown,
+    };
+    let namespace = target
+        .resource
+        .namespaced
+        .then_some(target.scope.namespace.as_str());
+    let api = target.resource.api(connection.client.clone(), namespace);
+    let fetch = read_bounded(
+        connection,
+        api.resource_url(),
+        Some(&target.scope.name),
+        false,
+    );
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Verification::Unknown,
+        result = tokio::time::timeout(connection.timeout(), fetch) => result,
+    };
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(crate::evidence::Unknown::NotFound)) => {
+            return Verification::ObservedDifferent("object no longer exists".into());
+        }
+        _ => return Verification::Unknown,
+    };
+    let uid = value.pointer("/metadata/uid").and_then(Value::as_str);
+    if uid != Some(target.scope.uid.as_str()) {
+        return Verification::TargetReplaced;
+    }
+    let observed_containers = match value.pointer("/spec/template/spec/containers") {
+        Some(Value::Array(containers)) => containers,
+        _ => {
+            return Verification::ObservedDifferent(
+                "containers not found on fresh observation".into(),
+            );
+        }
+    };
+    for expected in expected_containers {
+        let name = expected.get("name").and_then(Value::as_str);
+        let expected_image = expected.get("image").and_then(Value::as_str);
+        let observed_image = observed_containers
+            .iter()
+            .find(|c| c.get("name").and_then(Value::as_str) == name)
+            .and_then(|c| c.get("image"))
+            .and_then(Value::as_str);
+        if observed_image != expected_image {
+            return Verification::ObservedDifferent(format!(
+                "container \"{}\" expected image {:?}, observed {:?}",
+                name.unwrap_or("<unnamed>"),
+                expected_image,
+                observed_image
+            ));
+        }
+    }
+    Verification::Verified
 }
 
 /// A `Phase::VerificationResult` record correlated by `request_id` to the

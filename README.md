@@ -16,10 +16,9 @@ without an explicit, policy-gated action.
 
 ## Status
 
-M1 through M5 are **accepted** (local annotated tags `m1-accepted` through
-`m5-accepted`, verified live against an isolated `kind` cluster, never
-against production). M6 (relationship graph) and M7 (guarded mutations) are
-not started.
+M1 through M6 are **accepted** (local annotated tags `m1-accepted` through
+`m6-accepted`, verified live against an isolated `kind` cluster, never
+against production). M7 (guarded mutations) is not started.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -28,7 +27,7 @@ not started.
 | M3 | Typed filters/sort, documents, Events, CRD printer columns | ACCEPTED |
 | M4 | Interactive sessions: logs, exec, shell, attach, port-forward | ACCEPTED |
 | M5 | Evidence-driven metrics, deterministic health, Explain 2.0, Timeline | ACCEPTED |
-| M6 | Relationship graph, blast radius | not started |
+| M6 | Bounded relationship graph, `:adjacent`, `:xray` | ACCEPTED |
 | M7 | Guarded mutations | not started |
 
 See [`HANDBOOK.md`](HANDBOOK.md) for the full engineering record and
@@ -62,6 +61,18 @@ See [`HANDBOOK.md`](HANDBOOK.md) for the full engineering record and
 - **Timeline**: a bounded, UID-scoped, session-local history of meaningful
   state transitions — never Events, never an audit log, and a watch
   reconnect never invents a transition it did not actually observe.
+- **Relationships** (`:adjacent`/`a`): a bounded graph built only from
+  verified sources — `ownerReferences`, explicit typed references (Pod
+  node/ConfigMap/Secret/ServiceAccount/PVC, PVC↔PV↔StorageClass), Service/Pod
+  selector matches, and status-backed references (EndpointSlice targetRef,
+  PV claimRef) — grouped as OWNED BY / OWNS / SELECTED BY / REFERENCES /
+  REFERENCED BY. A selector match is never shown as ownership, and an IP
+  address alone never creates an edge. `Enter` navigates to the selected
+  related object by its exact canonical identity, never by name.
+- **Xray** (`:xray`/`x`): the same verified relationships, traversed 1-3
+  bounded hops from the selected object, reusing the identical deterministic
+  health per node — never a second, parallel "graph health," and a related
+  object is never presented as the cause of a problem.
 
 ## Safety model
 
@@ -111,14 +122,16 @@ any fixture write.
   the full milestone journal.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — current checkpoint and live test
   procedures.
-- `docs/M3_ACCEPTANCE.md`, `docs/M4_ACCEPTANCE.md`, `docs/M5_ACCEPTANCE.md`
-  — per-milestone acceptance ledgers with recorded live evidence (M1/M2
-  acceptance is recorded directly in `HANDBOOK.md`'s journal).
+- `docs/M3_ACCEPTANCE.md`, `docs/M4_ACCEPTANCE.md`, `docs/M5_ACCEPTANCE.md`,
+  `docs/M6_ACCEPTANCE.md` — per-milestone acceptance ledgers with recorded
+  live evidence (M1/M2 acceptance is recorded directly in `HANDBOOK.md`'s
+  journal).
 - `docs/ARCHITECTURE.md` — module layout and runtime invariants.
 - `docs/METRICS.md`, `docs/HEALTH.md`, `docs/EXPLAIN.md`,
   `docs/TIMELINE.md`, `docs/PORT_FORWARD.md`, `docs/EXEC.md`,
   `docs/SESSIONS.md`, `docs/FILTERS.md`, `docs/SORTING.md`,
-  `docs/DOCUMENTS.md`, `docs/LOGS.md` — per-feature contracts.
+  `docs/DOCUMENTS.md`, `docs/LOGS.md`, `docs/RELATIONSHIPS.md` — per-feature
+  contracts.
 - `docs/SOFKA_PARITY.md` / `docs/RESEARCH.md` — competitive research
   baseline; research is explicitly not a claim of shipped parity.
 

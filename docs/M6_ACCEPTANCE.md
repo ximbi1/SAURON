@@ -75,6 +75,16 @@ These are observations, not proof of leak freedom.
 
 ## Journal
 
+- `377402e` commits M6.1 extraction/transport, not whole-slice acceptance. Added
+  aggregate selected-object report with additive issues, exact root revalidation
+  and explicit reverse-scan coverage. Fake tests for Forbidden+successful edge
+  and root replacement during collection passed. Added byte-bounded native request
+  transport (2 MiB GET / 8 MiB metadata list), error bodies ignored, 30-second
+  overall deadline. Full suite 116 unit + 25 fake HTTP passed; live aggregate
+  Deployment report passed through m6-test. Follow-up fmt check caught formatting
+  on the final issue-cap marker; corrected with rustfmt, final suite passed.
+  No UI/epoch delivery yet, no M6.1 acceptance claim.
+
 - M6.1: shared extractor covers every requested PodSpec path including six workload
   prefixes. Exact GVK lookup, namespace validation, expected UID rejection,
   metadata-only Secret reads (406 stays unsupported), cancellation and per-request

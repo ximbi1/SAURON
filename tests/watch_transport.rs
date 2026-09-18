@@ -364,6 +364,93 @@ async fn graph_reverse_ownership_is_uid_scoped_bounded_and_metadata_only() {
     assert!(!objects.iter().any(|o| o.name == "child-0"));
     assert!(objects.iter().all(|o| o.value.get("spec").is_none()));
 }
+
+#[tokio::test]
+async fn graph_report_keeps_verified_edges_when_another_source_is_forbidden() {
+    use sauron::evidence::Unknown;
+    use sauron::kube::relationships::report::adjacent;
+    let root = json!({"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"p","uid":"root","resourceVersion":"1"},"spec":{"volumes":[{"configMap":{"name":"cm"}},{"secret":{"secretName":"s"}}]}});
+    let body = root.to_string();
+    let server = Server::new(move |path| {
+        if path.ends_with("/pods/p") { (200,body.clone()) }
+        else if path.ends_with("/configmaps/cm") { (200,json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"default","name":"cm","uid":"cm"}}).to_string()) }
+        else if path.ends_with("/secrets/s") { (403,json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","message":"private sentinel","code":403}).to_string()) }
+        else { (200,json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[]}).to_string()) }
+    }).await;
+    let mut cm = resource();
+    cm.api.kind = "ConfigMap".into();
+    cm.api.plural = "configmaps".into();
+    let mut secret = resource();
+    secret.api.kind = "Secret".into();
+    secret.api.plural = "secrets".into();
+    let connection = connection_with(server.client(), vec![resource(), cm, secret]);
+    let report = adjacent(
+        &connection,
+        1,
+        &resource(),
+        &Object::new(root),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("partial usable graph");
+    assert_eq!(report.graph.edges().len(), 1);
+    assert!(report.issues.iter().any(|i| i.reason == Unknown::Forbidden));
+    assert!(
+        report
+            .issues
+            .iter()
+            .all(|i| !i.source.contains("private sentinel"))
+    );
+    assert_eq!(report.requests, 5);
+}
+
+#[tokio::test]
+async fn graph_report_rechecks_root_uid_after_collection() {
+    use sauron::{evidence::Unknown, kube::relationships::report::adjacent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let reads = AtomicUsize::new(0);
+    let server = Server::new(move |path| {
+        if path.ends_with("/pods/p") {
+            let uid = if reads.fetch_add(1,Ordering::SeqCst)==0 {"original"} else {"replacement"};
+            (200,pod(uid,"1","p").to_string())
+        } else { (200,json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[]}).to_string()) }
+    }).await;
+    let result = adjacent(
+        &connection(server.client()),
+        1,
+        &resource(),
+        &Object::new(pod("original", "1", "p")),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(result, Err(Unknown::TargetReplaced)));
+}
+
+#[tokio::test]
+async fn graph_response_allocation_is_bounded_before_json_decode() {
+    use sauron::{
+        evidence::Unknown,
+        graph::{Provenance, references::Target},
+        kube::relationships::fetch_target,
+    };
+    let server = Server::new(|_| (200, " ".repeat(2 * 1024 * 1024 + 1))).await;
+    let c = connection(server.client());
+    let source = Object::new(pod("original", "1", "p"));
+    let target = Target {
+        api_version: "v1".into(),
+        kind: "Pod".into(),
+        namespace: "default".into(),
+        name: "p".into(),
+        expected_uid: Some("original".into()),
+        provenance: Provenance::ExplicitReference,
+    };
+    assert_eq!(
+        fetch_target(&c, 1, &source, &target, &CancellationToken::new())
+            .await
+            .expect_err("bounded response"),
+        Unknown::Partial
+    );
+}
 fn resource() -> Resource {
     Resource {
         api: ApiResource {

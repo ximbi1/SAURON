@@ -79,4 +79,20 @@ async fn ownership_and_template_references_resolve_live() {
         }
     }
     assert!(count > 0);
+    let report = relationships::report::adjacent(&c, 1, &deployment_resource, &deployment, &cancel)
+        .await
+        .expect("aggregate adjacent report");
+    assert_eq!(report.root.uid, deployment.uid);
+    assert!(
+        report.graph.edges().len() >= 4,
+        "template references plus owned ReplicaSet"
+    );
+    assert!(report.requests <= 49);
+    assert!(report.candidates <= 800);
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.source.contains("reverse ownership limited"))
+    );
 }

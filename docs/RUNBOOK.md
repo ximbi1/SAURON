@@ -34,7 +34,8 @@ M6.0 foundation committed `14f4562` (110 unit + 19 fake HTTP green); M6.1
 typed Pod/workload/owner extraction and timed metadata-aware transport implemented.
 Full locked suite 116 unit + 22 fake HTTP green; new guarded `m6-fixtures` and
 `m6-test` commands, live ownership/template reference check PASS. Aggregate
-collector and UI next. Track
+report also passed live; 116 unit + 25 fake HTTP green (final fmt correction
+verified). Network/storage resolver families and UI remain pending. Track
 actual checks and live evidence in [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
 No cluster operations performed during this initial foundation work.
 

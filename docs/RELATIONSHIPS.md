@@ -47,4 +47,15 @@ validates namespace rules and expected owner UID, and offers cancellable timed r
 Core Secret reads use kube's `get_metadata` with no full-object fallback. Errors retain
 Forbidden/NotFound/Unsupported/TargetReplaced/TimedOut rather than empty relationships.
 These helpers are not yet wired into UI; reverse scans and operation-wide budgets
-remain pending. No new live acceptance claim.
+are now available in `kube::relationships::report`, UI remains pending.
+
+Aggregate report budgets: sequential reads (concurrency 1), at most 49 logical
+read attempts including reserved final root validation, 30-second overall deadline;
+configured timeout per request. Successful bodies are capped before JSON decode
+(2 MiB/object, 8 MiB/list); rejected API bodies are not consumed. One page of 200
+metadata candidates and 50 matching children per explicitly selected GVR. Reverse
+ownership scans selected GVR plus Pod/ReplicaSet/Job only; coverage is always labeled
+PARTIAL, not arbitrary cluster-wide completeness. Maximum 64 source issues with an
+explicit omitted-issues marker. Root UID and resourceVersion are revalidated after
+collection; a changed root is rejected as replaced/stale, not labeled current.
+No permanent graph cache. Request counts are logical attempts, not middleware retries.

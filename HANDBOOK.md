@@ -320,7 +320,19 @@ created only `sauron-m6` namespace and m6-config/m6-secret/m6-sa/m6-web;
 First live run PASS (real Deployment→RS→Pod ownership, config/Secret/SA
 references; Secret content absent). Next: aggregate reports with operation-wide budgets,
 source failures and target freshness; then network/storage edges and UI.
-No UI or M6 slice acceptance yet; Explain is unchanged.
+No UI or M6 slice acceptance yet; Explain is unchanged. Extraction/transport
+checkpoint committed `377402e`. Now implementing aggregate adjacent report in
+`src/kube/relationships/report.rs`: root GET+UID/RV revalidation, successful
+edges retained alongside bounded source issues, selected-kind/Pod/RS/Job reverse
+scan (explicitly incomplete), request/candidate counters. Two fake HTTP tests
+added for additive Forbidden and root replacement during collection; running.
+Aggregate live test passed against m6-web. Transport now uses native kube request
+builders plus streaming byte caps (2 MiB GET/8 MiB metadata list), ignoring error
+bodies; aggregate overall deadline 30s/concurrency 1/49 logical attempts including
+final validation; 64 issues with explicit overflow marker. Full suite 116 unit +
+25 fake HTTP passed; final fmt-only correction/check rerun passed.
+Pending M6.2/M6.3 edge families remain unimplemented; UI/epoch delivery is next
+after those resolver families. No live user-facing acceptance claimed.
 
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 

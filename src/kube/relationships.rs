@@ -1,5 +1,6 @@
 //! Bounded read-only relationship resolution. No tasks are spawned here: callers
 //! own the future and its cancellation, just as for document evidence collection.
+pub mod report;
 use super::{
     Connection,
     discovery::{Catalog, Resource},
@@ -9,7 +10,55 @@ use crate::{
     graph::{Identity, Provenance, references::Target},
     resources::Object,
 };
+use http_body_util::BodyExt;
 use tokio_util::sync::CancellationToken;
+
+/// kube's request builder preserves native metadata negotiation, while streaming
+/// the body ourselves enforces a byte cap before JSON allocation. API error bodies
+/// are never read or included in reports.
+async fn read_bounded(
+    connection: &Connection,
+    url: &str,
+    name: Option<&str>,
+    metadata_only: bool,
+) -> Result<serde_json::Value, Unknown> {
+    let builder = kube::core::Request::new(url);
+    let request = match name {
+        Some(name) if metadata_only => builder.get_metadata(name, &Default::default()),
+        Some(name) => builder.get(name, &Default::default()),
+        None => builder.list_metadata(&kube::api::ListParams::default().limit(200)),
+    }
+    .map_err(|_| Unknown::Malformed)?;
+    let response = connection
+        .client
+        .send(request.map(kube::client::Body::from))
+        .await
+        .map_err(api_reason)?;
+    match response.status().as_u16() {
+        200..=299 => {}
+        401 | 403 => return Err(Unknown::Forbidden),
+        404 => return Err(Unknown::NotFound),
+        406 => return Err(Unknown::Unsupported),
+        _ => return Err(Unknown::TransportError),
+    }
+    let max = if name.is_some() {
+        2 * 1024 * 1024
+    } else {
+        8 * 1024 * 1024
+    };
+    let mut body = response.into_body();
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| Unknown::TransportError)?;
+        if let Some(data) = frame.data_ref() {
+            if bytes.len().saturating_add(data.len()) > max {
+                return Err(Unknown::Partial);
+            }
+            bytes.extend_from_slice(data);
+        }
+    }
+    serde_json::from_slice(&bytes).map_err(|_| Unknown::Malformed)
+}
 
 /// Exact GVK lookup, never human alias resolution. Duplicate served descriptions
 /// with different canonical resources are ambiguous and must not pick a winner.
@@ -103,10 +152,11 @@ pub async fn children(
     let namespace = resource.namespaced.then_some(owner.namespace.as_str());
     let api = resource.api(connection.client.clone(), namespace);
     let read = async {
-        let params = kube::api::ListParams::default().limit(200);
         // Ownership requires only metadata. Particularly important if the caller
         // explicitly asks for Secret children: no Secret payload is requested.
-        let list = api.list_metadata(&params).await.map_err(api_reason)?;
+        let value = read_bounded(connection, api.resource_url(), None, true).await?;
+        let list: kube::core::ObjectList<kube::core::PartialObjectMeta<kube::core::DynamicObject>> =
+            serde_json::from_value(value).map_err(|_| Unknown::Malformed)?;
         let mut partial = list
             .metadata
             .continue_
@@ -167,11 +217,14 @@ pub async fn fetch_target(
     let api = resource.api(connection.client.clone(), namespace.as_deref());
     let read = async {
         let value = if resource.api.api_version == "v1" && resource.api.kind == "Secret" {
-            let metadata = api.get_metadata(&target.name).await.map_err(api_reason)?;
-            serde_json::json!({"apiVersion": resource.api.api_version, "kind":resource.api.kind, "metadata":metadata.metadata})
+            let metadata =
+                read_bounded(connection, api.resource_url(), Some(&target.name), true).await?;
+            if metadata["kind"] != "PartialObjectMetadata" {
+                return Err(Unknown::Unsupported);
+            }
+            serde_json::json!({"apiVersion": resource.api.api_version, "kind":resource.api.kind, "metadata":metadata["metadata"]})
         } else {
-            let object = api.get(&target.name).await.map_err(api_reason)?;
-            serde_json::to_value(object).map_err(|_| Unknown::Malformed)?
+            read_bounded(connection, api.resource_url(), Some(&target.name), false).await?
         };
         let object = Object::new(value);
         let id = validate_target(scope, &resource, target, &object, namespace.as_deref())?;

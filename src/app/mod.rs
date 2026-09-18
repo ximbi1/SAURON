@@ -488,6 +488,7 @@ impl Runtime {
                     doc.title = title;
                     doc.replace(text);
                     doc.adjacent = adjacent;
+                    doc.adjacent_selected = 0;
                     doc.freshness = document::Freshness::Snapshot(chrono::Utc::now());
                 }
             }
@@ -1175,21 +1176,16 @@ impl Runtime {
         });
         Ok(())
     }
-    /// Jump to the related object nearest the top of the Adjacent view, via its
+    /// Jump to the currently selected Adjacent/Xray target (moved with Up/Down,
+    /// never ambiguous even when the whole report fits on screen), via its
     /// exact canonical identity (UID-verified on arrival by the normal watch/
     /// rebuild path) -- never by name alone. Reuses the same history stack as
     /// `[`/`]` so this is a normal, reversible navigation, not a special case.
     fn follow_adjacent(&mut self) -> Result<()> {
-        let top = self
-            .active_document_mut()
-            .context("No document open")?
-            .top_line();
         let doc = self.active_document_mut().context("No document open")?;
         let target = doc
             .adjacent
-            .iter()
-            .find(|t| t.line >= top)
-            .or_else(|| doc.adjacent.last())
+            .get(doc.adjacent_selected)
             .cloned()
             .context("No related object in this document")?;
         let context = self
@@ -2351,12 +2347,6 @@ mod tests {
             uid: "cm-uid".into(),
         }];
         rt.state.mode = Mode::Document(doc);
-        // Follow with the viewport already scrolled past the target's line must
-        // still resolve to it, never to nothing: `Follow` picks the nearest
-        // target at or after the top of view, falling back to the last one.
-        if let Mode::Document(doc) = &mut rt.state.mode {
-            doc.scroll = 10;
-        }
         rt.action(Action::Follow).expect("follow");
         assert_eq!(rt.history.len(), 1, "the pods view is pushed onto history");
         assert!(matches!(rt.state.mode, Mode::Table));
@@ -2378,6 +2368,87 @@ mod tests {
         rt.state.mode = Mode::Document(Document::new("Yaml: p".into(), "kind: Pod".into()));
         assert!(rt.action(Action::Follow).is_err());
         assert!(rt.history.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn adjacent_up_down_move_the_target_cursor_not_raw_scroll() {
+        let mut rt = runtime();
+        let secret = Resource {
+            api: ::kube::core::ApiResource {
+                group: String::new(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Secret".into(),
+                plural: "secrets".into(),
+            },
+            namespaced: true,
+            short_names: vec![],
+            verbs: vec!["watch".into()],
+        };
+        rt.connection
+            .as_mut()
+            .expect("connected")
+            .catalog
+            .resources
+            .push(secret.clone());
+        let root = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"p","uid":"root-uid"}
+        }));
+        let mut doc = Document::new(
+            "Adjacent: p".into(),
+            "ADJACENT: v1/pods test/p\n\nREFERENCES\n  v1/configmaps n/cm [Healthy] via a\n  v1/secrets n/s [Healthy] via b\n"
+                .into(),
+        );
+        doc.source = Some(document::Source {
+            resource: rt.state.resource.clone().expect("resource"),
+            selected: std::sync::Arc::new(root),
+            action: Action::Adjacent,
+            warning_only: false,
+        });
+        let configmap = Resource {
+            api: ::kube::core::ApiResource {
+                group: String::new(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "ConfigMap".into(),
+                plural: "configmaps".into(),
+            },
+            namespaced: true,
+            short_names: vec![],
+            verbs: vec!["watch".into()],
+        };
+        doc.adjacent = vec![
+            crate::adjacent::Target {
+                line: 3,
+                resource: configmap,
+                namespace: "n".into(),
+                name: "cm".into(),
+                uid: "cm-uid".into(),
+            },
+            crate::adjacent::Target {
+                line: 4,
+                resource: secret,
+                namespace: "n".into(),
+                name: "s".into(),
+                uid: "s-uid".into(),
+            },
+        ];
+        rt.state.mode = Mode::Document(doc);
+        assert_eq!(rt.active_document_mut().unwrap().adjacent_selected, 0);
+        rt.action(Action::Down)
+            .expect("down moves the cursor, never a plain scroll");
+        assert_eq!(rt.active_document_mut().unwrap().adjacent_selected, 1);
+        rt.action(Action::Down)
+            .expect("down clamps at the last target");
+        assert_eq!(rt.active_document_mut().unwrap().adjacent_selected, 1);
+        rt.action(Action::Follow).expect("follow");
+        assert_eq!(rt.state.query.resource, "v1/secrets");
+        assert_eq!(
+            rt.state.selected.as_deref(),
+            Some("s-uid"),
+            "Follow must use the selected target, not always the first one"
+        );
         rt.shutdown().await;
     }
     #[tokio::test]

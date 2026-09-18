@@ -55,6 +55,10 @@ pub struct Document {
     /// Adjacent-only: navigable related objects keyed to their rendered line.
     /// Empty for every other action.
     pub adjacent: Vec<adjacent::Target>,
+    /// Index into `adjacent`. While `adjacent` is non-empty, Up/Down move this
+    /// cursor (not the raw scroll position) so `Follow` is always unambiguous
+    /// -- including when the whole report fits on screen without scrolling.
+    pub adjacent_selected: usize,
     pub source_errors: Vec<String>,
     pub filter_matches: bool,
     pub evicted: u64,
@@ -95,6 +99,7 @@ impl Document {
             exec_request: None,
             timeline_for: None,
             adjacent: vec![],
+            adjacent_selected: 0,
             source_errors: vec![],
             filter_matches: false,
             evicted: 0,
@@ -249,11 +254,6 @@ impl Document {
         self.scroll = self.scroll.min(self.visual.len().saturating_sub(1));
         self.horizontal = (self.horizontal as usize).min(self.max_width.saturating_sub(1)) as u16;
     }
-    /// The original (pre-wrap) line index currently at the top of the
-    /// viewport, used only to map `Follow` onto the nearest Adjacent target.
-    pub fn top_line(&self) -> usize {
-        self.visual.get(self.scroll).map_or(0, |v| v.line)
-    }
     pub fn visible_lines(&self) -> impl Iterator<Item = &str> {
         self.visual
             .iter()
@@ -261,7 +261,40 @@ impl Document {
             .take(self.page_size)
             .map(|v| &self.lines[v.line][v.bytes.clone()])
     }
+    /// Original (pre-wrap) line indices in the same order as `visible_lines`,
+    /// so the renderer can highlight whichever one is `selected_target_line`.
+    pub fn visible_line_numbers(&self) -> impl Iterator<Item = usize> + '_ {
+        self.visual
+            .iter()
+            .skip(self.scroll)
+            .take(self.page_size)
+            .map(|v| v.line)
+    }
+    pub fn selected_target_line(&self) -> Option<usize> {
+        self.adjacent.get(self.adjacent_selected).map(|t| t.line)
+    }
+    fn scroll_to_line(&mut self, line: usize) {
+        if let Some(pos) = self.visual.iter().position(|v| v.line == line)
+            && !(self.scroll..self.scroll + self.page_size).contains(&pos)
+        {
+            self.scroll = pos.min(self.visual.len().saturating_sub(1));
+        }
+    }
     pub fn navigate(&mut self, action: Action) {
+        // Adjacent/Xray: Up/Down step through navigable targets directly, so
+        // Follow is always unambiguous -- even when the whole report already
+        // fits on screen and scrolling would never change the top line.
+        if !self.adjacent.is_empty() && matches!(action, Action::Down | Action::Up) {
+            self.adjacent_selected = match action {
+                Action::Down => (self.adjacent_selected + 1).min(self.adjacent.len() - 1),
+                Action::Up => self.adjacent_selected.saturating_sub(1),
+                _ => unreachable!(),
+            };
+            if let Some(line) = self.selected_target_line() {
+                self.scroll_to_line(line);
+            }
+            return;
+        }
         self.follow = false;
         self.scroll = match action {
             Action::Down => self.scroll.saturating_add(1),

@@ -370,9 +370,11 @@ fn render_document(frame: &mut Frame, area: Rect, doc: &mut Document, theme: The
         );
         return;
     }
+    let target_line = doc.selected_target_line();
     let text: Vec<Line> = doc
-        .visible_lines()
-        .map(|line| {
+        .visible_line_numbers()
+        .zip(doc.visible_lines())
+        .map(|(line_no, line)| {
             let mut spans = Vec::new();
             let mut start = 0;
             if let Some(regex) = &doc.search_regex {
@@ -388,7 +390,11 @@ fn render_document(frame: &mut Frame, area: Rect, doc: &mut Document, theme: The
                 }
             }
             spans.push(Span::raw(&line[start..]));
-            Line::from(spans)
+            let mut rendered = Line::from(spans);
+            if Some(line_no) == target_line {
+                rendered = rendered.style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+            rendered
         })
         .collect();
     let paragraph = Paragraph::new(text)

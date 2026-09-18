@@ -8,6 +8,7 @@ pub mod explain;
 pub mod filters;
 pub mod graph;
 pub mod kube;
+pub mod mutation;
 pub mod resources;
 pub mod safety;
 pub mod ui;

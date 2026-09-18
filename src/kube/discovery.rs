@@ -7,7 +7,7 @@ use futures_util::{StreamExt, stream};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::APIResourceList;
 use std::{collections::BTreeMap, time::Duration};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resource {
     pub api: ApiResource,
     pub namespaced: bool,

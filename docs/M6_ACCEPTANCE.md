@@ -15,7 +15,7 @@ and status reference are distinct provenance classes. No name heuristics.
 | M6.0 | Canonical scoped identities, provenance, bounded deterministic graph and traversal | TESTED foundation | 5 new unit tests; 110 unit + 19 fake HTTP suite | None | Unresolved-target/source-error presentation arrives with resolver; no UI yet | NOT ACCEPTED live |
 | M6.1 | Generic owner UID validation; Pod/workload explicit references | IMPLEMENTING transport integration | 4 extractor + 2 resolver unit tests; 3 graph fake HTTP; full suite 116 unit + 22 fake HTTP green | Guarded m6-test PASS: Deployment→RS→Pod UID chain, template config/Secret/SA resolution | No aggregate report/UI; no operation-wide request budget yet | NOT ACCEPTED |
 | M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | TESTED | 3 pure network tests + 2 catalog-ambiguity tests + 1 reverse-selector fake HTTP test; 26 fake HTTP + 121 unit green | Guarded m6-test PASS: Service→Pod selector, Ingress→Service/TLS-Secret, real controller EndpointSlice targetRef without apiVersion resolves through unambiguous catalog | Never infer Pods from IP; EndpointSlice apiVersion omission root-caused and fixed (see journal) | ACCEPTED |
-| M6.3 | Storage and bounded reverse config/identity/mount references | NOT STARTED | Pending | None | No arbitrary CRD reference inference | NOT ACCEPTED |
+| M6.3 | Storage and bounded reverse config/identity/mount references | TESTED | 3 storage-extraction unit tests + 1 reverse-reference fake HTTP test; 27 fake HTTP + 124 unit green | Guarded m6-test PASS: PVC→PV, PVC→StorageClass, PV→PVC via claimRef with exact UID match, PV→StorageClass, reverse Pod→PVC, against a real dynamically-provisioned local-path PV | claimRef kind/apiVersion hardcoded as schema-fixed (not a guess, unlike EndpointSlice targetRef); reverse scan bounded to an explicit built-in workload candidate list (Pods/Deployments/StatefulSets/DaemonSets/Jobs/CronJobs), no arbitrary CRD reference inference | ACCEPTED |
 | M6.4 | Adjacent with UID-safe canonical navigation/history | NOT STARTED | Pending | None | Registry/help/32x9 required | NOT ACCEPTED |
 | M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | NOT STARTED | Pending | None | No global graph database | NOT ACCEPTED |
 | M6.6 | Combined adversarial acceptance, regressions, soak | NOT STARTED | Pending | None | Tag prohibited until complete | NOT ACCEPTED |
@@ -74,6 +74,26 @@ forward active: cycles, graph operations, RSS/fds/threads/tasks, errors and part
 These are observations, not proof of leak freedom.
 
 ## Journal
+
+- M6.3 accepted: added `src/graph/references/storage.rs` (PVC.spec.volumeName->PV,
+  PV.spec.claimRef->PVC with UID carried verbatim from the field Kubernetes
+  populates on bind, PVC/PV.spec.storageClassName->cluster-scoped StorageClass).
+  claimRef's kind/apiVersion are hardcoded, not guessed: the field is schema-fixed
+  to name exactly one PersistentVolumeClaim, unlike EndpointSlice's targetRef which
+  can point at any kind. Added `reverse_references()` to
+  `kube/relationships/report.rs`: for ConfigMap/Secret/ServiceAccount/PVC roots,
+  scans an explicit bounded candidate list (Pods, Deployments, StatefulSets,
+  DaemonSets, Jobs, CronJobs) and links back any candidate whose own `extract()`
+  targets match by kind/namespace/name; a denied kind records an issue and does
+  not drop edges already found in another kind. Added 3 storage-extraction unit
+  tests and 1 reverse-reference fake-HTTP test
+  (`graph_report_reverse_configmap_reference_from_pod_and_deployment`). Extended
+  the m6-fixtures Deployment with a PVC mount (`m6-data`, default `standard`
+  StorageClass, WaitForFirstConsumer) so the live cluster genuinely provisions
+  and binds a PV. Full locked fmt/check/clippy/test green: 124 unit + 27 fake
+  HTTP. Guarded `scripts/test-cluster.sh m6-test` replay against `kind-sauron-test`
+  passed, including asserting the PV's real claimRef UID matches the exact live
+  PVC object. M6.3 ACCEPTED. Proceeding to M6.4 (Adjacent view).
 
 - M6.2 accepted: independent review confirmed the EndpointSlice apiVersion fix is
   correctly scoped (only `Provenance::StatusReference` tolerates an empty

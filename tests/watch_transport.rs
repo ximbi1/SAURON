@@ -450,6 +450,69 @@ async fn graph_report_reverse_service_selector_from_pod_root() {
 }
 
 #[tokio::test]
+async fn graph_report_reverse_configmap_reference_from_pod_and_deployment() {
+    use sauron::graph::Provenance;
+    use sauron::kube::relationships::report::adjacent;
+    let root = json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"default","name":"cm","uid":"cm-uid","resourceVersion":"1"}});
+    let body = root.to_string();
+    let server = Server::new(move |path| {
+        if path.ends_with("/configmaps/cm") {
+            (200, body.clone())
+        } else if path.contains("/namespaces/default/pods") {
+            (200, json!({"items":[
+                {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"mounts-cm","uid":"pod-match"},"spec":{"volumes":[{"configMap":{"name":"cm"}}]}},
+                {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"unrelated","uid":"pod-other"},"spec":{"volumes":[{"configMap":{"name":"other"}}]}}
+            ]}).to_string())
+        } else if path.contains("/namespaces/default/deployments") {
+            (200, json!({"items":[
+                {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"namespace":"default","name":"web","uid":"dep-match"},"spec":{"template":{"spec":{"containers":[{"envFrom":[{"configMapRef":{"name":"cm"}}]}]}}}}
+            ]}).to_string())
+        } else {
+            (200, json!({"items":[]}).to_string())
+        }
+    })
+    .await;
+    let mut configmap = resource();
+    configmap.api.kind = "ConfigMap".into();
+    configmap.api.plural = "configmaps".into();
+    let mut deployment = resource();
+    deployment.api.kind = "Deployment".into();
+    deployment.api.group = "apps".into();
+    deployment.api.api_version = "apps/v1".into();
+    deployment.api.plural = "deployments".into();
+    let connection = connection_with(
+        server.client(),
+        vec![configmap.clone(), resource(), deployment],
+    );
+    let report = adjacent(
+        &connection,
+        1,
+        &configmap,
+        &Object::new(root),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("configmap reverse reference report");
+    let edges: Vec<_> = report.graph.edges().keys().collect();
+    assert!(edges.iter().any(|e| e.from.resource == "v1/pods"
+        && e.to.resource == "v1/configmaps"
+        && e.provenance == Provenance::ExplicitReference));
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.from.resource == "apps/v1/deployments"
+                && e.to.resource == "v1/configmaps"
+                && e.provenance == Provenance::ExplicitReference)
+    );
+    assert!(
+        !report
+            .nodes
+            .keys()
+            .any(|id| id.resource == "v1/pods" && id.name == "unrelated")
+    );
+}
+
+#[tokio::test]
 async fn graph_report_rechecks_root_uid_after_collection() {
     use sauron::{evidence::Unknown, kube::relationships::report::adjacent};
     use std::sync::atomic::{AtomicUsize, Ordering};

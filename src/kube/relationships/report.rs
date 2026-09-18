@@ -266,6 +266,7 @@ async fn collect(
         }
     }
     network(connection, &fresh, &mut report, started, cancel).await?;
+    reverse_references(connection, &fresh, &mut report, started, cancel).await?;
     report.requests += 1; // Reserved final validation is mandatory even at scan limit.
     let (_, current, object) = fetch_target(connection, scope, &fresh, &target, cancel).await?;
     if current != root {
@@ -369,6 +370,89 @@ async fn network(
                 }
             }
             Err(reason) => report.issue(format!("{gvr} candidate scan"), reason),
+        }
+    }
+    Ok(())
+}
+
+/// Explicit bounded candidate list, not arbitrary CRD scanning: which built-in
+/// workload kinds may declaratively mount/reference this ConfigMap/Secret/
+/// ServiceAccount/PVC. A denied kind never removes evidence already found in
+/// another one.
+async fn reverse_references(
+    connection: &Connection,
+    fresh: &Object,
+    report: &mut Report,
+    started: Instant,
+    cancel: &CancellationToken,
+) -> Result<(), Unknown> {
+    if !matches!(
+        (fresh.api_version.as_str(), fresh.kind.as_str()),
+        ("v1", "ConfigMap")
+            | ("v1", "Secret")
+            | ("v1", "ServiceAccount")
+            | ("v1", "PersistentVolumeClaim")
+    ) {
+        return Ok(());
+    }
+    const SCANS: &[&str] = &[
+        "v1/pods",
+        "apps/v1/deployments",
+        "apps/v1/statefulsets",
+        "apps/v1/daemonsets",
+        "batch/v1/jobs",
+        "batch/v1/cronjobs",
+    ];
+    for gvr in SCANS {
+        if !report.available(started) {
+            break;
+        }
+        if cancel.is_cancelled() {
+            return Err(Unknown::Stale);
+        }
+        let Some(candidate_resource) = connection.catalog.resources.iter().find(|r| r.id() == *gvr)
+        else {
+            report.issue(*gvr, Unknown::Unavailable);
+            continue;
+        };
+        report.requests += 1;
+        match candidates(
+            connection,
+            candidate_resource,
+            &fresh.namespace,
+            false,
+            cancel,
+        )
+        .await
+        {
+            Ok((objects, partial)) => {
+                report.candidates += objects.len();
+                if partial {
+                    report.issue(format!("{gvr} reverse reference page"), Unknown::Partial);
+                }
+                for object in objects {
+                    let refs = extract(&object);
+                    let path = refs.targets.iter().find_map(|(t, paths)| {
+                        (t.kind == fresh.kind
+                            && t.api_version == fresh.api_version
+                            && t.namespace == fresh.namespace
+                            && t.name == fresh.name)
+                            .then(|| paths.iter().next().cloned())
+                            .flatten()
+                    });
+                    if let Some(path) = path {
+                        report.link(
+                            &report.root.clone(),
+                            candidate_resource,
+                            &object,
+                            Provenance::ExplicitReference,
+                            &path,
+                            true,
+                        );
+                    }
+                }
+            }
+            Err(reason) => report.issue(format!("{gvr} reverse reference scan"), reason),
         }
     }
     Ok(())

@@ -360,6 +360,23 @@ passed, including the real controller EndpointSlice missing apiVersion. M6.2
 ACCEPTED. Proceeding to M6.3 (storage: PVC↔PV, StorageClass, bounded reverse
 config/identity/mount references).
 
+### 2026-09-18 — M6.3 ACCEPTED
+
+Added storage reference extraction (`src/graph/references/storage.rs`):
+PVC.spec.volumeName->PV, PV.spec.claimRef->PVC (UID carried verbatim from the
+field, hardcoded kind/apiVersion since claimRef is schema-fixed, not a guess),
+PVC/PV.spec.storageClassName->cluster-scoped StorageClass. Added
+`reverse_references()` to `kube/relationships/report.rs`: for
+ConfigMap/Secret/ServiceAccount/PVC roots, an explicit bounded candidate list
+(Pods/Deployments/StatefulSets/DaemonSets/Jobs/CronJobs) is scanned and linked
+back via each candidate's own extractor; a denied kind never removes edges
+already found elsewhere. Extended the m6-fixtures Deployment with a real PVC
+mount so the isolated cluster dynamically provisions and binds a PV via
+local-path-provisioner. Full locked fmt/check/clippy/test green: 124 unit + 27
+fake HTTP. Guarded `scripts/test-cluster.sh m6-test` replay passed, including
+asserting the PV's real claimRef UID matches the live PVC exactly. M6.3
+ACCEPTED. Proceeding to M6.4 (`:adjacent` view, UID-safe canonical navigation).
+
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 
 New `scripts/accept-m5-combined.py` ran all 12 combined sequences from the

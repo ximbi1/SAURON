@@ -50,6 +50,11 @@ M6.2 ACCEPTED 2026-09-18: EndpointSlice fix independently reviewed and verified
 object missing apiVersion). Added the missing reverse Pod→Service selector
 fake HTTP test to close the last required-evidence gap. Continuing to M6.3.
 
+M6.3 ACCEPTED 2026-09-18: PVC/PV/StorageClass extraction and bounded reverse
+Config/Secret/ServiceAccount/PVC scanning added and live-verified against a
+real dynamically-provisioned local-path PV, including exact claimRef UID
+match. Continuing to M6.4 (`:adjacent` view).
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated

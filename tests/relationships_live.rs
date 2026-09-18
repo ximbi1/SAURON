@@ -34,7 +34,7 @@ async fn ownership_and_template_references_resolve_live() {
     let cancel = CancellationToken::new();
     let references = extract(&deployment);
     assert!(!references.partial && !references.malformed);
-    assert_eq!(references.targets.len(), 3);
+    assert_eq!(references.targets.len(), 4);
     for (reference, paths) in references.targets {
         assert!(paths.iter().all(|p| p.starts_with("/spec/template/spec/")));
         let (_, id, object) = relationships::fetch_target(&c, 1, &deployment, &reference, &cancel)
@@ -167,5 +167,77 @@ async fn ownership_and_template_references_resolve_live() {
             .edges()
             .keys()
             .any(|e| e.to.resource == "v1/services")
+    );
+    let pvc_resource = c
+        .catalog
+        .resolve("pvc", &c.settings.aliases)
+        .expect("canonical pvc");
+    let pvc = pvc_resource
+        .api(c.client.clone(), Some("sauron-m6"))
+        .get("m6-data")
+        .await
+        .expect("fixture pvc");
+    let pvc = Object::new(serde_json::to_value(pvc).unwrap());
+    let report = relationships::report::adjacent(&c, 1, &pvc_resource, &pvc, &cancel)
+        .await
+        .expect("pvc graph");
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.to.resource == "v1/persistentvolumes"),
+        "PVC references its bound PersistentVolume"
+    );
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.to.resource == "storage.k8s.io/v1/storageclasses"),
+        "PVC references its StorageClass"
+    );
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.from.resource == "v1/pods" && e.to.resource == "v1/persistentvolumeclaims"),
+        "reverse: the fixture Pod mounts this PVC"
+    );
+    let pv_resource = c
+        .catalog
+        .resolve("pv", &c.settings.aliases)
+        .expect("canonical pv");
+    let pv_name = pvc.value["spec"]["volumeName"]
+        .as_str()
+        .expect("bound volume name")
+        .to_string();
+    let pv = pv_resource
+        .api(c.client.clone(), None)
+        .get(&pv_name)
+        .await
+        .expect("bound pv");
+    let pv = Object::new(serde_json::to_value(pv).unwrap());
+    let report = relationships::report::adjacent(&c, 1, &pv_resource, &pv, &cancel)
+        .await
+        .expect("pv graph");
+    let claim_edge = report
+        .graph
+        .edges()
+        .keys()
+        .find(|e| e.to.resource == "v1/persistentvolumeclaims")
+        .expect("PV claimRef resolves back to the exact bound PVC");
+    assert_eq!(
+        claim_edge.to.uid, pvc.uid,
+        "claimRef UID must match the real PVC"
+    );
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.to.resource == "storage.k8s.io/v1/storageclasses"),
+        "PV also references its StorageClass"
     );
 }

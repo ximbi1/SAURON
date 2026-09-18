@@ -1001,6 +1001,19 @@ impl Runtime {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Trigger: {}", object.name), built)
             }
+            Command::Evict => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::evict(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Evict: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2989,6 +3002,39 @@ mod tests {
         assert!(
             rt.action(Action::MutationConfirm).is_err(),
             "denied trigger confirm must error, never silently no-op"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_evict_under_readonly_denies_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Pod".into();
+        rt.state.resource = Some(resource);
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"m8b-pod","uid":"uid-1"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        rt.command(":evict")
+            .expect("evict preview opens even when denied");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied evict confirm must error, never silently no-op"
         );
         assert_eq!(rt.tasks.len(), tasks_before);
         rt.shutdown().await;

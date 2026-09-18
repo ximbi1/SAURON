@@ -122,7 +122,7 @@ silently skipping multi-node drain coverage without saying so.
 | M8B.1 | Cordon / Uncordon (Node) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7, matching M8.2's own precedent -- `workflow::cordon`/`workflow::uncordon` wired to `:cordon`/`:uncordon`; live-verified twice against the real (single) node of `kind-sauron-test`, briefly cordoned then immediately uncordoned in one sequential test, per explicit user sign-off |
 | M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- `workflow::set_image` reconstructs the full `containers` array (option (b) from this document's own open question, resolved); dedicated `verify_set_image` name-keyed comparison added; live-verified against a real two-container Deployment, unrelated sidecar proven untouched |
 | M8B.3 | CronJob trigger (create a Job from a CronJob template) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- first real `MutationEffect::Create` in the executor; `MutationIntent.create_resource` added; `policy::evaluate`'s Create-bypasses-confirmation rule removed (a real bug in an untested speculative rule, found while implementing this); traceability via label/annotation, not a real `ownerReference` (matches `kubectl create job --from=cronjob` semantics) |
-| M8B.4 | Evict Pod (eviction subresource, PDB-aware) | PLANNED |
+| M8B.4 | Evict Pod (eviction subresource, PDB-aware) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- uses `POST .../pods/NAME/eviction`, never a plain DELETE; new `MutationOutcome::DisruptionBudgetDenied` for 429; live-verified real PDB denial + real success. Found and fixed a significant, codebase-wide bug: kube-rs's transport-level auto-retry (`default_retry`, on by default) silently retried 429/503/504 below every request this app has ever made, contradicting the "no automatic retry" guarantee -- now explicitly disabled |
 | M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | PLANNED |
 | M8B.6 | Force delete (highest risk; explicit, narrow, no default grace=0 leakage) | PLANNED |
 | M8B.7 | Combined adversarial acceptance, full M1-M8 regression, soak | PLANNED |
@@ -899,6 +899,65 @@ the authoritative record of M8's own bugs.
   reports `Created`, verify reports `Pending` on 404), 1 grammar test, 1
   app-level zero-write-under-readonly test. Full locked suite: 212 unit +
   58 fake HTTP, fmt/check/clippy (`-D warnings`) clean.
+- 2026-09-18: M8B.4 (Evict Pod) implemented and ACCEPTED (unit/fake-HTTP/
+  live; interactive deferred to M8B.7), and a **significant, codebase-
+  wide bug found and fixed** in the process -- not scoped to M8B.4 alone.
+  `workflow::evict` (Pod only) shares `delete`'s `MutationEffect::Delete`/
+  `MutationRisk::Destructive` for policy purposes, with its own
+  `source_action = "evict"` so the executor dispatches to a new
+  `kube::mutation::evict_request` (POSTs a `policy/v1 Eviction` body to
+  the `eviction` subresource via `create_subresource`, never a plain
+  DELETE -- structurally incapable of falling back to one). `classify()`
+  gained `Dispatch::Responded(429) => MutationOutcome::DisruptionBudgetDenied`,
+  a new variant kept explicitly distinct from `Conflict` (409). Post-commit
+  verification needed zero new code: `verify()`'s existing `Delete`
+  dispatch (`verify_delete`) works unchanged for an evicted Pod, exactly
+  as this document predicted.
+  **The real finding**: the first fake-HTTP test for the 429 case hung for
+  ~10 seconds and returned `OutcomeUnknown` instead of the expected
+  `DisruptionBudgetDenied`, even though the fake server correctly
+  responded 429 every time. Root cause: kube-rs's `Config::default_retry`
+  defaults to `true` for every `Client` this codebase has ever
+  constructed (`Client::try_from(config)` in both `src/kube/mod.rs`'s real
+  `connect()` and every fake-HTTP test's `Server::client()`), installing
+  a transport-level `RetryLayer` that silently retries HTTP 429/503/504
+  responses up to 15 times with exponential backoff (up to 1000s) --
+  entirely below `kube::mutation`'s own executor, invisible to it. This
+  directly contradicts the single most-repeated guarantee across M7/M8/
+  M8B's own documentation: "no automatic retry, ever" -- it was never
+  actually true at the transport layer for any request this app has made
+  since M1, for the three status codes kube-rs's default policy treats as
+  retryable. It went unnoticed until now because none of M1-M8B's prior
+  mutation outcomes are ever produced by a 429/503/504 response --
+  `DisruptionBudgetDenied` is the first one that is. Fixed by setting
+  `config.default_retry = false` explicitly in `src/kube/mod.rs::connect()`
+  (with a comment explaining why, so a future contributor doesn't
+  "helpfully" turn it back on) and in the fake-HTTP test harness's
+  `Server::client()` (so the test suite's own behavior matches
+  production). This is now a hard architectural invariant worth
+  restating: `kube::mutation`'s executor is the *only* place a retry
+  decision may ever be made for a mutation, and it always decides "no" --
+  transport-level retry must stay off, for every request, mutating or
+  not, so that a read (list/watch/get) hitting a real 429/503/504 also
+  surfaces immediately rather than being silently retried for up to
+  1000s below the code that is supposed to own that decision.
+  Live evidence: `tests/fixtures/m8b-evict.yaml` (`m8b-evict-blocked`, a
+  Pod behind a `PodDisruptionBudget` with `minAvailable: 1` matching only
+  itself, so evicting it would violate the budget; `m8b-evict-free`, an
+  identical Pod with no PDB). `m8b-fixtures`/`m8b-reset` apply both and
+  wait for Ready; `m8b-reset` also recreates `m8b-evict-free` since the
+  live test genuinely evicts it. `live_evict_denied_by_pdb_then_succeeds_
+  on_a_pdb_free_pod` in `tests/mutation_m8b_live.rs` proves both a real
+  429 denial (with the blocked Pod confirmed still present afterward,
+  never silently deleted as a fallback) and a real successful eviction.
+  Run twice via `scripts/test-cluster.sh m8b-test` (alongside every other
+  M8B.1-M8B.3 live test in the same file), both clean.
+  2 unit tests (`mutation::workflow::tests`: unsupported-kind rejection,
+  exact payload/risk/distinct-source_action-from-delete); 2 fake-HTTP
+  tests (429 denial never falls back to delete, commit + subresource URL
+  proof); 1 grammar test; 1 app-level zero-write-under-readonly test.
+  Full locked suite: 216 unit + 60 fake HTTP, fmt/check/clippy (`-D
+  warnings`) clean.
 
 ## Final acceptance conditions (proposed, mirroring M8's own structure)
 

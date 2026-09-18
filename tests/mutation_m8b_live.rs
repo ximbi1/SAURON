@@ -1,15 +1,16 @@
 //! Run only through the identity-guarded `scripts/test-cluster.sh m8b-test`.
 //! Proves M8B.1 (Cordon/Uncordon) against the real Node of
 //! `kind-sauron-test`, M8B.2 (Set Image) against a dedicated two-container
-//! Deployment fixture, and M8B.3 (CronJob trigger) against a dedicated
-//! CronJob whose own schedule never fires during a test run. The cordon
-//! test cordons and immediately uncordons the cluster's ONE node, briefly
-//! and within one sequential test function -- never left cordoned, never
-//! held cordoned across multiple test functions (which would race under
-//! cargo's default parallel test execution, matching every other
-//! `*_live.rs` file's own precedent). Set Image and CronJob trigger each
-//! target a distinct object, so they are separate test functions without
-//! racing the cordon test or each other.
+//! Deployment fixture, M8B.3 (CronJob trigger) against a dedicated CronJob
+//! whose own schedule never fires during a test run, and M8B.4 (Evict)
+//! against a PDB-protected Pod (real 429 denial) and a PDB-free Pod (real
+//! success). The cordon test cordons and immediately uncordons the
+//! cluster's ONE node, briefly and within one sequential test function --
+//! never left cordoned, never held cordoned across multiple test functions
+//! (which would race under cargo's default parallel test execution,
+//! matching every other `*_live.rs` file's own precedent). Every other
+//! test targets a distinct object, so each is a separate test function
+//! without racing the cordon test or each other.
 use sauron::{
     app::session::Scope,
     config::Config,
@@ -372,6 +373,123 @@ async fn live_trigger_creates_a_job_traceable_to_the_source_cronjob() {
         Some("m8b-nightly"),
         "the created Job must be traceable back to its source CronJob"
     );
+}
+
+#[tokio::test]
+#[ignore = "explicit isolated kind config and m8b-fixtures (m8b-evict-blocked/free Pods + PDB) required"]
+async fn live_evict_denied_by_pdb_then_succeeds_on_a_pdb_free_pod() {
+    let path = std::env::var_os("SAURON_TEST_KUBECONFIG").expect("explicit test kubeconfig");
+    let c = kube::connect(
+        ConnectOptions {
+            kubeconfig: Some(path.into()),
+            context: Some("kind-sauron-test".into()),
+            force_readonly: false,
+            mutation_test_cluster_verified: false,
+        },
+        Config::default(),
+    )
+    .await
+    .expect("connect");
+    let pod_resource = c
+        .catalog
+        .resolve("v1/pods", &c.settings.aliases)
+        .expect("canonical pod");
+    let pod_api = pod_resource.api(c.client.clone(), Some("sauron-m8b"));
+    let cancel = CancellationToken::new();
+
+    // --- Denied by PDB ---
+    let blocked = Object::new(
+        serde_json::to_value(
+            pod_api
+                .get("m8b-evict-blocked")
+                .await
+                .expect("m8b-evict-blocked"),
+        )
+        .unwrap(),
+    );
+    let blocked_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: c.context.clone(),
+        cluster: c.cluster.clone(),
+        resource: pod_resource.id(),
+        namespace: blocked.namespace.clone(),
+        name: blocked.name.clone(),
+        uid: blocked.uid.clone(),
+    };
+    let built = workflow::evict(blocked_scope, pod_resource.clone(), 1)
+        .expect("evict is supported for Pod");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Strong,
+    };
+    let (journal, dir) = new_journal("evict-denied");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::DisruptionBudgetDenied);
+    std::fs::remove_dir_all(&dir).ok();
+    let still_present = pod_api.get("m8b-evict-blocked").await;
+    assert!(
+        still_present.is_ok(),
+        "a PDB denial must never fall back to a plain delete"
+    );
+
+    // --- Succeeds on a Pod with no PDB ---
+    let free = Object::new(
+        serde_json::to_value(pod_api.get("m8b-evict-free").await.expect("m8b-evict-free")).unwrap(),
+    );
+    let free_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: c.context.clone(),
+        cluster: c.cluster.clone(),
+        resource: pod_resource.id(),
+        namespace: free.namespace.clone(),
+        name: free.name.clone(),
+        uid: free.uid.clone(),
+    };
+    let built = workflow::evict(free_scope, pod_resource, 2).expect("evict is supported for Pod");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Strong,
+    };
+    let (journal, dir) = new_journal("evict-success");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    let verification = executor::verify(&c, &built.intent, built.payload.as_ref(), &cancel).await;
+    assert!(
+        matches!(
+            verification,
+            Verification::DeletionInProgress | Verification::ObservedGone | Verification::Pending
+        ),
+        "expected an eviction-in-progress-or-complete state, got {verification:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 fn new_journal(label: &str) -> (sauron::mutation::journal::Journal, std::path::PathBuf) {

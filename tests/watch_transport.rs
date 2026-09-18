@@ -275,7 +275,14 @@ impl Server {
         Self { url, task }
     }
     fn client(&self) -> Client {
-        Client::try_from(Config::new(self.url.parse().expect("URI"))).expect("client")
+        // Match src/kube/mod.rs's own fix: kube-rs's transport-level retry
+        // (on by default) would otherwise silently retry 429/503/504
+        // responses below every test in this file, hiding exactly the kind
+        // of bug `mutation_evict_pdb_denial_is_distinct_and_never_falls_
+        // back_to_delete` exists to catch.
+        let mut config = Config::new(self.url.parse().expect("URI"));
+        config.default_retry = false;
+        Client::try_from(config).expect("client")
     }
 }
 
@@ -1541,6 +1548,131 @@ async fn verify_trigger_cronjob_reports_pending_when_the_job_is_not_yet_visible(
     )
     .await;
     assert_eq!(outcome, sauron::mutation::Verification::Pending);
+}
+
+#[tokio::test]
+async fn mutation_evict_pdb_denial_is_distinct_and_never_falls_back_to_delete() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::{Confirmation, workflow};
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m8b","name":"m8b-pod","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(
+                request.contains("/eviction"),
+                "must POST to the eviction subresource, never a plain DELETE: {request}"
+            );
+            (
+                429,
+                json!({"kind":"Status","apiVersion":"v1","status":"Failure","code":429,"reason":"TooManyRequests"}).to_string(),
+            )
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let scope = pod_scope("uid-1");
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let built = workflow::evict(scope, pod_resource, 1).expect("evict is supported for Pod");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Strong,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        sauron::mutation::MutationOutcome::DisruptionBudgetDenied,
+        "a PDB denial must be its own explicit outcome, never blurred with Conflict"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_evict_commits_via_the_eviction_subresource_and_verifies_deletion_in_progress() {
+    use sauron::kube::mutation::{commit, verify};
+    use sauron::mutation::{Confirmation, workflow};
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") && !request.contains("/eviction") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m8b","name":"m8b-pod","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(
+                request.contains("/eviction"),
+                "must POST to the eviction subresource: {request}"
+            );
+            (200, json!({"kind":"Status","apiVersion":"v1","status":"Success"}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let scope = pod_scope("uid-1");
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let built = workflow::evict(scope, pod_resource, 1).expect("evict is supported for Pod");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Strong,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+    // Post-commit verification reuses verify_delete unchanged (a fresh GET,
+    // never a second eviction attempt): no new code needed here at all.
+    let _ = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+}
+
+fn pod_scope(uid: &str) -> sauron::app::session::Scope {
+    sauron::app::session::Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/pods".into(),
+        namespace: "sauron-m8b".into(),
+        name: "m8b-pod".into(),
+        uid: uid.into(),
+    }
 }
 
 #[tokio::test]

@@ -84,6 +84,18 @@ pub async fn connect(options: ConnectOptions, app_config: AppConfig) -> Result<C
         bail!("Kubeconfig disables TLS verification; use a context with valid certificate trust");
     }
     config.connect_timeout = Some(deadline);
+    // M8B.4 finding: kube-rs's `Config::default_retry` defaults to `true`,
+    // installing a transport-level `RetryLayer` that silently retries 429/
+    // 503/504 responses (up to 15 attempts, exponential backoff up to
+    // 1000s) BELOW this module entirely. That directly contradicts every
+    // mutation outcome this codebase promises ("no automatic retry, ever";
+    // an ambiguous/denied outcome is reported, never silently retried) --
+    // it was invisible until M8B.4 introduced the first mutation outcome
+    // (429 DisruptionBudgetDenied) mapped from a status this layer treats
+    // as retryable. `kube::mutation`'s executor is the only place that
+    // gets to decide whether to retry (it decides: never) -- transport-
+    // level retry must be off, for every request, not just mutations.
+    config.default_retry = false;
     config
         .headers
         .push(("user-agent".parse()?, crate::brand::USER_AGENT.parse()?));

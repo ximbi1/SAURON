@@ -163,6 +163,11 @@ pub enum MutationOutcome {
     TransportFailure,
     Cancelled,
     Unsupported,
+    /// M8B.4: the API server rejected an eviction because it would
+    /// violate a PodDisruptionBudget (HTTP 429) -- a distinct fact from
+    /// `Conflict` (409), which callers must never blur together, and
+    /// which must never trigger an automatic fallback to a plain delete.
+    DisruptionBudgetDenied,
 }
 
 /// M8.5: a fresh, post-commit observation -- a distinct fact from

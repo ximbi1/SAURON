@@ -214,6 +214,39 @@ pub fn delete(scope: Scope, resource: Resource, request_id: u64) -> Result<Built
     })
 }
 
+pub const EVICT_KINDS: &[&str] = &["Pod"];
+
+/// M8B.4: Pod only, via the eviction subresource (never a plain delete --
+/// see `kube::mutation::evict_request`'s own doc comment). Shares
+/// `delete`'s effect/risk (same policy/confirmation tier either way), but
+/// keeps its own distinct `source_action` so the executor dispatches to
+/// the eviction-specific request function, and so a preview/journal
+/// entry is never mistaken for an ordinary delete.
+pub fn evict(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !EVICT_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("evict", &kind));
+    }
+    let change = format!(
+        "evict {} {}/{} (subject to PodDisruptionBudget)",
+        kind, scope.namespace, scope.name
+    );
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Delete,
+            MutationRisk::Destructive,
+            "evict".into(),
+            &None,
+            "evict",
+            request_id,
+        ),
+        payload: None,
+        change,
+    })
+}
+
 pub const CORDON_KINDS: &[&str] = &["Node"];
 
 /// M8B.1: Node-only, `unschedulable` is an *implementation detail* of this
@@ -613,6 +646,21 @@ mod tests {
         assert!(built.payload.is_none());
         assert_eq!(built.intent.risk, MutationRisk::Destructive);
         assert_eq!(built.intent.effect, MutationEffect::Delete);
+    }
+
+    #[test]
+    fn evict_unsupported_kind_is_rejected() {
+        assert!(evict(scope(), resource("Deployment"), 1).is_err());
+    }
+
+    #[test]
+    fn evict_supported_kind_has_no_payload_and_a_distinct_source_action_from_delete() {
+        let built = evict(scope(), resource("Pod"), 1).unwrap();
+        assert!(built.payload.is_none());
+        assert_eq!(built.intent.risk, MutationRisk::Destructive);
+        assert_eq!(built.intent.effect, MutationEffect::Delete);
+        assert_eq!(built.intent.source_action, "evict");
+        assert!(built.change.contains("PodDisruptionBudget"));
     }
 
     fn node_scope() -> Scope {

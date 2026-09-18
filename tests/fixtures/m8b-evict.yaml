@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: m8b-evict-blocked
+  namespace: sauron-m8b
+  labels:
+    app: m8b-evict-blocked
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 5m
+          memory: 8Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: m8b-evict-blocked
+  namespace: sauron-m8b
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: m8b-evict-blocked
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: m8b-evict-free
+  namespace: sauron-m8b
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 5m
+          memory: 8Mi

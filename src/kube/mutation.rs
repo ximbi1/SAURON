@@ -72,6 +72,10 @@ fn classify(dispatch: Dispatch) -> MutationOutcome {
         Dispatch::Responded(401 | 403) => MutationOutcome::Forbidden,
         Dispatch::Responded(404) => MutationOutcome::NotFound,
         Dispatch::Responded(409) => MutationOutcome::Conflict,
+        // M8B.4: a PodDisruptionBudget denial, distinct from an ordinary
+        // 409 Conflict -- never treated as the same fact, and callers
+        // must never retry or fall back to a plain delete on this.
+        Dispatch::Responded(429) => MutationOutcome::DisruptionBudgetDenied,
         Dispatch::Responded(_) => MutationOutcome::TransportFailure,
     }
 }
@@ -127,6 +131,50 @@ async fn delete_request(
         ..Default::default()
     };
     let request = match builder.delete(&target.scope.name, &params) {
+        Ok(r) => r,
+        Err(_) => return MutationOutcome::Unsupported,
+    };
+    classify(dispatch(connection, request, cancel).await)
+}
+
+/// M8B.4: the eviction subresource -- never a plain DELETE. Unlike
+/// `delete_request`, there is no UID precondition field on the Eviction
+/// API itself, so client-side TOCTOU (`revalidate`, called before this
+/// like every other commit) is the only defense here, documented as a
+/// narrower belt than Delete's own belt-and-suspenders. A 429 response
+/// means the API server itself refused because of a PodDisruptionBudget
+/// -- `classify` turns that into `MutationOutcome::DisruptionBudgetDenied`,
+/// never a fallback to a plain delete, which this function structurally
+/// cannot do (it only ever POSTs to the `eviction` subresource).
+async fn evict_request(
+    connection: &Connection,
+    target: &MutationTarget,
+    dry_run: bool,
+    cancel: &CancellationToken,
+) -> MutationOutcome {
+    let namespace = target
+        .resource
+        .namespaced
+        .then_some(target.scope.namespace.as_str());
+    let api = target.resource.api(connection.client.clone(), namespace);
+    let builder = kube::core::Request::new(api.resource_url());
+    let body = serde_json::json!({
+        "apiVersion": "policy/v1",
+        "kind": "Eviction",
+        "metadata": {"name": target.scope.name, "namespace": target.scope.namespace},
+    });
+    let data = match serde_json::to_vec(&body) {
+        Ok(d) => d,
+        Err(_) => return MutationOutcome::Unsupported,
+    };
+    // The standard `?dryRun=All` query parameter (the same mechanism every
+    // other POST/PATCH in this module already uses) applies to subresource
+    // creates too -- no need for the Eviction body's own `deleteOptions.dryRun`.
+    let params = PostParams {
+        dry_run,
+        field_manager: Some("sauron".into()),
+    };
+    let request = match builder.create_subresource("eviction", &target.scope.name, &params, data) {
         Ok(r) => r,
         Err(_) => return MutationOutcome::Unsupported,
     };
@@ -189,6 +237,14 @@ pub async fn preflight(
         return MutationOutcome::Cancelled;
     }
     let outcome = match intent.effect {
+        // M8B.4: evict uses the same Delete effect as an ordinary delete
+        // for policy-classification purposes (same risk/confirmation
+        // question either way), but the executor dispatches to a
+        // distinct request function based on `source_action` -- mirroring
+        // Restart/Label both using `Modify` despite being distinct actions.
+        MutationEffect::Delete if intent.source_action == "evict" => {
+            evict_request(connection, &intent.target, true, cancel).await
+        }
         MutationEffect::Delete => delete_request(connection, &intent.target, true, cancel).await,
         MutationEffect::Modify => match payload {
             Some(p) => patch_request(connection, &intent.target, p, true, cancel).await,
@@ -371,6 +427,9 @@ pub async fn commit(
         return MutationOutcome::Cancelled;
     }
     let outcome = match intent.effect {
+        MutationEffect::Delete if intent.source_action == "evict" => {
+            evict_request(connection, &intent.target, false, cancel).await
+        }
         MutationEffect::Delete => delete_request(connection, &intent.target, false, cancel).await,
         MutationEffect::Modify => match &payload {
             Some(p) => patch_request(connection, &intent.target, p, false, cancel).await,

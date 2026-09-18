@@ -107,6 +107,11 @@ case "${1:-check}" in
     # fires during a test run (once a year), so any Job present was
     # created only by a live trigger test, never the controller itself.
     kube_test apply -f "$repo_dir/tests/fixtures/m8b-cronjob.yaml"
+    # M8B.4 (Evict): a Pod behind a tight PDB (minAvailable=1, the Pod is
+    # its only member) proves a real 429 denial; a second, PDB-free Pod
+    # proves a real successful eviction.
+    kube_test apply -f "$repo_dir/tests/fixtures/m8b-evict.yaml"
+    kube_test wait --for=condition=Ready pod/m8b-evict-blocked pod/m8b-evict-free -n sauron-m8b --timeout=60s
     ;;
   m8b-reset)
     # Uncordon every node -- idempotent, safe even if nothing is cordoned.
@@ -119,6 +124,9 @@ case "${1:-check}" in
     # Remove every Job a live trigger test created, keeping repeated runs
     # deterministic.
     kube_test delete job -n sauron-m8b -l sauron.io/triggered-from=m8b-nightly --ignore-not-found
+    # m8b-evict-free is genuinely evicted by the live test; recreate it.
+    kube_test apply -f "$repo_dir/tests/fixtures/m8b-evict.yaml"
+    kube_test wait --for=condition=Ready pod/m8b-evict-blocked pod/m8b-evict-free -n sauron-m8b --timeout=60s
     ;;
   m8b-test)
     cd "$repo_dir"

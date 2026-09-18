@@ -979,6 +979,82 @@ async fn mutation_delete_commit_carries_the_exact_uid_server_side_precondition()
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[tokio::test]
+async fn mutation_cordon_requires_strong_confirmation_and_commits_the_exact_patch() {
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::commit};
+    use sauron::mutation::{Confirmation, PolicyDecision, policy, workflow};
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "uid-1".into(),
+    };
+    let node_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = String::new();
+            a.kind = "Node".into();
+            a.plural = "nodes".into();
+            a
+        },
+        namespaced: false,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+    let built =
+        workflow::cordon(node_scope.clone(), node_resource, 1).expect("cordon supported for Node");
+    let evaluation = policy::evaluate(&verified_policy_context(), &built.intent);
+    assert_eq!(
+        evaluation.decision,
+        PolicyDecision::RequireStrongerConfirmation,
+        "Node is cluster-critical; cordon must never be a weak-confirmation action"
+    );
+
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"name":"node-1","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(
+                request.contains("\"unschedulable\":true"),
+                "the exact cordon payload must be sent: {request}"
+            );
+            (200, json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"node-1","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Strong,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn modify_intent_with_payload(
     uid: &str,
     payload: serde_json::Value,
@@ -1009,6 +1085,107 @@ async fn verify_scale_confirms_observed_desired_replicas() {
     )
     .await;
     assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
+#[tokio::test]
+async fn verify_cordon_confirms_observed_unschedulable_flip_with_zero_new_code() {
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::verify};
+    use sauron::mutation::workflow;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"node-1","uid":"uid-1"},"spec":{"unschedulable":true}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "uid-1".into(),
+    };
+    let node_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = String::new();
+            a.kind = "Node".into();
+            a.plural = "nodes".into();
+            a
+        },
+        namespaced: false,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+    let built = workflow::cordon(node_scope, node_resource, 1).expect("cordon supported for Node");
+    let outcome = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
+#[tokio::test]
+async fn verify_uncordon_treats_an_omitted_false_field_as_verified_not_different() {
+    // Kubernetes' own `omitempty` convention drops a `false` boolean field
+    // from the serialized object entirely -- a real live-cluster finding,
+    // not a hypothetical: `spec.unschedulable` is simply absent when a
+    // Node is schedulable, never present as an explicit `false`.
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::verify};
+    use sauron::mutation::workflow;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"node-1","uid":"uid-1"},"spec":{}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "uid-1".into(),
+    };
+    let node_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = String::new();
+            a.kind = "Node".into();
+            a.plural = "nodes".into();
+            a
+        },
+        namespaced: false,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+    let built =
+        workflow::uncordon(node_scope, node_resource, 1).expect("uncordon supported for Node");
+    let outcome = verify(
+        &connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        sauron::mutation::Verification::Verified,
+        "an absent field must be treated the same as an explicit false"
+    );
 }
 
 #[tokio::test]

@@ -912,6 +912,32 @@ impl Runtime {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Annotate: {}", object.name), built)
             }
+            Command::Cordon => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::cordon(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Cordon: {}", object.name), built)
+            }
+            Command::Uncordon => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::uncordon(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Uncordon: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2826,6 +2852,40 @@ mod tests {
         rt.state.selected = Some("uid-1".into());
         assert!(rt.command(":scale 3").is_err());
         assert!(!matches!(rt.state.mode, Mode::Document(_)));
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_cordon_under_readonly_denies_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Node".into();
+        resource.namespaced = false;
+        rt.state.resource = Some(resource);
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Node",
+            "metadata":{"name":"node-1","uid":"uid-1"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        rt.command(":cordon")
+            .expect("cordon preview opens even when denied");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied cordon confirm must error, never silently no-op"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
         rt.shutdown().await;
     }
 

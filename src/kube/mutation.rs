@@ -419,6 +419,12 @@ async fn verify_modify(
     let observed = value.pointer(path);
     let matches = match expected {
         Value::Null => observed.is_none() || observed == Some(&Value::Null),
+        // Kubernetes' own `omitempty` convention drops a `false` boolean
+        // field from the serialized object entirely (e.g. Node's
+        // `spec.unschedulable` is absent when schedulable, not present as
+        // `false`) -- absent and explicit-false are the same observed
+        // fact for such a field, never a mismatch.
+        Value::Bool(false) => observed.is_none() || observed == Some(&Value::Bool(false)),
         other => observed == Some(other),
     };
     if matches {

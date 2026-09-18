@@ -213,6 +213,50 @@ pub fn delete(scope: Scope, resource: Resource, request_id: u64) -> Result<Built
     })
 }
 
+pub const CORDON_KINDS: &[&str] = &["Node"];
+
+/// M8B.1: Node-only, `unschedulable` is an *implementation detail* of this
+/// builder -- never a user-authored patch. Cordon/uncordon are the same
+/// shape with an inverted boolean, so both funnel through here; the two
+/// public functions below keep their own distinct `source_action`, which
+/// keeps the journal/preview honest about which direction was requested.
+fn set_unschedulable(
+    scope: Scope,
+    resource: Resource,
+    unschedulable: bool,
+    request_id: u64,
+    source_action: &str,
+) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !CORDON_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported(source_action, &kind));
+    }
+    let payload = Some(serde_json::json!({"spec": {"unschedulable": unschedulable}}));
+    let change = format!("spec.unschedulable: {} -> {unschedulable}", !unschedulable);
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::ClusterCritical,
+            "spec.unschedulable".into(),
+            &payload,
+            source_action,
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
+pub fn cordon(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    set_unschedulable(scope, resource, true, request_id, "cordon")
+}
+
+pub fn uncordon(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    set_unschedulable(scope, resource, false, request_id, "uncordon")
+}
+
 fn valid_dns_label_part(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
@@ -420,6 +464,72 @@ mod tests {
         assert!(built.payload.is_none());
         assert_eq!(built.intent.risk, MutationRisk::Destructive);
         assert_eq!(built.intent.effect, MutationEffect::Delete);
+    }
+
+    fn node_scope() -> Scope {
+        Scope {
+            epoch: 1,
+            request: 1,
+            context: "kind-sauron-test".into(),
+            cluster: "kind-sauron-test".into(),
+            resource: "v1/nodes".into(),
+            namespace: String::new(),
+            name: "sauron-test-control-plane".into(),
+            uid: "node-uid-1".into(),
+        }
+    }
+    fn node_resource() -> Resource {
+        Resource {
+            api: ApiResource {
+                group: String::new(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Node".into(),
+                plural: "nodes".into(),
+            },
+            namespaced: false,
+            short_names: vec![],
+            verbs: vec!["patch".into()],
+        }
+    }
+
+    #[test]
+    fn cordon_unsupported_kind_is_rejected_before_building_an_intent() {
+        assert!(cordon(scope(), resource("Deployment"), 1).is_err());
+    }
+
+    #[test]
+    fn cordon_sets_unschedulable_true_with_cluster_critical_risk() {
+        let built = cordon(node_scope(), node_resource(), 1).unwrap();
+        assert_eq!(
+            built.payload,
+            Some(serde_json::json!({"spec": {"unschedulable": true}}))
+        );
+        assert_eq!(built.intent.risk, MutationRisk::ClusterCritical);
+        assert_eq!(built.intent.effect, MutationEffect::Modify);
+        assert_eq!(built.intent.source_action, "cordon");
+        assert!(built.change.contains("false -> true"));
+    }
+
+    #[test]
+    fn uncordon_sets_unschedulable_false_and_has_a_distinct_source_action() {
+        let built = uncordon(node_scope(), node_resource(), 1).unwrap();
+        assert_eq!(
+            built.payload,
+            Some(serde_json::json!({"spec": {"unschedulable": false}}))
+        );
+        assert_eq!(built.intent.source_action, "uncordon");
+        assert!(built.change.contains("true -> false"));
+    }
+
+    #[test]
+    fn cordon_and_uncordon_produce_different_payload_hashes() {
+        let cordoned = cordon(node_scope(), node_resource(), 1).unwrap();
+        let uncordoned = uncordon(node_scope(), node_resource(), 1).unwrap();
+        assert_ne!(
+            cordoned.intent.payload_sha256,
+            uncordoned.intent.payload_sha256
+        );
     }
 
     #[test]

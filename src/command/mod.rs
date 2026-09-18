@@ -520,6 +520,8 @@ pub enum Command {
         key: String,
         value: Option<String>,
     },
+    Cordon,
+    Uncordon,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -755,6 +757,14 @@ pub fn parse(s: &str) -> Result<Command> {
                 parse_metadata_arg(tail, "Use :annotate KEY=VALUE or :annotate KEY-")?;
             return Ok(Command::Annotate { key, value });
         }
+        "cordon" => {
+            ensure!(tail.is_empty(), "Use :cordon");
+            return Ok(Command::Cordon);
+        }
+        "uncordon" => {
+            ensure!(tail.is_empty(), "Use :uncordon");
+            return Ok(Command::Uncordon);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -817,7 +827,7 @@ pub fn parse(s: &str) -> Result<Command> {
 pub fn command_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = vec![
         "ctx", "ns", "info", "reload", "sort", "exec", "shell", "attach", "scale", "restart",
-        "delete", "label", "annotate",
+        "delete", "label", "annotate", "cordon", "uncordon",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -988,6 +998,13 @@ fn restart_and_delete_take_no_arguments() {
     assert!(matches!(parse(":delete"), Ok(Command::Delete)));
     assert!(parse(":restart now").is_err());
     assert!(parse(":delete now").is_err());
+}
+#[test]
+fn cordon_and_uncordon_take_no_arguments() {
+    assert!(matches!(parse(":cordon"), Ok(Command::Cordon)));
+    assert!(matches!(parse(":uncordon"), Ok(Command::Uncordon)));
+    assert!(parse(":cordon node-1").is_err());
+    assert!(parse(":uncordon node-1").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

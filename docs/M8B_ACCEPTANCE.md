@@ -118,8 +118,8 @@ silently skipping multi-node drain coverage without saying so.
 
 | Slice | Scope | Verdict |
 | --- | --- | --- |
-| M8B.0 | Shared advanced-operation extensions to the M7/M8 model (new `PolicyReason`s, node-target support in `MutationTarget`/`Scope`, `Job`-creation support in the executor, any new `Verification`/`Phase` variants needed across multiple operations below) | PLANNED |
-| M8B.1 | Cordon / Uncordon (Node) | PLANNED |
+| M8B.0 | Shared advanced-operation extensions to the M7/M8 model (new `PolicyReason`s, node-target support in `MutationTarget`/`Scope`, `Job`-creation support in the executor, any new `Verification`/`Phase` variants needed across multiple operations below) | IN PROGRESS -- node-target support confirmed to need zero new code; `kube::mutation::verify`'s boolean-comparison logic extended (see M8B.1's real bug); no new `PolicyReason`/`Phase` variant added yet, none needed so far |
+| M8B.1 | Cordon / Uncordon (Node) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7, matching M8.2's own precedent -- `workflow::cordon`/`workflow::uncordon` wired to `:cordon`/`:uncordon`; live-verified twice against the real (single) node of `kind-sauron-test`, briefly cordoned then immediately uncordoned in one sequential test, per explicit user sign-off |
 | M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | PLANNED |
 | M8B.3 | CronJob trigger (create a Job from a CronJob template) | PLANNED |
 | M8B.4 | Evict Pod (eviction subresource, PDB-aware) | PLANNED |
@@ -675,12 +675,107 @@ shared dependency.
 
 ## Bugs / limitations (placeholder)
 
-None yet — no implementation has started. This section exists so future
-implementation work has a designated place to record what M8.6's own
-ledger called "bug discipline": reproduce, classify (app/harness/fixture/
-environment), root cause, regression-proof, full locked recheck, replay,
-only then continue. Nothing here is retroactively filled in from M8;
-M8_ACCEPTANCE.md remains the authoritative record of M8's own bugs.
+None yet — implementation of M8B.0/M8B.1 has started (see Journal below)
+but no bug has been found. This section exists so future implementation
+work has a designated place to record what M8.6's own ledger called "bug
+discipline": reproduce, classify (app/harness/fixture/environment), root
+cause, regression-proof, full locked recheck, replay, only then continue.
+Nothing here is retroactively filled in from M8; M8_ACCEPTANCE.md remains
+the authoritative record of M8's own bugs.
+
+## Journal
+
+- 2026-09-18: M8B.0/M8B.1 implementation started. Added
+  `mutation::workflow::{CORDON_KINDS, cordon, uncordon}` (Node only, via
+  a shared private `set_unschedulable` builder so both directions stay a
+  single tested code path with distinct `source_action`s); `Command::
+  {Cordon,Uncordon}` + `:cordon`/`:uncordon` grammar (zero arguments,
+  operate on the currently selected row, exactly like `:restart`/
+  `:delete`); wired into `Runtime::command()` via the existing
+  `mutation_scope`/`open_workflow_document` helpers -- no new app-layer
+  machinery needed. `MutationRisk::ClusterCritical` used for both (Node
+  is already in `PolicyContext::default()`'s `cluster_critical_kinds`, so
+  this only makes the intent's own risk label accurate; it does not change
+  `policy::evaluate`'s behavior, which was already correctly
+  `RequireStrongerConfirmation` for any Node Modify regardless of
+  `intent.risk`).
+  Decision on the doc's own "open question" about a distinct
+  `PolicyReason::NodeSchedulingChange`: deferred, not added. The POLICY
+  block today shows the existing generic `ClusterScopedSensitiveResource`/
+  `ClusterCriticalResource` reasons for a cordon/uncordon intent, which is
+  correct but not maximally specific. Revisit if operator feedback says
+  the generic wording is actually confusing in practice -- not assumed to
+  be worth the change preemptively.
+  `kube::mutation::verify`'s existing `Modify`/`leaf_path_and_value` path
+  was confirmed to handle `/spec/unschedulable` (cordon direction, true)
+  with zero new code, exactly as this document predicted -- proven
+  directly by
+  `verify_cordon_confirms_observed_unschedulable_flip_with_zero_new_code`
+  in `tests/watch_transport.rs`. The uncordon direction (false) DID need
+  one small fix -- see the next entry below, a real bug this document's
+  own prediction did not anticipate.
+  Evidence so far: 4 unit tests (`mutation::workflow::tests`: unsupported-
+  kind rejection, exact payload + `ClusterCritical` risk for cordon,
+  distinct source_action + payload for uncordon, distinct payload hashes
+  between the two directions), 2 fake-HTTP tests (verify generalization;
+  commit proving `policy::evaluate` returns `RequireStrongerConfirmation`
+  for a real cordon intent and that the exact PATCH body is sent), 1
+  command-grammar test, 1 app-level zero-write-under-readonly test. Full
+  locked suite: 198 unit + 50 fake HTTP, fmt/check/clippy (`-D warnings`)
+  clean.
+  NOT done yet at this point: live evidence, interactive evidence,
+  `m8b-fixtures`/`m8b-reset`/`m8b-test` cases in `scripts/test-cluster.sh`.
+  Blocked on an explicit decision (this document's own open question,
+  restated): is cordoning/uncordoning the live `kind-sauron-test`
+  cluster's node(s) an acceptable live test, given the cluster is very
+  likely single-node? -- explicit user sign-off obtained: yes, a brief
+  cordon+uncordon within one sequential test is acceptable.
+- 2026-09-18: M8B.1 live evidence added and a real bug found and fixed.
+  Added `m8b-fixtures` (ensures every node starts schedulable; no
+  namespaced fixture object needed for this slice, since Cordon/Uncordon
+  targets the Node directly), `m8b-reset` (uncordons every node,
+  idempotent), `m8b-test` cases to `scripts/test-cluster.sh`, and
+  `tests/mutation_m8b_live.rs`
+  (`live_cordon_then_uncordon_the_single_node`) -- one sequential test
+  (matching every other `*_live.rs` file's own precedent against racing
+  under parallel test execution) that asserts the cluster is genuinely
+  single-node, cordons it, verifies, uncordons it, verifies again, and
+  asserts the node is left schedulable no matter what.
+  First run failed with a real, live-cluster-discovered bug (not a
+  harness bug): after uncordon, `kube::mutation::verify` reported
+  `ObservedDifferent("expected /spec/unschedulable=false, observed
+  /spec/unschedulable=<absent>")` even though the node WAS correctly
+  schedulable. Root cause: Kubernetes' own Go struct tags mark
+  `spec.unschedulable` `omitempty`, so the API server's JSON response
+  omits the field entirely when its value is the boolean zero value
+  (`false`) -- absent and explicit-`false` are the identical observed
+  fact for this field, but `verify_modify`'s equality check (`observed ==
+  Some(other)`) treated them as different. Fixed by extending the existing
+  `Value::Null` special case (already present for label/annotation
+  removal) with a parallel `Value::Bool(false)` case: `observed.is_none()
+  || observed == Some(&Value::Bool(false))` both count as matching. Added
+  a fake-HTTP regression test
+  (`verify_uncordon_treats_an_omitted_false_field_as_verified_not_different`)
+  proving this before re-running the live test, which then passed clean,
+  twice, leaving the node schedulable both times (confirmed via `kubectl
+  get nodes` showing `Ready`, never `Ready,SchedulingDisabled`, after
+  either run). Full locked suite re-confirmed clean: 198 unit + 51 fake
+  HTTP, fmt/check/clippy (`-D warnings`).
+  This is exactly the kind of finding M8B's own "design test" and bug
+  discipline exist to catch: a genuine gap in how far the *shared*
+  verification logic generalizes, caught by actually exercising a new
+  kind against the real API server rather than only against fake-HTTP
+  fixtures (which had no reason to omit the field, since the test author
+  writing a fake-HTTP fixture naturally writes explicit values). This
+  finding also means M8B.0's "does `verify` generalize with zero new
+  code" question from the original design must be revisited when
+  implementing M8B.2 (Set Image) and beyond: any future boolean (or other
+  Go-zero-value, `omitempty`-tagged) field will need the same
+  absent-equals-zero-value treatment, not just this one.
+  M8B.1 ACCEPTED for unit/fake-HTTP/live; interactive TUI coverage
+  deferred to M8B.7's combined script, matching M8.2 (Restart)'s own
+  precedent of not requiring every individual slice to carry its own
+  dedicated interactive scenario.
 
 ## Final acceptance conditions (proposed, mirroring M8's own structure)
 

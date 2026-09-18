@@ -93,6 +93,24 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_workflows_live -- --ignored --nocapture
     ;;
+  m8b-fixtures)
+    # M8B.1 (Cordon/Uncordon) targets the Node directly; no namespaced
+    # fixture object is needed for this slice. Ensure it starts
+    # schedulable so live tests begin from a known state.
+    for node in $(kube_test get nodes -o jsonpath='{.items[*].metadata.name}'); do
+      kube_test uncordon "$node" 2>/dev/null || true
+    done
+    ;;
+  m8b-reset)
+    # Uncordon every node -- idempotent, safe even if nothing is cordoned.
+    for node in $(kube_test get nodes -o jsonpath='{.items[*].metadata.name}'); do
+      kube_test uncordon "$node"
+    done
+    ;;
+  m8b-test)
+    cd "$repo_dir"
+    SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_m8b_live -- --ignored --nocapture
+    ;;
   m4-recreate)
     kube_test delete pod m4-sessions -n sauron-fixtures --wait=true --timeout=45s
     kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"

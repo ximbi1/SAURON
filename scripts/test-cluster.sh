@@ -75,6 +75,24 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_live -- --ignored --nocapture
     ;;
+  m8-fixtures)
+    kube_test apply -f "$repo_dir/tests/fixtures/m8-mutation.yaml"
+    kube_test rollout status deployment/m8-deploy -n sauron-m8 --timeout=120s
+    kube_test wait --for=condition=Ready pod/m8-pod -n sauron-m8 --timeout=60s
+    ;;
+  m8-reset)
+    # M8.5's live proof scales/restarts/relabels/deletes disposable objects;
+    # restore exact pristine fixture state so repeated live/soak runs stay
+    # deterministic, matching m7-reset's own convention.
+    kube_test apply -f "$repo_dir/tests/fixtures/m8-mutation.yaml"
+    kube_test scale deployment/m8-deploy -n sauron-m8 --replicas=1
+    kube_test rollout status deployment/m8-deploy -n sauron-m8 --timeout=120s
+    kube_test wait --for=condition=Ready pod/m8-pod -n sauron-m8 --timeout=60s
+    ;;
+  m8-test)
+    cd "$repo_dir"
+    SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_workflows_live -- --ignored --nocapture
+    ;;
   m4-recreate)
     kube_test delete pod m4-sessions -n sauron-fixtures --wait=true --timeout=45s
     kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"

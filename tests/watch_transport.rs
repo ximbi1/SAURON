@@ -240,6 +240,29 @@ impl Server {
                     }
                     data.extend_from_slice(&buffer[..n]);
                 }
+                // Requests with a body (PATCH/DELETE preconditions) carry a
+                // Content-Length header; read exactly that many more bytes so
+                // handlers can inspect the body too, not just the headers.
+                let header_end = data
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|i| i + 4);
+                if let Some(header_end) = header_end {
+                    let headers = String::from_utf8_lossy(&data[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while data.len() < header_end + content_length && data.len() < 16_384 {
+                        let n = socket.read(&mut buffer).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        data.extend_from_slice(&buffer[..n]);
+                    }
+                }
                 let request = String::from_utf8_lossy(&data);
                 let (code, body) = handler(&request);
                 let response = format!(
@@ -907,6 +930,299 @@ async fn mutation_dry_run_preflight_never_commits_and_is_journaled_distinctly() 
             .iter()
             .any(|r| r.phase == sauron::mutation::journal::Phase::CommitResult),
         "a dry-run preflight must never be journaled as a commit"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_delete_commit_carries_the_exact_uid_server_side_precondition() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("DELETE"), "unexpected method: {request}");
+            assert!(
+                request.contains("\"uid\":\"uid-1\""),
+                "server-side delete precondition must carry the exact previewed UID: {request}"
+            );
+            (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Delete);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Strong,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        None,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn modify_intent_with_payload(
+    uid: &str,
+    payload: serde_json::Value,
+) -> (sauron::mutation::MutationIntent, serde_json::Value) {
+    (
+        mutation_intent(uid, sauron::mutation::MutationEffect::Modify),
+        payload,
+    )
+}
+
+#[tokio::test]
+async fn verify_scale_confirms_observed_desired_replicas() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"},"spec":{"replicas":5}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (intent, payload) = modify_intent_with_payload("uid-1", json!({"spec":{"replicas":5}}));
+    let outcome = verify(
+        &connection,
+        &intent,
+        Some(&payload),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
+#[tokio::test]
+async fn verify_restart_confirms_the_exact_template_annotation_value() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({
+                "apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"},
+                "spec":{"template":{"metadata":{"annotations":{
+                    "kubectl.kubernetes.io/restartedAt":"2026-09-18T00:00:00Z"
+                }}}}
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (intent, payload) = modify_intent_with_payload(
+        "uid-1",
+        json!({"spec":{"template":{"metadata":{"annotations":{
+            "kubectl.kubernetes.io/restartedAt":"2026-09-18T00:00:00Z"
+        }}}}}),
+    );
+    let outcome = verify(
+        &connection,
+        &intent,
+        Some(&payload),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
+#[tokio::test]
+async fn verify_label_removal_confirms_the_key_is_gone_and_ignores_unrelated_metadata() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({
+                "apiVersion":"v1","kind":"ConfigMap",
+                "metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1",
+                    "labels":{"other":"kept"}}
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (intent, payload) =
+        modify_intent_with_payload("uid-1", json!({"metadata":{"labels":{"team":null}}}));
+    let outcome = verify(
+        &connection,
+        &intent,
+        Some(&payload),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
+#[tokio::test]
+async fn verify_reports_observed_different_when_the_fresh_value_does_not_match() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"},"spec":{"replicas":2}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (intent, payload) = modify_intent_with_payload("uid-1", json!({"spec":{"replicas":5}}));
+    let outcome = verify(
+        &connection,
+        &intent,
+        Some(&payload),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        sauron::mutation::Verification::ObservedDifferent(_)
+    ));
+}
+
+#[tokio::test]
+async fn verify_reports_target_replaced_when_the_uid_changed_since_commit() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"different-uid"},"spec":{"replicas":5}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let (intent, payload) = modify_intent_with_payload("uid-1", json!({"spec":{"replicas":5}}));
+    let outcome = verify(
+        &connection,
+        &intent,
+        Some(&payload),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::TargetReplaced);
+}
+
+#[tokio::test]
+async fn verify_is_unknown_when_cancelled_never_treated_as_a_commit_failure() {
+    use sauron::kube::mutation::verify;
+    let server =
+        Server::new(|_| panic!("a pre-cancelled verification must never reach the transport"))
+            .await;
+    let connection = connection(server.client());
+    let (intent, payload) = modify_intent_with_payload("uid-1", json!({"spec":{"replicas":5}}));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let outcome = verify(&connection, &intent, Some(&payload), &cancel).await;
+    assert_eq!(outcome, sauron::mutation::Verification::Unknown);
+}
+
+#[tokio::test]
+async fn verify_delete_reports_deletion_in_progress_when_timestamp_present() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","deletionTimestamp":"2026-09-18T00:00:00Z"}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Delete);
+    let outcome = verify(&connection, &intent, None, &CancellationToken::new()).await;
+    assert_eq!(outcome, sauron::mutation::Verification::DeletionInProgress);
+}
+
+#[tokio::test]
+async fn verify_delete_reports_observed_gone_on_a_fresh_notfound() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| (404, String::new())).await;
+    let connection = connection(server.client());
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Delete);
+    let outcome = verify(&connection, &intent, None, &CancellationToken::new()).await;
+    assert_eq!(outcome, sauron::mutation::Verification::ObservedGone);
+}
+
+#[tokio::test]
+async fn verify_delete_still_present_with_no_deletion_timestamp_is_pending_not_a_problem() {
+    use sauron::kube::mutation::verify;
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string(),
+        )
+    })
+    .await;
+    let connection = connection(server.client());
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Delete);
+    let outcome = verify(&connection, &intent, None, &CancellationToken::new()).await;
+    assert_eq!(outcome, sauron::mutation::Verification::Pending);
+}
+
+#[tokio::test]
+async fn commit_success_remains_success_even_when_verification_is_later_unknown() {
+    use sauron::kube::mutation::{commit, verify};
+    use sauron::mutation::Confirmation;
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Modify);
+    let payload = json!({"metadata":{"annotations":{"m7-proof":"nonce"}}});
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        Some(payload.clone()),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let verification = verify(&connection, &intent, Some(&payload), &cancel).await;
+    assert_eq!(verification, sauron::mutation::Verification::Unknown);
+    assert_eq!(
+        outcome,
+        sauron::mutation::MutationOutcome::Committed,
+        "a later-unknown verification must never retroactively change the commit outcome"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

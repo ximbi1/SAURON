@@ -15,6 +15,7 @@ async fn discovery_documents_explain_and_secrets() {
             kubeconfig: Some(path.into()),
             context: Some("kind-sauron-test".into()),
             force_readonly: false,
+            mutation_test_cluster_verified: false,
         },
         Config::default(),
     )

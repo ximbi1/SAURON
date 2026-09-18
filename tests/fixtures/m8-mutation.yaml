@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sauron-m8
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: m8-deploy
+  namespace: sauron-m8
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: m8-deploy
+  template:
+    metadata:
+      labels:
+        app: m8-deploy
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m8-meta
+  namespace: sauron-m8
+  labels:
+    kept: unrelated-label-must-survive
+  annotations:
+    kept: unrelated-annotation-must-survive
+data:
+  fixture: m8-mutation-proof-only
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: m8-pod
+  namespace: sauron-m8
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 5m
+          memory: 8Mi

@@ -16,6 +16,7 @@ async fn ownership_and_template_references_resolve_live() {
             kubeconfig: Some(path.into()),
             context: Some("kind-sauron-test".into()),
             force_readonly: true,
+            mutation_test_cluster_verified: false,
         },
         Config::default(),
     )

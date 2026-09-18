@@ -50,6 +50,7 @@ async fn live_proof_mutation_and_replacement_rejection() {
             kubeconfig: Some(path.into()),
             context: Some("kind-sauron-test".into()),
             force_readonly: false,
+            mutation_test_cluster_verified: false,
         },
         Config::default(),
     )

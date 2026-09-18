@@ -25,6 +25,10 @@ pub enum Phase {
     ConfirmationSatisfied,
     CommitStarted,
     CommitResult,
+    /// M8.5: a fresh post-commit observation, correlated by `request_id` to
+    /// the `CommitResult` it follows -- never implies the commit itself was
+    /// re-evaluated or retried.
+    VerificationResult,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -25,6 +25,12 @@ struct Cli {
     /// Force read-only policy, including after config reload (no exec/attach/forward)
     #[arg(long)]
     readonly: bool,
+    /// Attest that the active context is the isolated, guarded test cluster and may
+    /// receive real M8 mutations. For scripts/test-cluster.sh only, after it has
+    /// independently verified cluster identity via Docker/API introspection. NEVER
+    /// pass this against a real cluster; SAURON never checks the context name itself.
+    #[arg(long)]
+    mutation_test_cluster_verified: bool,
     /// Run discovery and report capabilities, without a TTY
     #[arg(long, conflicts_with = "snapshot")]
     check: bool,
@@ -106,6 +112,7 @@ async fn start() -> Result<()> {
         kubeconfig: cli.kubeconfig,
         context: cli.context,
         force_readonly: cli.readonly,
+        mutation_test_cluster_verified: cli.mutation_test_cluster_verified,
     };
     let (mut runtime, mut rx) = Runtime::new(options, config, cli.config, query)?;
     if let Some(filter) = cli.filter {

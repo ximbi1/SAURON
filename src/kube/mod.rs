@@ -26,6 +26,16 @@ pub struct ConnectOptions {
     /// of what a cluster/context config layer requests. `--readonly` on the CLI sets
     /// this; it is a hard safety override, not just a default a config file can lift.
     pub force_readonly: bool,
+    /// M8: an explicit, external attestation that the active cluster is the
+    /// isolated, guarded test cluster -- set ONLY by `--mutation-test-cluster-verified`,
+    /// which only `scripts/test-cluster.sh` is meant to pass, and only after that
+    /// script has independently proven cluster identity via Docker/API introspection.
+    /// This is deliberately a SEPARATE state from `force_readonly`/`Settings.readonly`:
+    /// `readonly=false` means mutating operations are not globally disabled; this flag
+    /// means the active context has passed strong verification as the one cluster
+    /// authorized for real mutations. Neither implies the other. NEVER derive this
+    /// from the context/cluster name, and never set it against a real cluster.
+    pub mutation_test_cluster_verified: bool,
 }
 #[derive(Clone)]
 pub struct Connection {

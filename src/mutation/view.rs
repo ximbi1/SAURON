@@ -2,9 +2,10 @@
 //! Both are local: `policy_report` never touches the network, and
 //! `journal_report` only reads the already-loaded bounded journal tail.
 use super::{
-    MutationEffect, MutationIntent, MutationRisk, MutationTarget,
+    ConfirmationRequirement, MutationEffect, MutationIntent, MutationRisk, MutationTarget,
     journal::Record,
     policy::{self, PolicyContext},
+    workflow::Workflow,
 };
 use crate::{app::session::Scope, kube::discovery::Resource};
 
@@ -58,6 +59,96 @@ pub fn policy_report(context: &PolicyContext, scope: &Scope, resource: &Resource
          infrastructure only; no user-facing mutation workflow exists yet.\n",
     );
     out
+}
+
+/// M8.0: TARGET/ACTION/CHANGE/POLICY/PREFLIGHT/CONFIRMATION preview for a
+/// pending mutation workflow. Never renders raw payload or Secret content --
+/// only the pre-computed, already-redacted `change` summary. This is a pure
+/// function of `Workflow`'s current state; it never issues a request itself.
+pub fn workflow_report(workflow: &Workflow) -> String {
+    let intent = &workflow.intent;
+    let scope = &intent.target.scope;
+    let mut out = format!(
+        "TARGET: {} {}/{}\n  uid: {}\n\nACTION: {}\nCHANGE: {}\n\n",
+        scope.resource,
+        scope.namespace,
+        scope.name,
+        scope.uid,
+        intent.source_action,
+        workflow.change
+    );
+    out.push_str(&format!("POLICY: {:?}\n", workflow.evaluation.decision));
+    for reason in &workflow.evaluation.reasons {
+        out.push_str(&format!("  - {reason:?}\n"));
+    }
+    out.push('\n');
+    match &workflow.dry_run {
+        Some(outcome) => out.push_str(&format!("PREFLIGHT (server dry-run): {outcome:?}\n\n")),
+        None => out.push_str("PREFLIGHT: not run (press the dry-run key to try one)\n\n"),
+    }
+    let confirmation_line = match workflow.requirement() {
+        ConfirmationRequirement::None => "CONFIRMATION: not required".to_string(),
+        ConfirmationRequirement::Standard => {
+            "CONFIRMATION: required (press confirm once)".to_string()
+        }
+        ConfirmationRequirement::Strong => {
+            if workflow.armed {
+                "CONFIRMATION: strong -- press confirm again to commit".to_string()
+            } else {
+                "CONFIRMATION: strong -- press confirm twice to commit".to_string()
+            }
+        }
+    };
+    out.push_str(&confirmation_line);
+    out.push('\n');
+    if matches!(
+        workflow.evaluation.decision,
+        super::PolicyDecision::Deny | super::PolicyDecision::Unsupported
+    ) {
+        out.push_str("This action is DENIED; confirming sends zero requests.\n");
+    }
+    if let Some(outcome) = &workflow.commit {
+        // COMMIT RESULT is never revised by verification below: the API
+        // server already confirmed (or refused) the write; verification is
+        // a separate, later fact about what a fresh read shows, and never
+        // downgrades this line even when it is Unknown/Pending/differs.
+        out.push_str(&format!("\nCOMMIT RESULT: {outcome:?}\n"));
+        out.push_str(&format!(
+            "VERIFICATION: {}\n",
+            verification_line(&workflow.verification)
+        ));
+        out.push_str(
+            "(Readiness/availability is not shown here -- see Explain/health (M5); \
+             this is a distinct fact from whether the API server accepted the write.)\n",
+        );
+    }
+    out
+}
+
+/// M8.5: `None` means verification was never attempted for this outcome
+/// (e.g. the commit itself was denied/cancelled -- nothing to verify).
+fn verification_line(verification: &Option<super::Verification>) -> String {
+    use super::Verification::*;
+    match verification {
+        None => "not attempted".into(),
+        Some(Verified) => {
+            "Verified -- fresh observation confirms the exact requested change".into()
+        }
+        Some(Pending) => {
+            "Pending -- accepted but not yet reflected (eventual-consistency window)".into()
+        }
+        Some(Unknown) => {
+            "Unknown -- could not be confirmed (timeout, cancellation, or transport)".into()
+        }
+        Some(ObservedDifferent(detail)) => format!("ObservedDifferent -- {detail}"),
+        Some(TargetReplaced) => {
+            "TargetReplaced -- the object's UID changed before verification could run".into()
+        }
+        Some(DeletionInProgress) => "DeletionInProgress -- deletionTimestamp is now present".into(),
+        Some(ObservedGone) => {
+            "ObservedGone -- a fresh read confirms the object no longer exists".into()
+        }
+    }
 }
 
 /// Bounded, deterministic, most-recent-last. Never includes raw payload or
@@ -132,6 +223,112 @@ mod tests {
         assert!(report.contains("Modify:"));
         assert!(report.contains("Delete:"));
         assert!(report.contains("ReadonlyMode"));
+    }
+
+    #[test]
+    fn workflow_report_never_shows_a_dry_run_result_before_one_runs() {
+        use crate::mutation::{PolicyDecision, PolicyEvaluation, workflow};
+        let mut deployment = resource();
+        deployment.api.kind = "Deployment".into();
+        let built = workflow::scale(scope(), deployment, Some(2), 5, 1).unwrap();
+        let wf = workflow::Workflow::new(
+            built,
+            PolicyEvaluation {
+                decision: PolicyDecision::RequireConfirmation,
+                reasons: vec![],
+            },
+        );
+        let report = workflow_report(&wf);
+        assert!(report.contains("not run"));
+        assert!(report.contains("replicas: 2 -> 5"));
+        assert!(report.contains("CONFIRMATION: required"));
+    }
+
+    #[test]
+    fn workflow_report_marks_strong_confirmation_armed_state_distinctly() {
+        use crate::mutation::{PolicyDecision, PolicyEvaluation, workflow};
+        let built = workflow::delete(scope(), resource(), 1).unwrap();
+        let mut wf = workflow::Workflow::new(
+            built,
+            PolicyEvaluation {
+                decision: PolicyDecision::RequireStrongerConfirmation,
+                reasons: vec![],
+            },
+        );
+        let before = workflow_report(&wf);
+        assert!(before.contains("press confirm twice"));
+        wf.armed = true;
+        let armed = workflow_report(&wf);
+        assert!(armed.contains("press confirm again"));
+    }
+
+    #[test]
+    fn workflow_report_denied_action_states_zero_requests() {
+        use crate::mutation::{PolicyDecision, PolicyEvaluation, PolicyReason, workflow};
+        let mut deployment = resource();
+        deployment.api.kind = "Deployment".into();
+        let built = workflow::scale(scope(), deployment, Some(2), 5, 1).unwrap();
+        let wf = workflow::Workflow::new(
+            built,
+            PolicyEvaluation {
+                decision: PolicyDecision::Deny,
+                reasons: vec![PolicyReason::ReadonlyMode],
+            },
+        );
+        let report = workflow_report(&wf);
+        assert!(report.contains("DENIED"));
+        assert!(report.contains("zero requests"));
+    }
+
+    #[test]
+    fn workflow_report_shows_commit_and_verification_as_two_distinct_facts() {
+        use crate::mutation::{
+            MutationOutcome, PolicyDecision, PolicyEvaluation, Verification, workflow,
+        };
+        let built = workflow::delete(scope(), resource(), 1).unwrap();
+        let mut wf = workflow::Workflow::new(
+            built,
+            PolicyEvaluation {
+                decision: PolicyDecision::RequireStrongerConfirmation,
+                reasons: vec![],
+            },
+        );
+        wf.commit = Some(MutationOutcome::Committed);
+        wf.verification = Some(Verification::Unknown);
+        let report = workflow_report(&wf);
+        assert!(report.contains("COMMIT RESULT: Committed"));
+        assert!(report.contains("VERIFICATION: Unknown"));
+        assert!(
+            !report.contains("COMMIT RESULT: Unknown"),
+            "an unknown/failed verification must never be rendered as if the commit itself failed"
+        );
+    }
+
+    #[test]
+    fn workflow_report_never_attempted_verification_is_distinct_from_pending_or_unknown() {
+        use crate::mutation::{MutationOutcome, PolicyDecision, PolicyEvaluation, workflow};
+        let built = workflow::scale(
+            scope(),
+            {
+                let mut d = resource();
+                d.api.kind = "Deployment".into();
+                d
+            },
+            Some(1),
+            2,
+            1,
+        )
+        .unwrap();
+        let mut wf = workflow::Workflow::new(
+            built,
+            PolicyEvaluation {
+                decision: PolicyDecision::RequireConfirmation,
+                reasons: vec![],
+            },
+        );
+        wf.commit = Some(MutationOutcome::Denied);
+        let report = workflow_report(&wf);
+        assert!(report.contains("VERIFICATION: not attempted"));
     }
 
     #[test]

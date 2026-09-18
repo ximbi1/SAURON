@@ -492,6 +492,29 @@ impl Runtime {
                     doc.freshness = document::Freshness::Snapshot(chrono::Utc::now());
                 }
             }
+            Payload::MutationDryRun { request, outcome } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && let Some(workflow) = doc.workflow.as_mut()
+                {
+                    workflow.dry_run = Some(outcome);
+                    let text = crate::mutation::view::workflow_report(workflow);
+                    doc.replace(text);
+                }
+            }
+            Payload::MutationCommit {
+                request,
+                outcome,
+                verification,
+            } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && let Some(workflow) = doc.workflow.as_mut()
+                {
+                    workflow.commit = Some(outcome);
+                    workflow.verification = verification;
+                    let text = crate::mutation::view::workflow_report(workflow);
+                    doc.replace(text);
+                }
+            }
             Payload::DocumentError { request, error } if request == self.state.request => {
                 if let Some(doc) = self.active_document_mut() {
                     doc.replace(String::new());
@@ -802,6 +825,93 @@ impl Runtime {
                 let object = self.state.selected_object().context("Select a Pod first")?;
                 self.start_forward(connection, object, ports)
             }
+            Command::Scale(replicas) => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let current = object
+                    .value
+                    .pointer("/spec/replicas")
+                    .and_then(serde_json::Value::as_i64);
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::scale(
+                    scope, resource, current, replicas, request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Scale: {}", object.name), built)
+            }
+            Command::Restart => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                // Generated exactly once here, when the intent is first built --
+                // never regenerated on a later render of the same workflow.
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let built =
+                    crate::mutation::workflow::restart(scope, resource, &timestamp, request_id)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Restart: {}", object.name), built)
+            }
+            Command::Delete => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::delete(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Delete: {}", object.name), built)
+            }
+            Command::Label { key, value } => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::label(
+                    scope,
+                    resource,
+                    &key,
+                    value.as_deref(),
+                    request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Label: {}", object.name), built)
+            }
+            Command::Annotate { key, value } => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::annotate(
+                    scope,
+                    resource,
+                    &key,
+                    value.as_deref(),
+                    request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Annotate: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -965,6 +1075,8 @@ impl Runtime {
                     self.apply_history(entry);
                 }
             }
+            MutationDryRun => self.mutation_dry_run()?,
+            MutationConfirm => self.mutation_confirm()?,
         }
         self.state.dirty = true;
         Ok(())
@@ -1012,6 +1124,7 @@ impl Runtime {
         match &self.state.mode {
             Mode::Document(doc) if doc.forward_manager => "forwards",
             Mode::Document(doc) if doc.session.is_some() => "logs",
+            Mode::Document(doc) if doc.workflow.is_some() => "mutation",
             Mode::Document(_) => "document",
             _ => "table",
         }
@@ -1029,12 +1142,12 @@ impl Runtime {
             .map(Mode::Document)
             .unwrap_or(Mode::Table);
     }
-    /// M7.5: read-only, local, no network. SAURON has no in-app mechanism to
-    /// mark a cluster as verified for mutation (that is an external,
-    /// out-of-band guarantee -- see scripts/test-cluster.sh); the runtime
-    /// `PolicyContext` therefore always leaves `cluster_verified_for_mutation`
-    /// false, so this view honestly shows every hypothetical mutation as
-    /// denied everywhere SAURON actually runs. M7 is infrastructure only.
+    /// M8.0: read-only, local, no network. `cluster_verified_for_mutation` is a
+    /// distinct state from `readonly` -- it reflects only the external,
+    /// out-of-band attestation carried by `--mutation-test-cluster-verified`
+    /// (see `scripts/test-cluster.sh`, which sets it only after independently
+    /// proving cluster identity via Docker/API introspection). It is never
+    /// derived from `readonly`, never from the context/cluster name.
     fn open_policy_view(&mut self) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
         let resource = self
@@ -1053,13 +1166,178 @@ impl Runtime {
             name: object.name.clone(),
             uid: object.uid.clone(),
         };
-        let policy_context = crate::mutation::policy::PolicyContext {
-            readonly: self.state.settings.readonly,
-            readonly_forced: self.options.force_readonly,
-            ..Default::default()
-        };
+        let policy_context = self.mutation_policy_context();
         let text = crate::mutation::view::policy_report(&policy_context, &scope, &resource);
         self.open_static(&format!("Policy: {}", object.name), text);
+        Ok(())
+    }
+    /// M8.0: the single place that builds a `PolicyContext` from live runtime
+    /// state. `cluster_verified_for_mutation` comes only from the explicit
+    /// `--mutation-test-cluster-verified` attestation (see `ConnectOptions`'
+    /// own doc comment) -- never from `readonly`, never from context/cluster
+    /// name. Built fresh on every call, never cached across a context switch.
+    fn mutation_policy_context(&self) -> crate::mutation::policy::PolicyContext {
+        crate::mutation::policy::PolicyContext {
+            readonly: self.state.settings.readonly,
+            readonly_forced: self.options.force_readonly,
+            cluster_verified_for_mutation: self.options.mutation_test_cluster_verified,
+            ..Default::default()
+        }
+    }
+    /// M8.0: bumps `state.request` and builds the incarnation-safe `Scope`
+    /// every mutation builder needs -- the same convention already used by
+    /// owned sessions (logs/exec/forward) and M7's own fixtures.
+    fn mutation_scope(
+        &mut self,
+        object: &crate::resources::Object,
+        resource: &crate::kube::discovery::Resource,
+    ) -> Result<session::Scope> {
+        let connection = self.connection.as_ref().context("Not connected")?;
+        self.document.cancel();
+        self.state.request += 1;
+        Ok(session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: resource.id(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        })
+    }
+    /// M8.0: the one place a mutation preview document is opened -- builds
+    /// the `PolicyEvaluation` fresh (never trusts a cached decision), never
+    /// issues a network request itself.
+    fn open_workflow_document(
+        &mut self,
+        title: String,
+        built: crate::mutation::workflow::Built,
+    ) -> Result<()> {
+        let policy_context = self.mutation_policy_context();
+        let evaluation = crate::mutation::policy::evaluate(&policy_context, &built.intent);
+        let workflow = crate::mutation::workflow::Workflow::new(built, evaluation);
+        let text = crate::mutation::view::workflow_report(&workflow);
+        let mut doc = Document::new(title, text);
+        doc.workflow = Some(workflow);
+        self.state.mode = Mode::Document(doc);
+        self.palette_document = None;
+        Ok(())
+    }
+    /// M8.0: a server dry-run only -- never gated behind confirmation, but
+    /// still fully gated behind policy: `Deny`/`Unsupported` sends zero
+    /// requests, exactly like a real commit would refuse to.
+    fn mutation_dry_run(&mut self) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected")?;
+        let workflow = self
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .context("No mutation preview open")?;
+        anyhow::ensure!(
+            !matches!(
+                workflow.evaluation.decision,
+                crate::mutation::PolicyDecision::Deny
+                    | crate::mutation::PolicyDecision::Unsupported
+            ),
+            "DENIED: this action is not permitted, no request will be sent"
+        );
+        let intent = workflow.intent.clone();
+        let payload = workflow.payload.clone();
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        let journal = self.mutation_journal();
+        self.tasks.spawn(async move {
+            let outcome = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                outcome = crate::kube::mutation::preflight(&connection, &intent, payload.as_ref(), &journal, &cancel) => outcome,
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload: Payload::MutationDryRun { request, outcome } }) => {},
+            }
+        });
+        Ok(())
+    }
+    /// M8.0: `Allow`/`RequireConfirmation` commit on the first press;
+    /// `RequireStrongerConfirmation` arms on the first press and commits on
+    /// the second -- `armed` is UX state only, never authorization itself.
+    /// `Deny`/`Unsupported` sends zero requests, ever.
+    fn mutation_confirm(&mut self) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected")?;
+        let epoch = self.state.epoch;
+        let doc = self
+            .active_document_mut()
+            .context("No mutation preview open")?;
+        let workflow = doc.workflow.as_mut().context("No mutation preview open")?;
+        anyhow::ensure!(
+            !matches!(
+                workflow.evaluation.decision,
+                crate::mutation::PolicyDecision::Deny
+                    | crate::mutation::PolicyDecision::Unsupported
+            ),
+            "DENIED: this action is not permitted, no request will be sent"
+        );
+        anyhow::ensure!(
+            workflow.intent.target.scope.epoch == epoch,
+            "Target replaced or context changed; reopen the preview"
+        );
+        if workflow.requirement() == crate::mutation::ConfirmationRequirement::Strong
+            && !workflow.armed
+        {
+            workflow.armed = true;
+            doc.replace(crate::mutation::view::workflow_report(
+                doc.workflow.as_ref().unwrap(),
+            ));
+            return Ok(());
+        }
+        let confirmation = workflow.confirmation();
+        let intent = workflow.intent.clone();
+        let payload = workflow.payload.clone();
+        workflow.armed = false;
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        let policy_context = self.mutation_policy_context();
+        let journal = self.mutation_journal();
+        self.tasks.spawn(async move {
+            let outcome = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                outcome = crate::kube::mutation::commit(&connection, &policy_context, epoch, &intent, Some(&confirmation), payload.clone(), &journal, &cancel) => outcome,
+            };
+            // M8.5: a verification failure/timeout NEVER downgrades `outcome`
+            // below -- the server already confirmed (or refused) the write.
+            // Only attempted for a real commit; anything else has nothing to
+            // verify. Exactly one bounded, cancellable attempt, never retried.
+            let verification = if matches!(
+                outcome,
+                crate::mutation::MutationOutcome::Committed
+                    | crate::mutation::MutationOutcome::CommittedButJournalIncomplete
+            ) {
+                let v = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => crate::mutation::Verification::Unknown,
+                    v = crate::kube::mutation::verify(&connection, &intent, payload.as_ref(), &cancel) => v,
+                };
+                let _ = journal.append(crate::kube::mutation::verification_record(&intent, &v));
+                Some(v)
+            } else {
+                None
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload: Payload::MutationCommit { request, outcome, verification } }) => {},
+            }
+        });
         Ok(())
     }
     fn mutation_journal(&self) -> crate::mutation::journal::Journal {
@@ -2369,6 +2647,247 @@ mod tests {
         assert!(!text.contains("Modify: Allow"));
         rt.shutdown().await;
     }
+    #[tokio::test]
+    async fn readonly_false_alone_never_implies_cluster_verified_for_mutation() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.force_readonly = false;
+        assert!(
+            !rt.options.mutation_test_cluster_verified,
+            "verification must default false and never derive from readonly"
+        );
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"p","uid":"root-uid"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("root-uid".into());
+        rt.action(Action::Policy).expect("policy view");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(
+            text.contains("UnverifiedCluster"),
+            "readonly=false alone must still deny as unverified"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn cluster_verified_flag_alone_does_not_bypass_readonly() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"p","uid":"root-uid"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("root-uid".into());
+        rt.action(Action::Policy).expect("policy view");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(
+            !text.contains("UnverifiedCluster"),
+            "verification flag must be honored independently of readonly"
+        );
+        assert!(
+            text.contains("ReadonlyMode") || text.contains("Deny"),
+            "readonly must still deny even when the cluster is verified"
+        );
+        rt.shutdown().await;
+    }
+    fn deployment_object(uid: &str, replicas: i64) -> crate::resources::Object {
+        crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"apps/v1","kind":"Deployment",
+            "metadata":{"namespace":"test","name":"d","uid":uid},
+            "spec":{"replicas":replicas}
+        }))
+    }
+    fn open_deployment_scale_preview(rt: &mut Runtime, uid: &str) {
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Deployment".into();
+        rt.state.resource = Some(resource);
+        rt.state.rows = vec![std::sync::Arc::new(deployment_object(uid, 2))];
+        rt.state.selected = Some(uid.into());
+        rt.command(":scale 5")
+            .expect("preview opens even when denied");
+    }
+
+    #[tokio::test]
+    async fn mutation_confirm_under_readonly_errors_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        open_deployment_scale_preview(&mut rt, "uid-1");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny,
+            "readonly must still deny even when the test cluster is verified"
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied confirm must error, never silently no-op"
+        );
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "a denied confirm must send zero requests"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_dry_run_under_readonly_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        open_deployment_scale_preview(&mut rt, "uid-1");
+        let tasks_before = rt.tasks.len();
+        assert!(rt.action(Action::MutationDryRun).is_err());
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_strong_confirmation_requires_a_second_press_before_any_request() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "ConfigMap".into();
+        rt.state.resource = Some(resource);
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"namespace":"test","name":"c","uid":"uid-1"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        rt.command(":delete").expect("delete preview opens");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.requirement(),
+            crate::mutation::ConfirmationRequirement::Strong
+        );
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::MutationConfirm)
+            .expect("first press arms, does not error");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "arming a strong confirmation must send zero requests"
+        );
+        assert!(
+            rt.active_document_mut()
+                .and_then(|d| d.workflow.as_ref())
+                .expect("workflow")
+                .armed,
+            "first press must arm, not commit"
+        );
+        rt.action(Action::MutationConfirm)
+            .expect("second press commits");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before + 1,
+            "the second press is the one that actually sends a request"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_confirm_rejects_stale_epoch_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_deployment_scale_preview(&mut rt, "uid-1");
+        rt.state.epoch += 1;
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "a stale epoch must be rejected, never silently retargeted"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn command_scale_rejects_unsupported_kind_before_building_an_intent() {
+        let mut rt = runtime();
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"namespace":"test","name":"c","uid":"uid-1"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        assert!(rt.command(":scale 3").is_err());
+        assert!(!matches!(rt.state.mode, Mode::Document(_)));
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_commit_verification_never_touches_the_store_or_fabricates_timeline() {
+        let mut rt = runtime();
+        open_deployment_scale_preview(&mut rt, "uid-1");
+        let revision_before = rt.state.store.revision;
+        let histories_before = rt.state.store.histories.len();
+        rt.reduce(crate::app::event::Event {
+            epoch: rt.state.epoch,
+            payload: Payload::MutationCommit {
+                request: rt.state.request,
+                outcome: crate::mutation::MutationOutcome::Committed,
+                verification: Some(crate::mutation::Verification::Verified),
+            },
+        });
+        assert_eq!(
+            rt.state.store.revision, revision_before,
+            "verification is a fresh GET, never written into the watch-derived store"
+        );
+        assert_eq!(
+            rt.state.store.histories.len(),
+            histories_before,
+            "verification must never fabricate a Timeline entry"
+        );
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow");
+        assert_eq!(
+            workflow.verification,
+            Some(crate::mutation::Verification::Verified)
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_commit_result_from_a_stale_request_is_ignored() {
+        let mut rt = runtime();
+        open_deployment_scale_preview(&mut rt, "uid-1");
+        let stale_request = rt.state.request;
+        rt.state.request += 1;
+        rt.reduce(crate::app::event::Event {
+            epoch: rt.state.epoch,
+            payload: Payload::MutationCommit {
+                request: stale_request,
+                outcome: crate::mutation::MutationOutcome::Committed,
+                verification: Some(crate::mutation::Verification::Verified),
+            },
+        });
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow");
+        assert!(
+            workflow.commit.is_none(),
+            "a stale (superseded) request's result must never be applied to the current preview"
+        );
+        rt.shutdown().await;
+    }
+
     #[tokio::test]
     async fn mutations_view_is_read_only_and_handles_a_missing_journal() {
         let mut rt = runtime();

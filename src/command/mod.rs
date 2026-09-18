@@ -49,6 +49,8 @@ pub enum Action {
     HistoryBack,
     HistoryForward,
     ToggleWarnings,
+    MutationDryRun,
+    MutationConfirm,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -321,6 +323,20 @@ pub fn registry() -> Vec<Binding> {
             "Forward to next scope",
             "]",
         ),
+        (
+            Action::MutationDryRun,
+            "mutation_dry_run",
+            "mutation",
+            "Mutation preview: try a server dry-run (never commits)",
+            "d",
+        ),
+        (
+            Action::MutationConfirm,
+            "mutation_confirm",
+            "mutation",
+            "Mutation preview: confirm (press twice if strong confirmation is required)",
+            "y",
+        ),
     ];
     definitions
         .into_iter()
@@ -352,7 +368,7 @@ impl Keymap {
                 entry.keys = keys.clone();
             }
         }
-        for mode in ["table", "document", "logs", "forwards"] {
+        for mode in ["table", "document", "logs", "forwards", "mutation"] {
             let mut used = Vec::new();
             for binding in bindings.iter().filter(|b| available(b.mode, mode)) {
                 for key in &binding.keys {
@@ -413,7 +429,7 @@ pub fn available(binding: &str, mode: &str) -> bool {
     binding == "global"
         || binding == mode
         || (mode != "input" && binding == "navigation")
-        || (matches!(mode, "logs" | "forwards") && binding == "document")
+        || (matches!(mode, "logs" | "forwards" | "mutation") && binding == "document")
 }
 fn normalize(mut m: KeyModifiers, c: KeyCode) -> KeyModifiers {
     if matches!(c, KeyCode::Char(_)) {
@@ -493,6 +509,35 @@ pub enum Command {
     Attach {
         container: Option<String>,
     },
+    Scale(u32),
+    Restart,
+    Delete,
+    Label {
+        key: String,
+        value: Option<String>,
+    },
+    Annotate {
+        key: String,
+        value: Option<String>,
+    },
+}
+
+/// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
+/// and `:annotate`. Deliberately simple -- no shell-style escaping -- so the
+/// split point is never ambiguous: exactly one `=` (set) or a single
+/// trailing `-` with no `=` (remove).
+fn parse_metadata_arg(tail: &[String], usage: &str) -> Result<(String, Option<String>)> {
+    ensure!(tail.len() == 1, "{usage}");
+    let arg = &tail[0];
+    if let Some((key, value)) = arg.split_once('=') {
+        ensure!(!key.is_empty(), "{usage}");
+        return Ok((key.to_owned(), Some(value.to_owned())));
+    }
+    if let Some(key) = arg.strip_suffix('-') {
+        ensure!(!key.is_empty(), "{usage}");
+        return Ok((key.to_owned(), None));
+    }
+    bail!(usage.to_string())
 }
 
 /// Quoted words have shell-like grouping only. Nothing is executed or expanded.
@@ -684,6 +729,32 @@ pub fn parse(s: &str) -> Result<Command> {
                 container: tail.first().cloned(),
             });
         }
+        // ":scale N" -- a bounded, non-negative integer only; no scientific
+        // notation, no leading '+', no whitespace-embedded digits.
+        "scale" => {
+            ensure!(tail.len() == 1, "Use :scale REPLICAS");
+            let replicas = tail[0]
+                .parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("REPLICAS must be a non-negative integer"))?;
+            return Ok(Command::Scale(replicas));
+        }
+        "restart" => {
+            ensure!(tail.is_empty(), "Use :restart");
+            return Ok(Command::Restart);
+        }
+        "delete" => {
+            ensure!(tail.is_empty(), "Use :delete");
+            return Ok(Command::Delete);
+        }
+        "label" => {
+            let (key, value) = parse_metadata_arg(tail, "Use :label KEY=VALUE or :label KEY-")?;
+            return Ok(Command::Label { key, value });
+        }
+        "annotate" => {
+            let (key, value) =
+                parse_metadata_arg(tail, "Use :annotate KEY=VALUE or :annotate KEY-")?;
+            return Ok(Command::Annotate { key, value });
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -745,7 +816,8 @@ pub fn parse(s: &str) -> Result<Command> {
 /// second list to remember to update.
 pub fn command_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = vec![
-        "ctx", "ns", "info", "reload", "sort", "exec", "shell", "attach",
+        "ctx", "ns", "info", "reload", "sort", "exec", "shell", "attach", "scale", "restart",
+        "delete", "label", "annotate",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -899,4 +971,69 @@ fn forwarding_commands_have_canonical_actions_and_structured_ports() {
     ));
     assert!(parse(":forward 0.0.0.0:8080").is_err());
     assert!(parse(":pf_stop -1").is_err());
+}
+#[test]
+fn scale_parses_a_bounded_non_negative_integer_only() {
+    assert!(matches!(parse(":scale 5"), Ok(Command::Scale(5))));
+    assert!(matches!(parse(":scale 0"), Ok(Command::Scale(0))));
+    assert!(parse(":scale -1").is_err());
+    assert!(parse(":scale 3.5").is_err());
+    assert!(parse(":scale").is_err());
+    assert!(parse(":scale 1 2").is_err());
+    assert!(parse(":scale 99999999999999999999").is_err());
+}
+#[test]
+fn restart_and_delete_take_no_arguments() {
+    assert!(matches!(parse(":restart"), Ok(Command::Restart)));
+    assert!(matches!(parse(":delete"), Ok(Command::Delete)));
+    assert!(parse(":restart now").is_err());
+    assert!(parse(":delete now").is_err());
+}
+#[test]
+fn label_and_annotate_parse_set_and_remove_grammar() {
+    assert!(matches!(
+        parse(":label team=infra"),
+        Ok(Command::Label { key, value: Some(v) }) if key == "team" && v == "infra"
+    ));
+    assert!(matches!(
+        parse(":label team-"),
+        Ok(Command::Label { key, value: None }) if key == "team"
+    ));
+    assert!(matches!(
+        parse(":annotate note='hello world'"),
+        Ok(Command::Annotate { key, value: Some(v) }) if key == "note" && v == "hello world"
+    ));
+    assert!(parse(":label").is_err());
+    assert!(parse(":label =novalue").is_err());
+    assert!(parse(":label -").is_err());
+    assert!(parse(":label a=b c=d").is_err());
+}
+#[test]
+fn mutation_command_names_are_discoverable_and_registry_help_agrees() {
+    let names = command_names();
+    for name in ["scale", "restart", "delete", "label", "annotate"] {
+        assert!(names.contains(&name), "{name} must be palette-suggestible");
+    }
+    let keys = Keymap::compile(&BTreeMap::new()).expect("default keymap");
+    let help = keys.help();
+    assert!(help.contains("mutation"));
+    assert!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            "mutation"
+        ) == Some(Action::MutationDryRun)
+    );
+    assert!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            "mutation"
+        ) == Some(Action::MutationConfirm)
+    );
+}
+#[test]
+fn mutation_readonly_denial_is_a_precise_error_not_a_silent_noop() {
+    // Command parsing itself never checks readonly -- the app layer opens the
+    // preview and lets policy render the denial (M8: "visible, not hidden").
+    // Parsing must still succeed so the palette can even try.
+    assert!(matches!(parse(":scale 3"), Ok(Command::Scale(3))));
 }

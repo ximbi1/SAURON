@@ -64,6 +64,10 @@ pub struct Document {
     pub evicted: u64,
     pub follow: bool,
     pub source: Option<Source>,
+    /// M8.0: set only for a mutation preview/confirm/commit document (Scale/
+    /// Restart/Delete/Label/Annotate); `None` for every other document.
+    /// Presence of this drives `mode_name()`'s `"mutation"` keymap.
+    pub workflow: Option<crate::mutation::workflow::Workflow>,
     pub freshness: Freshness,
     pub truncated: bool,
     pub page_size: usize,
@@ -105,6 +109,7 @@ impl Document {
             evicted: 0,
             follow: false,
             source: None,
+            workflow: None,
             freshness: Freshness::Local,
             truncated: false,
             page_size: 20,

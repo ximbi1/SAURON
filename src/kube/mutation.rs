@@ -6,10 +6,11 @@
 use super::{Connection, relationships::read_bounded};
 use crate::mutation::{
     Confirmation, MutationEffect, MutationIntent, MutationOutcome, MutationTarget, PolicyDecision,
+    Verification,
     journal::{Journal, Phase, Record},
     policy::{self, PolicyContext},
 };
-use kube::api::{DeleteParams, Patch, PatchParams};
+use kube::api::{DeleteParams, Patch, PatchParams, Preconditions};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -115,6 +116,14 @@ async fn delete_request(
     let builder = kube::core::Request::new(api.resource_url());
     let params = DeleteParams {
         dry_run,
+        // Defense in depth alongside the client-side TOCTOU `revalidate` GET:
+        // the server itself rejects the delete with 409 Conflict if the live
+        // object's UID no longer matches what was observed at preview time,
+        // even if this exact request is somehow issued after a replacement.
+        preconditions: Some(Preconditions {
+            resource_version: None,
+            uid: Some(target.scope.uid.clone()),
+        }),
         ..Default::default()
     };
     let request = match builder.delete(&target.scope.name, &params) {
@@ -338,4 +347,219 @@ pub async fn commit(
         return MutationOutcome::CommittedButJournalIncomplete;
     }
     outcome
+}
+
+/// Walks a single-leaf JSON merge-patch document (exactly what every M8
+/// workflow builds: one field, however deeply nested) down to its leaf,
+/// returning a JSON pointer path and the expected value at that path.
+/// `None` if the payload does not have this shape -- verification then
+/// reports `Unknown` rather than guessing. RFC 6901 escaping matters here:
+/// annotation keys routinely contain literal `/` (e.g.
+/// `kubectl.kubernetes.io/restartedAt`), which must become `~1` inside the
+/// pointer, not a path separator.
+fn leaf_path_and_value(payload: &Value) -> Option<(String, Value)> {
+    let mut path = String::new();
+    let mut node = payload;
+    loop {
+        let Value::Object(map) = node else {
+            return None;
+        };
+        if map.len() != 1 {
+            return None;
+        }
+        let (key, value) = map.iter().next()?;
+        path.push('/');
+        path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+        match value {
+            Value::Object(_) => node = value,
+            other => return Some((path, other.clone())),
+        }
+    }
+}
+
+/// M8.5: one bounded, cancellable fresh GET immediately after a successful
+/// commit, comparing the observed value at the payload's own leaf path to
+/// what was requested. Never retried, never blocks indefinitely -- a
+/// timeout or transport failure reports `Unknown`, never treated as the
+/// mutation having failed (the server already accepted the write).
+async fn verify_modify(
+    connection: &Connection,
+    target: &MutationTarget,
+    path: &str,
+    expected: &Value,
+    cancel: &CancellationToken,
+) -> Verification {
+    let namespace = target
+        .resource
+        .namespaced
+        .then_some(target.scope.namespace.as_str());
+    let api = target.resource.api(connection.client.clone(), namespace);
+    let fetch = read_bounded(
+        connection,
+        api.resource_url(),
+        Some(&target.scope.name),
+        false,
+    );
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Verification::Unknown,
+        result = tokio::time::timeout(connection.timeout(), fetch) => result,
+    };
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(crate::evidence::Unknown::NotFound)) => {
+            return Verification::ObservedDifferent("object no longer exists".into());
+        }
+        _ => return Verification::Unknown,
+    };
+    let uid = value.pointer("/metadata/uid").and_then(Value::as_str);
+    if uid != Some(target.scope.uid.as_str()) {
+        return Verification::TargetReplaced;
+    }
+    let observed = value.pointer(path);
+    let matches = match expected {
+        Value::Null => observed.is_none() || observed == Some(&Value::Null),
+        other => observed == Some(other),
+    };
+    if matches {
+        Verification::Verified
+    } else {
+        Verification::ObservedDifferent(format!(
+            "expected {path}={expected}, observed {path}={}",
+            observed
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "<absent>".into())
+        ))
+    }
+}
+
+/// M8.5: after a successful delete, `deletionTimestamp` means accepted and
+/// in progress; a later 404 (or the same name resolving to a different UID)
+/// means observed gone. Still fully present with no `deletionTimestamp` is
+/// `Pending`, not a problem -- an ordinary eventual-consistency window,
+/// never polled in a loop here.
+async fn verify_delete(
+    connection: &Connection,
+    target: &MutationTarget,
+    cancel: &CancellationToken,
+) -> Verification {
+    let namespace = target
+        .resource
+        .namespaced
+        .then_some(target.scope.namespace.as_str());
+    let api = target.resource.api(connection.client.clone(), namespace);
+    let fetch = read_bounded(
+        connection,
+        api.resource_url(),
+        Some(&target.scope.name),
+        true,
+    );
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Verification::Unknown,
+        result = tokio::time::timeout(connection.timeout(), fetch) => result,
+    };
+    match result {
+        Ok(Ok(value)) => {
+            let uid = value.pointer("/metadata/uid").and_then(Value::as_str);
+            if uid != Some(target.scope.uid.as_str()) {
+                return Verification::ObservedGone;
+            }
+            if value.pointer("/metadata/deletionTimestamp").is_some() {
+                Verification::DeletionInProgress
+            } else {
+                Verification::Pending
+            }
+        }
+        Ok(Err(crate::evidence::Unknown::NotFound)) => Verification::ObservedGone,
+        _ => Verification::Unknown,
+    }
+}
+
+/// M8.5: the one place verification is attempted -- exactly once, only
+/// after a real commit (`Committed`/`CommittedButJournalIncomplete`; callers
+/// must not call this for any other outcome). `Create` has no verification
+/// path yet, matching its documented unsupported status elsewhere in this
+/// module.
+pub async fn verify(
+    connection: &Connection,
+    intent: &MutationIntent,
+    payload: Option<&Value>,
+    cancel: &CancellationToken,
+) -> Verification {
+    match intent.effect {
+        MutationEffect::Delete => verify_delete(connection, &intent.target, cancel).await,
+        MutationEffect::Modify => match payload.and_then(leaf_path_and_value) {
+            Some((path, expected)) => {
+                verify_modify(connection, &intent.target, &path, &expected, cancel).await
+            }
+            None => Verification::Unknown,
+        },
+        MutationEffect::Create => Verification::Unknown,
+    }
+}
+
+/// A `Phase::VerificationResult` record correlated by `request_id` to the
+/// `CommitResult` it follows -- callers append this themselves (verify()
+/// itself does not journal, matching the same separation `preflight`/
+/// `commit` already keep between the network call and the audit write).
+pub fn verification_record(intent: &MutationIntent, verification: &Verification) -> Record {
+    record(
+        intent,
+        Phase::VerificationResult,
+        None,
+        &[],
+        None,
+        Some(format!("{verification:?}")),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaf_path_and_value_walks_a_single_key_chain_to_its_leaf() {
+        let (path, value) = leaf_path_and_value(&serde_json::json!({"spec": {"replicas": 5}}))
+            .expect("single-leaf payload");
+        assert_eq!(path, "/spec/replicas");
+        assert_eq!(value, serde_json::json!(5));
+    }
+
+    #[test]
+    fn leaf_path_and_value_escapes_slashes_in_annotation_keys_per_rfc6901() {
+        let (path, value) = leaf_path_and_value(&serde_json::json!({
+            "spec": {"template": {"metadata": {"annotations": {
+                "kubectl.kubernetes.io/restartedAt": "2026-09-18T00:00:00Z"
+            }}}}
+        }))
+        .expect("nested single-leaf payload");
+        assert_eq!(
+            path,
+            "/spec/template/metadata/annotations/kubectl.kubernetes.io~1restartedAt"
+        );
+        assert_eq!(value, serde_json::json!("2026-09-18T00:00:00Z"));
+    }
+
+    #[test]
+    fn leaf_path_and_value_handles_a_removal_null_leaf() {
+        let (path, value) =
+            leaf_path_and_value(&serde_json::json!({"metadata": {"labels": {"team": null}}}))
+                .expect("removal payload");
+        assert_eq!(path, "/metadata/labels/team");
+        assert_eq!(value, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn leaf_path_and_value_rejects_a_multi_key_object_rather_than_guessing() {
+        assert!(
+            leaf_path_and_value(&serde_json::json!({"spec": {"replicas": 5, "paused": true}}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn leaf_path_and_value_rejects_a_non_object_payload() {
+        assert!(leaf_path_and_value(&serde_json::json!(5)).is_none());
+    }
 }

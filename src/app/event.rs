@@ -59,4 +59,17 @@ pub enum Payload {
     /// columns exactly as they already were -- there is no error variant to show,
     /// since this is enrichment, not a required part of showing the table at all.
     PrinterColumns(Vec<PrinterColumn>),
+    /// M8.0: a server dry-run attempt finished -- never a real commit.
+    MutationDryRun {
+        request: u64,
+        outcome: crate::mutation::MutationOutcome,
+    },
+    /// M8.0: a real commit attempt finished; `verification` is a distinct,
+    /// separately-labeled fact from `outcome` itself (a fresh post-commit
+    /// GET/observation), never collapsed into one "Success".
+    MutationCommit {
+        request: u64,
+        outcome: crate::mutation::MutationOutcome,
+        verification: Option<crate::mutation::Verification>,
+    },
 }

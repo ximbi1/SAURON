@@ -5,6 +5,7 @@
 pub mod journal;
 pub mod policy;
 pub mod view;
+pub mod workflow;
 
 use crate::{app::session::Scope, kube::discovery::Resource};
 
@@ -77,6 +78,21 @@ pub enum PolicyDecision {
     RequireStrongerConfirmation,
     Unsupported,
 }
+impl PolicyDecision {
+    /// M8.0: the UI-facing mapping from a policy decision to the confirmation
+    /// UX it demands -- pure and total, so no caller can invent a fourth
+    /// posture. `Allow`/`Deny`/`Unsupported` need no confirmation UX: `Allow`
+    /// proceeds, the other two never reach a confirmable state at all.
+    pub fn confirmation_requirement(self) -> ConfirmationRequirement {
+        match self {
+            PolicyDecision::RequireConfirmation => ConfirmationRequirement::Standard,
+            PolicyDecision::RequireStrongerConfirmation => ConfirmationRequirement::Strong,
+            PolicyDecision::Allow | PolicyDecision::Deny | PolicyDecision::Unsupported => {
+                ConfirmationRequirement::None
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyEvaluation {
@@ -141,6 +157,40 @@ pub enum MutationOutcome {
     TransportFailure,
     Cancelled,
     Unsupported,
+}
+
+/// M8.5: a fresh, post-commit observation -- a distinct fact from
+/// `MutationOutcome` (what the API server did with the write itself).
+/// A verification failure/timeout/unknown NEVER downgrades a `Committed`
+/// outcome: the server already confirmed the write; this only describes
+/// whether SAURON was able to confirm it too, and how. Deliberately does
+/// not include readiness/availability -- that stays M5's Explain/health
+/// engine, never duplicated here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verification {
+    /// Fresh observation confirms the exact requested change.
+    Verified,
+    /// Observed, but the resource has not yet reflected the change in any
+    /// way that indicates failure (e.g. delete accepted, no
+    /// `deletionTimestamp` yet). Not evidence of a problem -- an
+    /// eventual-consistency window, never retried automatically.
+    Pending,
+    /// Verification could not be attempted or completed (cancelled, timed
+    /// out, or an ambiguous transport failure) -- never treated as failure.
+    Unknown,
+    /// A fresh observation was obtained but does not match what was
+    /// requested. Redacted, field-path-only description -- never a raw
+    /// value dump.
+    ObservedDifferent(String),
+    /// The object's UID changed between commit and verification -- the
+    /// commit itself is unaffected; this only means SAURON cannot vouch for
+    /// what the *current* object reflects.
+    TargetReplaced,
+    /// Delete-specific: `metadata.deletionTimestamp` is now present.
+    DeletionInProgress,
+    /// Delete-specific: a fresh GET returned 404, or returned 200 with a
+    /// different UID under the same name (the previewed object is gone).
+    ObservedGone,
 }
 
 #[cfg(test)]

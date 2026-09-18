@@ -5,6 +5,7 @@ pub mod config;
 pub mod evidence;
 pub mod explain;
 pub mod filters;
+pub mod graph;
 pub mod kube;
 pub mod resources;
 pub mod safety;

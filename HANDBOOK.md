@@ -145,9 +145,9 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Attach | ACCEPTED | reuses shell's terminal guard/forwarding loop; requires container stdin+tty; Ctrl-] local-only detach; docs/EXEC.md |
 | Port-forward manager | ACCEPTED (M4.3 scope) | Pod-only native background lifetime; repeated real TCP/UID/context/cleanup acceptance; docs/PORT_FORWARD.md |
 | M4.4 combined/regression/soak | ACCEPTED | 10 live combined sequences + full M1-M4 regression + 75-minute soak (912 cycles, flat RSS/fd/threads); docs/M4_ACCEPTANCE.md; local annotated m4-accepted |
-| Health/Explain/timeline | IMPLEMENTING | pure rules + fresh-object/UID-related Event evidence; child correlation pending |
-| Metrics | DESIGNED | missing metrics remain unknown; no samples fabricated |
-| Graph/relationships/Xray | RESEARCHED | M6 |
+| Health/Explain/timeline | ACCEPTED (M5) | deterministic evidence, bounded ownership correlation, relist deltas; docs/M5_ACCEPTANCE.md |
+| Metrics | ACCEPTED (M5) | native optional collector, accounting and typed table/filter/sort; docs/METRICS.md |
+| Graph/relationships/Xray | IMPLEMENTING | M6.0 metadata model; no resolver/UI acceptance yet; docs/M6_ACCEPTANCE.md |
 | Policy/guardrails/journal/mutations | DESIGNED | read-only initial release |
 | GitOps/Helm | RESEARCHED | native inspection before actions |
 | Eye/Pulse/bundles/diff | RESEARCHED | bounded evidence collection |
@@ -233,8 +233,8 @@ second only when the filter has an `age` comparison (see journal entry below —
 version included the clock unconditionally and resorted every tick regardless of scope).
 Shared document interactions and selection were accepted in M3. Watch list synchronization is
 labeled separately from an established watch; no header-level connection probe yet.
-No in-cluster config fallback or server Tables;
-metrics, graph or Kubernetes resource mutations yet. Multi-source logs and gated
+No in-cluster config fallback, server Tables, graph UI or Kubernetes resource mutations yet.
+Metrics are accepted in M5. Multi-source logs and gated
 exec/shell/attach are accepted. Core Event reads cap at 200
 and report truncation. Describe is SAURON's contextual native report, not kubectl parity.
 
@@ -266,8 +266,10 @@ UID-keyed Timeline with correct relist-diff semantics (M5.5, docs/TIMELINE.md),
 and a 12-sequence combined adversarial pass plus a 75-minute soak (M5.6, zero
 failures). Local annotated `m5-accepted` created, never pushed. `CPU`/`MEM`
 are default-visible table columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/
-`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. M6 is next; no M6 work has
-started. Contracts and per-slice evidence: docs/M5_ACCEPTANCE.md.
+`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. M6 is now in progress:
+M6.0 scoped graph identity/provenance/bounds foundation, followed by resolvers,
+Adjacent and Xray. M6 is not accepted. Ledgers: docs/M5_ACCEPTANCE.md and
+docs/M6_ACCEPTANCE.md. Production remains untouched.
 M4 baseline Docker inspection found no sauron-test container or kind clusters. Recreated
 only isolated sauron-test with explicit kubeconfig via scripts/bootstrap-test-cluster.sh;
 Docker identity/loopback verified, node Ready. Old ignored kubeconfig privately backed up.
@@ -291,6 +293,20 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-18 — M6.0 started
+
+Created M6 ledger before code. Added `src/graph.rs`: topology metadata only,
+canonical discovered Resource ID plus epoch/namespace/name/UID; distinct owner,
+explicit, selector and status provenance; deterministic deduplicated evidence;
+128 nodes/256 edges/depth 2, 16 paths per edge/1024 bytes per path; atomic
+bound rejection and cycle-safe traversal. No network, resolver or UI yet.
+Five unit tests cover scope/replacement identity, GVK/namespace validation,
+cycles, deterministic dedup, evidence and atomic bounds. Locked fmt/check/clippy
+clean; 110 unit + 19 fake HTTP passed, one opt-in live test ignored.
+Corrected stale feature-matrix/limitation text left over before M5 acceptance.
+Next: finish model validation (unresolved targets, freshness, source errors),
+then M6.1 reference extraction/resolution. Do not treat foundation as live acceptance.
 
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 

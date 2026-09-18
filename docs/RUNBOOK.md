@@ -27,6 +27,13 @@ It never falls back to the default kubeconfig and has no production cleanup path
 
 ## Current checkpoint
 
+M6 started 2026-09-18 from accepted M5 (`1a45dbd`; HEAD also includes README).
+M6.0 graph metadata foundation and ledger implemented in the working tree;
+no relationship API collector or UI yet, no M6 acceptance. Current continuation:
+finish M6.0 validation/checks, then explicit-reference/owner resolution. Track
+actual checks and live evidence in [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
+No cluster operations performed during this initial foundation work.
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated
@@ -71,8 +78,8 @@ relist-diff semantics (M5.5, see [TIMELINE.md](TIMELINE.md)), and a 12-sequence
 combined adversarial pass plus a 75-minute soak with zero failures (M5.6).
 Local annotated `m5-accepted` created, never pushed. `CPU`/`MEM` are
 default-visible columns; `CPU/R`/`MEM/R`/`CPU/L`/`MEM/L`/`QOS`/`CPU/C`/`MEM/C`/
-`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. M6 is next; no M6 work has
-started. See [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
+`CPU/%R`/`MEM/%R`/`CPU/%L`/`MEM/%L` are wide-only. M6.0 is now in progress
+(current continuation above). See [M5_ACCEPTANCE.md](M5_ACCEPTANCE.md).
 M4.2b attach accepted 2026-09-16: confirmed it needed no new terminal mechanics,
 only call-site plumbing reusing M4.2's guard/forwarding loop exactly. Found and
 fixed a real hang on the first live test: attaching to an already-running

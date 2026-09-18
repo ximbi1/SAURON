@@ -147,6 +147,10 @@ above is unchanged.
 
 ## Current gap review — M5 accepted, 2026-09-17
 
+M6 implementation started 2026-09-18: scoped graph identity/provenance/bounds
+foundation only. Adjacent, Xray and relationship transport are not yet implemented
+or accepted. Per-slice evidence and continuation: [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
+
 M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
 curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config
 are implemented (see HANDBOOK/RUNBOOK for actual live scope). Remaining composite rows

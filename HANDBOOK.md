@@ -294,6 +294,40 @@ clients need separately owned forwarding connections. No new dependency chosen y
 
 ## Journal
 
+### 2026-09-18 — M7.6 ACCEPTED, M7 fully closed
+
+`scripts/accept-m7.py` (13 scenarios: `:policy`/`:mutations` read-only
+surfaces, protected namespace, 32x9, M4/M5/M6 regression touchpoints) PASS
+twice, live against `kind-sauron-test`. `tests/mutation_live.rs` (the one
+narrowly-scoped internal proof mutation: an annotation patch on
+`sauron-m7/m7-target`) PASS twice: full preview→dry-run→confirmation→
+commit→fresh-GET-verify→journal-verify against the real cluster, plus real
+same-name/new-UID replacement rejection (delete+recreate, same name, new
+UID, previously-valid intent correctly rejected). Full M1-M6 regression
+re-run and green after all M7 changes.
+
+75-minute soak (`scripts/soak-m7.py`) complete: 1071 cycles, 1071 each of
+Explain/Timeline/Adjacent/Xray/Policy/Mutations, **zero reconnects** —
+better than every prior milestone's soak. RSS 29956→30328 KiB (+1.2%,
+allocator noise, not a leak), fds constant at 14, threads constant at 4,
+metrics requests climbing steadily 0→1315.
+
+Found and fixed a real bug immediately before tagging:
+`tests/watch_transport.rs`'s `test_journal()` helper created a fresh
+`AtomicU64::new(0)` and immediately called `fetch_add` on it — which always
+returns 0, so every call produced the *same* "unique" journal directory.
+Two `mutation_*` fake-HTTP tests running concurrently (cargo's default
+parallel test execution) could intermittently share one journal file and
+fail each other's record assertions. Root-caused, fixed with a real
+module-level static counter, full locked suite re-run clean 5 consecutive
+times before proceeding.
+
+**All of M7 (M7.0-M7.6) is now ACCEPTED.** Tagging `m7-accepted` (local
+only, never pushed without explicit authorization). M7 shipped no
+user-facing mutation workflow by design — the policy engine, confirmation
+contract, execution gateway, and journal are the doorway M8 will walk
+mutations through; M8 has not started.
+
 ### 2026-09-18 — M7.0-M7.5 implemented (M6.6 baseline, before M7 combined acceptance/soak)
 
 M7 builds the mandatory mutation infrastructure (policy, confirmation,

@@ -25,11 +25,11 @@ action without passing explicit safety and policy boundaries.
 
 SAURON is being built as a 12-milestone project.
 
-M1 through M6 are currently **ACCEPTED**, with local annotated milestone
-tags (`m1-accepted` through `m6-accepted`) and live verification against an
+M1 through M7 are currently **ACCEPTED**, with local annotated milestone
+tags (`m1-accepted` through `m7-accepted`) and live verification against an
 isolated Kubernetes `kind` cluster.
 
-M7 is the next milestone and has not started yet.
+M8 is the next milestone and has not started yet.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ M7 is the next milestone and has not started yet.
 | M4 | Interactive sessions: logs, exec, shell, attach, port-forward | ACCEPTED |
 | M5 | Evidence-driven metrics, deterministic health, Explain 2.0, Timeline | ACCEPTED |
 | M6 | Relationship graph, adjacent resources, Xray | ACCEPTED |
-| M7 | Central mutation policy, guardrails and operation journal | NOT STARTED |
+| M7 | Central mutation policy, guardrails and operation journal (infrastructure only — no mutation workflow yet) | ACCEPTED |
 | M8 | Guarded mutation workflows | NOT STARTED |
 | M9 | Flux, Argo CD and Helm integrations | NOT STARTED |
 | M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | NOT STARTED |
@@ -465,6 +465,40 @@ Each node in the traversal shows the same deterministic health used
 everywhere else in SAURON. Xray does not compute a second, parallel "graph
 health," and a related object is never presented as the cause of a
 problem — relationship is not causation.
+
+---
+
+## Mutation policy infrastructure (M7)
+
+SAURON does not yet ship a mutation workflow — there is no delete, scale,
+restart, or edit command. M7 instead builds the mandatory pipeline every
+future mutation (M8) will have to pass through: a central, deterministic
+policy engine, an incarnation-safe mutation identity model, a confirmation
+contract bound to the exact intent, a single execution gateway with
+before-mutation revalidation, and a durable, redacted local journal.
+
+Two read-only views exist today so this infrastructure is inspectable:
+
+    :policy
+    u
+
+shows what a hypothetical Modify or Delete on the selected object would do
+under the real policy engine — fully local, zero network. SAURON has no
+setting anywhere that marks a cluster as verified for mutation; that
+verification is deliberately kept external to the running application. This
+view therefore denies every hypothetical mutation on every cluster it is
+run against, including the isolated development cluster — this is correct,
+not a bug, for a milestone that ships no mutation workflow.
+
+    :mutations
+    m
+
+shows the bounded, most-recent local mutation journal — also fully local,
+zero network. On a fresh installation it is empty.
+
+See [`docs/MUTATION_POLICY.md`](docs/MUTATION_POLICY.md) and
+[`docs/MUTATION_JOURNAL.md`](docs/MUTATION_JOURNAL.md) for the full
+contract.
 
 ---
 
@@ -911,23 +945,53 @@ M6 remains read-only.
 
 ### M7 — Central mutation policy
 
-Not started.
+Accepted. Infrastructure only — no user-facing mutation workflow ships in
+this milestone; that is M8.
 
-Planned scope includes:
+Delivered:
 
-- central mutation gateway
-- operation intent
-- policy evaluation
-- RBAC checks
-- previews
-- confirmations
-- UID/resourceVersion preconditions
-- final identity revalidation
-- operation journal
-- uncertain-outcome handling
-- cancellation semantics
+- deterministic mutation identity, effect and risk model, reusing the same
+  incarnation-safe scope already used by owned sessions
+- central policy engine: fixed gate order, every applicable reason
+  accumulated, UNKNOWN never silently means Allow
+- confirmation contract bound to the exact intent (context, namespace,
+  GVR/GVK, name, UID, effect, payload hash) — invalidated by any change
+- local preview, server dry-run, and commit kept as three distinct,
+  non-implicit phases
+- one central execution gateway: re-evaluates policy at commit time,
+  revalidates the target's live UID/resourceVersion immediately before
+  mutating, journals before and after, bounded/cancellable
+- explicit outcome states, preserving "definitely not committed" vs.
+  "commit outcome cannot be proven" as genuinely distinct
+- durable, redacted, append-only local mutation journal
+- `:policy` and `:mutations` read-only TUI surfaces
+- one narrowly-scoped internal proof mutation, live-verified twice against
+  the isolated `kind-sauron-test` fixture only
+- combined adversarial acceptance and 75-minute soak
 
-No mutation workflow should bypass this layer.
+M7 final verification:
+
+    152 unit tests
+    37 fake HTTP tests
+    13 combined live interactive scenarios
+    combined sequence executed twice
+    one live proof-mutation test executed twice
+    full M1-M6 regression
+    75-minute soak
+    1071 soak cycles
+    0 reconnects
+    RSS +1.2% over the full run (allocator noise, not a leak)
+    stable file descriptors
+    stable thread count
+
+Local annotated tag:
+
+    m7-accepted
+
+The tag has not been published.
+
+No mutation workflow bypasses this layer, because no mutation workflow
+exists yet.
 
 ---
 
@@ -1186,6 +1250,7 @@ All mutable fixtures are isolated behind an explicit test kubeconfig.
 - `docs/M4_ACCEPTANCE.md`
 - `docs/M5_ACCEPTANCE.md`
 - `docs/M6_ACCEPTANCE.md`
+- `docs/M7_ACCEPTANCE.md`
 
 M1 and M2 acceptance evidence is recorded in the engineering handbook.
 
@@ -1205,6 +1270,8 @@ M1 and M2 acceptance evidence is recorded in the engineering handbook.
 - `docs/EXPLAIN.md`
 - `docs/TIMELINE.md`
 - `docs/RELATIONSHIPS.md`
+- `docs/MUTATION_POLICY.md`
+- `docs/MUTATION_JOURNAL.md`
 
 ---
 
@@ -1225,6 +1292,9 @@ SAURON follows a few deliberately strict principles:
 11. Reconnects must not invent history.
 12. Read-only must actually mean read-only.
 13. Relationship does not imply cause.
+14. No mutation without policy; UNKNOWN never means allowed.
+15. Confirmation is not authorization; dry-run success is not commit success.
+16. A successful HTTP response is not a verified desired effect.
 
 ---
 

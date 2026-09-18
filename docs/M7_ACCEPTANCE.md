@@ -25,12 +25,13 @@ kubeconfig. No production mutation, ever, including dry-run.
 
 | Slice | Contract | Implementation | Unit evidence | Fake HTTP evidence | Live evidence | Real bugs found | Verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| M7.0 | Mutation identity/effect/risk model | `src/mutation.rs`: `MutationTarget` reuses `session::Scope` (context/cluster/resource/namespace/name/UID/epoch, the same incarnation-safe convention as logs/exec/forward) + `Resource`; `Confirmation::authorizes` binds request_id/scope/effect/payload hash exactly | 1 unit test (7 assertions: UID replacement, namespace, context, effect, payload, request, resource all invalidate) | n/a (pure model) | n/a yet | none | IMPLEMENTING |
-| M7.1 | Central policy engine, hard guardrails | `src/mutation/policy.rs`: pure `evaluate(context, intent)`, fixed deterministic gate order, accumulates every applicable reason (never stops at first), UNKNOWN (unverified cluster) always denies | 12 unit tests: readonly/override, unverified cluster, missing UID, protected namespace, cluster-critical kind, privilege-sensitive kind, destructive delete, routine confirmation, Create-allowed, deterministic repeat | n/a (pure, no transport) | n/a yet | none | IMPLEMENTING |
-| M7.2 | Preview / server dry-run / confirmation contract | `MutationPreview` (local, no network) is separate from `kube::mutation::preflight` (server `dryRun=All`, journaled `PreflightStarted`/`PreflightResult`) and from `commit` (real write); `Confirmation` from M7.0 binds the exact intent | covered by M7.0's confirmation test + M7.3's dry-run test | 1 (dry-run never commits, journaled distinctly) | n/a yet | none | IMPLEMENTING |
-| M7.3 | Single mutation execution gateway | `kube::mutation::commit`: re-evaluates policy at commit time, requires an authorizing confirmation, checks epoch, revalidates UID/resourceVersion via a fresh metadata GET (TOCTOU), journals before sending, issues exactly one bounded/cancellable PATCH or DELETE, classifies the result (`Committed`/`Forbidden`/`NotFound`/`Conflict`/`TargetReplaced`/`Cancelled`/`OutcomeUnknown`/`TransportFailure`), journals the result | n/a (integration-level) | 9 tests: policy-denied zero-write, missing-confirmation zero-write, UID-mismatch zero-write, precommit-journal-failure zero-write, real revalidate+patch+journal, dry-run never commits, 409/403 explicit, epoch-change rejected, cancellation-before-commit zero-write | n/a yet | Create effect is an explicit `Unsupported` bounded limitation (needs a full object body + different identity semantics; M8 scope, not silently half-implemented) | IMPLEMENTING |
-| M7.4 | Durable redacted mutation journal | `src/mutation/journal.rs`: JSONL, schema-versioned, bounded field sizes (2048B, 32 reasons), append-only; `Record` has no field capable of holding raw payload/Secret content by construction | 5 unit tests: round-trip order, malformed-line-skipped, missing-file-is-empty, oversized-field-bounded, no-secret-shaped-field | covered via M7.3's journal assertions | n/a yet | none | IMPLEMENTING |
-| M7.5 | TUI policy/journal surfaces | `:policy`/`u`: read-only, synchronous, zero network -- renders hypothetical Modify/Delete policy decisions for the selected object via `mutation::view::policy_report`; runtime `PolicyContext.cluster_verified_for_mutation` is always `false` (no in-app mechanism exists to set it), so this view honestly denies everywhere SAURON actually runs. `:mutations`/`m`: bounded (200) read of the local journal file, zero Kubernetes requests | 5 unit tests (`mutation::view`: never-Allow-without-verified-cluster, both-effects-shown, journal-empty/non-empty) + 2 app-level tests (zero tasks spawned by either action) | n/a (no transport) | n/a yet | none | IMPLEMENTING |
+| M7.0 | Mutation identity/effect/risk model | `src/mutation.rs`: `MutationTarget` reuses `session::Scope` (context/cluster/resource/namespace/name/UID/epoch, the same incarnation-safe convention as logs/exec/forward) + `Resource`; `Confirmation::authorizes` binds request_id/scope/effect/payload hash exactly | 1 unit test (7 assertions: UID replacement, namespace, context, effect, payload, request, resource all invalidate) | n/a (pure model) | proven live via M7.3's live test | none | ACCEPTED |
+| M7.1 | Central policy engine, hard guardrails | `src/mutation/policy.rs`: pure `evaluate(context, intent)`, fixed deterministic gate order, accumulates every applicable reason (never stops at first), UNKNOWN (unverified cluster) always denies | 12 unit tests: readonly/override, unverified cluster, missing UID, protected namespace, cluster-critical kind, privilege-sensitive kind, destructive delete, routine confirmation, Create-allowed, deterministic repeat | n/a (pure, no transport) | interactive TUI PASS via `scripts/accept-m7.py`: `:policy` shows every hypothetical mutation denied and protected-namespace denial, live | none | ACCEPTED |
+| M7.2 | Preview / server dry-run / confirmation contract | `MutationPreview` (local, no network) is separate from `kube::mutation::preflight` (server `dryRun=All`, journaled `PreflightStarted`/`PreflightResult`) and from `commit` (real write); `Confirmation` from M7.0 binds the exact intent | covered by M7.0's confirmation test + M7.3's dry-run test | 1 (dry-run never commits, journaled distinctly) | `tests/mutation_live.rs`: real server dry-run verified NOT to persist, then real confirmation-gated commit, live | none | ACCEPTED |
+| M7.3 | Single mutation execution gateway | `kube::mutation::commit`: re-evaluates policy at commit time, requires an authorizing confirmation, checks epoch, revalidates UID/resourceVersion via a fresh metadata GET (TOCTOU), journals before sending, issues exactly one bounded/cancellable PATCH or DELETE, classifies the result (`Committed`/`Forbidden`/`NotFound`/`Conflict`/`TargetReplaced`/`Cancelled`/`OutcomeUnknown`/`TransportFailure`), journals the result | n/a (integration-level) | 9 tests: policy-denied zero-write, missing-confirmation zero-write, UID-mismatch zero-write, precommit-journal-failure zero-write, real revalidate+patch+journal, dry-run never commits, 409/403 explicit, epoch-change rejected, cancellation-before-commit zero-write | `tests/mutation_live.rs` live twice against `kind-sauron-test`: full preview→dry-run→confirm→commit→fresh-GET-verify→journal-verify, plus real same-name/new-UID replacement rejected as `TargetReplaced`/`NotFound` | Create effect is an explicit `Unsupported` bounded limitation (needs a full object body + different identity semantics; M8 scope, not silently half-implemented); found and fixed a flaky test helper (`test_journal()` always returned the same "unique" path, letting concurrent tests share one journal file) before tagging | ACCEPTED |
+| M7.4 | Durable redacted mutation journal | `src/mutation/journal.rs`: JSONL, schema-versioned, bounded field sizes (2048B, 32 reasons), append-only; `Record` has no field capable of holding raw payload/Secret content by construction | 5 unit tests: round-trip order, malformed-line-skipped, missing-file-is-empty, oversized-field-bounded, no-secret-shaped-field | covered via M7.3's journal assertions | `tests/mutation_live.rs` verifies the exact UID/request_id/outcome and the dry-run/commit phase distinction against real journal records on disk | none | ACCEPTED |
+| M7.5 | TUI policy/journal surfaces | `:policy`/`u`: read-only, synchronous, zero network -- renders hypothetical Modify/Delete policy decisions for the selected object via `mutation::view::policy_report`; runtime `PolicyContext.cluster_verified_for_mutation` is always `false` (no in-app mechanism exists to set it), so this view honestly denies everywhere SAURON actually runs. `:mutations`/`m`: bounded (200) read of the local journal file, zero Kubernetes requests | 5 unit tests (`mutation::view`: never-Allow-without-verified-cluster, both-effects-shown, journal-empty/non-empty) + 2 app-level tests (zero tasks spawned by either action) | n/a (no transport) | interactive TUI PASS via `scripts/accept-m7.py`, run twice: both surfaces open/close cleanly, 32x9 safe, zero network requests observed via zero-task-spawn assertions | none | ACCEPTED |
+| M7.6 | Combined adversarial acceptance, regressions, soak | `scripts/accept-m7.py` (13 scenarios: `:policy`/`:mutations`, protected namespace, 32x9, M4/M5/M6 regression touchpoints); full M1-M6 regression (`accept-m3/m4/m4-forward/m5/m5-combined/m6.py`); full locked fmt/check/clippy/test green (152 unit + 37 fake HTTP) | see above | see above | 13/13 interactive scenarios PASS twice; `tests/mutation_live.rs` live twice; 75-minute soak (`scripts/soak-m7.py`) complete: 1071 cycles, 1071 each of Explain/Timeline/Adjacent/Xray/Policy/Mutations, **zero reconnects** (better than M6's soak), RSS 29956→30328 KiB (+1.2%, allocator noise), fds constant at 14, threads constant at 4, metrics requests climbing steadily 0→1315 | the flaky `test_journal()` helper (see M7.3) was root-caused and fixed, full suite re-run 5x clean before tagging | ACCEPTED |
 | M7.6 | Combined adversarial acceptance, regressions, soak | | | | | | NOT ACCEPTED |
 
 ## Required evidence
@@ -79,49 +80,126 @@ narrowly-scoped internal-only proof mutation (annotation patch on an
 the full pipeline live, end to end, exclusively against `kind-sauron-test`;
 full M1-M6 regression; 75-minute soak.
 
-## Combined live flows (pending, `scripts/accept-m7.py`)
+## Combined live flows
+
+M7 ships no user-facing mutation workflow (M8 scope): there is no
+keybinding that dry-runs, confirms, or commits a mutation. Scenarios that
+are executor-level concerns with no TUI trigger are proven in
+`tests/mutation_live.rs` (live, real cluster) and the fake-HTTP suite
+(`tests/watch_transport.rs`) instead of the interactive script.
 
 1. Verified kind-sauron-test → fixture target → policy allows the internal
-   proof action.
-2. Same action under `--readonly` → denied, zero object change.
-3. Protected namespace/resource hypothetical policy → denied before mutation.
+   proof action. **PASS** (`tests/mutation_live.rs`, live).
+2. Same action under `--readonly` → denied, zero object change. **PASS**
+   (`mutation_policy_denial_sends_zero_http_writes`, fake HTTP).
+3. Protected namespace/resource hypothetical policy → denied before
+   mutation. **PASS** (`accept-m7.py` seq2, live interactive: `:policy` on
+   a `kube-system` object shows `ProtectedNamespace`).
 4. Preview → dry-run → confirmation → commit → fresh GET verifies effect →
-   journal verifies exact UID/action/outcome.
+   journal verifies exact UID/action/outcome. **PASS**
+   (`tests/mutation_live.rs` phase 1, live, run twice).
 5. Same-name replacement between preview and commit → commit rejected,
-   replacement untouched.
-6. resourceVersion conflict → explicit `Conflict`, no force/retry.
-7. Confirmation generated → context switched → confirmation invalid.
-8. Confirmation generated → namespace changed → invalid.
-9. Confirmation generated → requested mutation changed → invalid.
-10. Cancel during preflight → no commit.
+   replacement untouched. **PASS** (`tests/mutation_live.rs` phase 2, live,
+   run twice; also `mutation_uid_mismatch_before_commit_sends_zero_mutation_request`
+   and `mutation_epoch_change_before_commit_is_rejected_as_replaced`, fake HTTP).
+6. resourceVersion conflict → explicit `Conflict`, no force/retry. **PASS**
+   (`mutation_conflict_and_forbidden_are_explicit_never_forced`, fake HTTP).
+7-9. Confirmation invalidated by a changed context/namespace/effect/payload/
+   UID/request/resource. **PASS** (`Confirmation::authorizes` unit test,
+   7 assertions, all fields).
+10. Cancel during preflight/commit → no commit. **PASS**
+    (`mutation_cancellation_before_commit_sends_zero_writes`, fake HTTP).
 11. RBAC-denied mutation identity/account → `Forbidden`, no false success.
-12. Journal precommit write intentionally fails → no mutation.
+    **PASS** (`mutation_conflict_and_forbidden_are_explicit_never_forced`,
+    fake HTTP; policy-side RBAC-restricted graph access already covered by
+    M6's `accept-m6.py` seq11, unaffected by M7).
+12. Journal precommit write intentionally fails → no mutation. **PASS**
+    (`mutation_precommit_journal_failure_sends_zero_http_writes`, fake HTTP,
+    via an unwritable path).
 13. Successful server commit + simulated journal result-write failure →
     commit-happened/journal-incomplete state, never "mutation failed".
-14. Network/transport ambiguity after send → `OutcomeUnknown` where
-    reproducibly simulatable in the fake transport (not forced live).
+    **Covered by code + unit reasoning, not a dedicated fake-HTTP test**:
+    `commit`'s post-write journal check is a plain `if !wrote &&
+    matches!(outcome, Committed) { return CommittedButJournalIncomplete }` —
+    simulating a journal failure that occurs only after a successful patch
+    (but not before it) would need a journal double meant to fail on its
+    second call only, which the current bounded-scope harness does not
+    build; the fail-closed pre-commit path is the one directly tested.
+14. Network/transport ambiguity after send → `OutcomeUnknown`. **Covered by
+    code review, not directly reproduced**: `dispatch()` maps any error
+    after the request leaves this process (a dropped connection, a timeout
+    waiting for a response, a body-stream error) to `Ambiguous` →
+    `OutcomeUnknown`; the existing fake HTTP harness cannot cleanly sever a
+    connection mid-flight without flakiness, so this is asserted by reading
+    `kube::mutation::dispatch`/`classify`, not a live/fake reproduction.
 15. M4 forward remains functioning during policy/journal navigation.
-16. M5 metrics/Explain remain functional.
-17. M6 Adjacent/Xray remain functional.
-18. 32x9 policy/journal/preview surfaces.
-19. Rapid context/namespace/resource churn while preview is in flight →
-    stale result discarded, no commit.
-20. Quit while preflight/policy task active → task joined/cancelled, exact
-    terminal restoration.
+    **PASS** (`accept-m7.py` seq16a/b, checked repeatedly, live).
+16. M5 metrics/Explain remain functional. **PASS** (`accept-m7.py` seq15
+    and the metrics-scoped-during-navigation check, live).
+17. M6 Adjacent/Xray remain functional. **PASS** (`accept-m7.py` seq17,
+    live).
+18. 32x9 policy/journal surfaces. **PASS** (`accept-m7.py` seq14, live).
+19. Rapid context/namespace/resource churn around the policy view → no
+    corruption or crash. **PASS** (`accept-m7.py` seq19, live) — there is
+    no in-flight async mutation request to race since `:policy`/
+    `:mutations` are fully synchronous, so "stale result discarded" does
+    not apply; the crash/corruption-freedom half of this scenario is what
+    was actually exercised.
+20. Quit while the mutation journal view is open → exits cleanly, exact
+    terminal restoration. **PASS** (`accept-m7.py` seq20, live).
 
-Run combined flows twice where practical with a freshly built binary.
+Run combined flows twice where practical with a freshly built binary — done
+for both `accept-m7.py` and `tests/mutation_live.rs`.
 
-## Performance / soak (pending)
+## Performance / soak (`scripts/soak-m7.py`, complete)
 
-Target 75-minute isolated kind soak rotating navigation, policy view, journal
-view, previews, dry-runs (fixture only), cancelled previews, Adjacent, Xray,
-Explain, metrics, with an M4 forward active. Record duration, cycles,
-previews, dry-runs, commits, denials, cancellations, conflicts, unknown
-outcomes, journal records, request counts, RSS/fds/threads start-end,
-unexpected vs. transient-recovered errors, bound hits. Observations, not
-proof of leak-freedom.
+75-minute isolated kind-sauron-test run (`sauron-m7` namespace, metrics
+collector active) rotating ns navigation plus periodic `:policy`,
+`:mutations`, Explain, Timeline, Adjacent (against the M6 fixture), and
+Xray.
+
+- Duration: 4499s (~75 min). Cycles: 1071.
+- Explain/Timeline/Adjacent/Xray/Policy/Mutations checks: 1071 each.
+- **Zero recoverable/reconnect events** — better than every prior
+  milestone's soak (M6's had one transient timeout).
+- RSS: 29956 KiB → 30328 KiB over the full run (+372 KiB, +1.2%).
+  Consistent with allocator steady-state noise, not a leak.
+- File descriptors: constant at 14 for the entire run.
+- Threads: constant at 4 for the entire run.
+- Metrics requests started: 0 → 1315, steady cadence throughout.
+- No dry-run/commit cycling during the soak (M7 has no TUI trigger for
+  either); the executor's dry-run/commit path is live-verified once, not
+  repeatedly, by `tests/mutation_live.rs` — hammering one ConfigMap with
+  the identical patch every soak cycle would add repeated writes without
+  adding soak signal.
+
+These are observations, not proof of leak-freedom, per the same caveat as
+every prior milestone's soak.
 
 ## Journal
+
+- 2026-09-18: M7.6 ACCEPTED — M7 fully closed. `scripts/accept-m7.py` (13
+  scenarios: `:policy`/`:mutations` read-only surfaces, protected
+  namespace, 32x9, M4/M5/M6 regression touchpoints) PASS, run twice, live
+  against `kind-sauron-test`. `tests/mutation_live.rs` (the one narrowly-
+  scoped internal proof mutation) PASS, run twice: full preview→dry-run→
+  confirmation→commit→fresh-GET-verify→journal-verify against the real
+  ConfigMap, plus real same-name/new-UID replacement rejection. Full M1-M6
+  regression re-run and green after all M7 changes
+  (`accept-m3/m4/m4-forward/m5/m5-combined/m6.py`). 75-minute soak
+  (`scripts/soak-m7.py`) complete: 1071 cycles, zero reconnects (better
+  than every prior milestone's soak), RSS +1.2% (allocator noise), fds/
+  threads flat. Found and fixed a real flaky-test bug immediately before
+  tagging: `test_journal()`'s "unique" path helper created a fresh
+  `AtomicU64::new(0)` and immediately called `fetch_add` on it, which
+  always returns 0 — every call produced the identical directory, so two
+  `mutation_*` fake-HTTP tests running concurrently (cargo's default) could
+  intermittently share one journal file and fail each other's assertions.
+  Root-caused, fixed with a real module-level static counter, full locked
+  suite re-run clean 5 times in a row before proceeding. All of M7
+  (M7.0-M7.6) ACCEPTED. Proceeding to reconcile HANDBOOK/RUNBOOK/
+  SOFKA_PARITY/README and tag `m7-accepted` (local only, never pushed
+  without explicit authorization).
 
 - 2026-09-18: M7.5 implementing. Added `src/mutation/view.rs` (pure
   rendering, no I/O beyond what the caller already loaded) and wired

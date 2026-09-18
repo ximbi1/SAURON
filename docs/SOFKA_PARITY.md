@@ -145,7 +145,7 @@ above is unchanged.
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Current gap review — M7 implementing, 2026-09-18
+## Current gap review — M7 accepted, 2026-09-18
 
 M6 (M6.0-M6.6) fully ACCEPTED 2026-09-18: bounded relationship graph
 (ownerReferences, explicit typed references, Service/Pod selectors,
@@ -156,13 +156,16 @@ cycle-safe traversal are all implemented, unit/fake/live-tested, and
 interactively verified end to end via `scripts/accept-m6.py` plus a
 75-minute soak. Per-slice evidence: [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
 
-M7 (mutation policy/guardrails/journal infrastructure) is implementing as
-of this same date: central deterministic policy engine, incarnation-safe
-mutation identity, confirmation contract, single execution gateway with
-TOCTOU revalidation, redacted append-only journal, and read-only
-`:policy`/`:mutations` surfaces. M7 deliberately ships **no user-facing
-mutation workflow** — that is M8. Per-slice evidence:
-[M7_ACCEPTANCE.md](M7_ACCEPTANCE.md).
+M7 (M7.0-M7.6) fully ACCEPTED 2026-09-18: central deterministic policy
+engine, incarnation-safe mutation identity, confirmation contract bound to
+the exact intent, single execution gateway with TOCTOU revalidation,
+redacted append-only journal, and read-only `:policy`/`:mutations`
+surfaces — all unit/fake/live-tested (including one narrowly-scoped
+internal proof mutation against the isolated `kind-sauron-test` fixture,
+never production) and interactively verified via `scripts/accept-m7.py`
+plus a 75-minute soak (zero reconnects). M7 deliberately ships **no
+user-facing mutation workflow** — that is M8, not started. Per-slice
+evidence: [M7_ACCEPTANCE.md](M7_ACCEPTANCE.md).
 
 M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
 curated projections, YAML/describe/Explain/Events/logs, CLI snapshots, keymap and config

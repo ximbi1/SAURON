@@ -94,8 +94,13 @@ plus same-name/new-UID replacement rejection. `scripts/accept-m7.py` (13
 scenarios covering `:policy`/`:mutations` plus M4/M5/M6 regression
 touchpoints, since M7 exposes no mutation-triggering keybinding) PASS twice.
 Full M1-M6 regression re-run and green after all M7 changes. 75-minute soak
-(`scripts/soak-m7.py`) in progress. `m7-accepted` will not be tagged until
-it completes and combined docs are reconciled.
+(`scripts/soak-m7.py`) complete: 1071 cycles, zero reconnects (better than
+every prior milestone's soak), RSS +1.2% (allocator noise), fds/threads
+flat. Found and fixed a real flaky fake-HTTP test helper
+(`test_journal()`'s path counter always returned the same value) before
+tagging. **All of M7 (M7.0-M7.6) ACCEPTED.** Local tag `m7-accepted`,
+never pushed without explicit authorization. M7 ships no user-facing
+mutation workflow by design; M8 has not started.
 
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial

@@ -95,4 +95,77 @@ async fn ownership_and_template_references_resolve_live() {
             .iter()
             .any(|i| i.source.contains("reverse ownership limited"))
     );
+    let svc_resource = c
+        .catalog
+        .resolve("v1/services", &c.settings.aliases)
+        .unwrap();
+    let svc = svc_resource
+        .api(c.client.clone(), Some("sauron-m6"))
+        .get("m6-web")
+        .await
+        .unwrap();
+    let svc = Object::new(serde_json::to_value(svc).unwrap());
+    let report = relationships::report::adjacent(&c, 1, &svc_resource, &svc, &cancel)
+        .await
+        .expect("service graph");
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.provenance == sauron::graph::Provenance::SelectorMatch
+                && e.to.resource == "v1/pods")
+    );
+    let slice_id = report
+        .nodes
+        .keys()
+        .find(|id| id.resource == "discovery.k8s.io/v1/endpointslices")
+        .expect("real controller EndpointSlice");
+    let slice_resource = c
+        .catalog
+        .resolve("discovery.k8s.io/v1/endpointslices", &c.settings.aliases)
+        .unwrap();
+    let slice = slice_resource
+        .api(c.client.clone(), Some("sauron-m6"))
+        .get(&slice_id.name)
+        .await
+        .unwrap();
+    let slice = Object::new(serde_json::to_value(slice).unwrap());
+    let slice_refs = extract(&slice);
+    assert!(
+        slice_refs.targets.keys().any(|t| t.kind == "Pod"),
+        "explicit real EndpointSlice targetRef"
+    );
+    for (target, _) in slice_refs.targets {
+        relationships::fetch_target(&c, 1, &slice, &target, &cancel)
+            .await
+            .expect("EndpointSlice reference resolves");
+    }
+    let ingress_resource = c
+        .catalog
+        .resolve("networking.k8s.io/v1/ingresses", &c.settings.aliases)
+        .unwrap();
+    let ingress = ingress_resource
+        .api(c.client.clone(), Some("sauron-m6"))
+        .get("m6-web")
+        .await
+        .unwrap();
+    let ingress = Object::new(serde_json::to_value(ingress).unwrap());
+    let report = relationships::report::adjacent(&c, 1, &ingress_resource, &ingress, &cancel)
+        .await
+        .expect("ingress graph");
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.to.resource == "v1/secrets")
+    );
+    assert!(
+        report
+            .graph
+            .edges()
+            .keys()
+            .any(|e| e.to.resource == "v1/services")
+    );
 }

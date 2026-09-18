@@ -26,7 +26,10 @@ async fn read_bounded(
     let request = match name {
         Some(name) if metadata_only => builder.get_metadata(name, &Default::default()),
         Some(name) => builder.get(name, &Default::default()),
-        None => builder.list_metadata(&kube::api::ListParams::default().limit(200)),
+        None if metadata_only => {
+            builder.list_metadata(&kube::api::ListParams::default().limit(200))
+        }
+        None => builder.list(&kube::api::ListParams::default().limit(200)),
     }
     .map_err(|_| Unknown::Malformed)?;
     let response = connection
@@ -60,13 +63,63 @@ async fn read_bounded(
     serde_json::from_slice(&bytes).map_err(|_| Unknown::Malformed)
 }
 
+/// A single bounded namespace-local candidate page. Never silently all-namespaces.
+pub async fn candidates(
+    connection: &Connection,
+    resource: &Resource,
+    namespace: &str,
+    metadata_only: bool,
+    cancel: &CancellationToken,
+) -> Result<(Vec<Object>, bool), Unknown> {
+    if !resource.namespaced || namespace.is_empty() {
+        return Err(Unknown::Unsupported);
+    }
+    let api = resource.api(connection.client.clone(), Some(namespace));
+    let metadata_only =
+        metadata_only || (resource.api.api_version == "v1" && resource.api.kind == "Secret");
+    let read = async {
+        let value = read_bounded(connection, api.resource_url(), None, metadata_only).await?;
+        let items = value["items"].as_array().ok_or(Unknown::Malformed)?;
+        let mut partial = items.len() > 200
+            || value
+                .pointer("/metadata/continue")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+        let mut out = Vec::new();
+        for item in items.iter().take(200) {
+            let mut item = if metadata_only {
+                serde_json::json!({"metadata":item["metadata"]})
+            } else {
+                item.clone()
+            };
+            item["apiVersion"] = resource.api.api_version.clone().into();
+            item["kind"] = resource.api.kind.clone().into();
+            let object = Object::new(item);
+            if object.namespace != namespace {
+                partial = true;
+                continue;
+            }
+            out.push(object);
+        }
+        out.sort_by(|a, b| (&a.namespace, &a.name, &a.uid).cmp(&(&b.namespace, &b.name, &b.uid)));
+        Ok((out, partial))
+    };
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(Unknown::Stale),
+        result = tokio::time::timeout(connection.timeout(),read) => result.unwrap_or(Err(Unknown::TimedOut)),
+    }
+}
+
 /// Exact GVK lookup, never human alias resolution. Duplicate served descriptions
 /// with different canonical resources are ambiguous and must not pick a winner.
 pub fn resolve_target(catalog: &Catalog, target: &Target) -> Result<Resource, Unknown> {
-    let mut candidates = catalog
-        .resources
-        .iter()
-        .filter(|r| r.api.api_version == target.api_version && r.api.kind == target.kind);
+    let mut candidates = catalog.resources.iter().filter(|r| {
+        r.api.kind == target.kind
+            && (r.api.api_version == target.api_version
+                || (target.api_version.is_empty()
+                    && target.provenance == Provenance::StatusReference))
+    });
     let resource = candidates.next().ok_or(Unknown::Unavailable)?;
     if candidates.any(|other| other.id() != resource.id()) {
         return Err(Unknown::Unsupported);
@@ -305,6 +358,29 @@ mod tests {
         catalog.resources.push(duplicate);
         assert!(matches!(
             resolve_target(&catalog, &target()),
+            Err(Unknown::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn endpoint_without_version_requires_unambiguous_catalog() {
+        let mut reference = target();
+        reference.api_version.clear();
+        reference.provenance = Provenance::StatusReference;
+        let mut catalog = Catalog {
+            resources: vec![resource(true)],
+            warnings: vec![],
+        };
+        assert_eq!(
+            resolve_target(&catalog, &reference).unwrap().id(),
+            "example.io/v1/parents"
+        );
+        let mut collision = resource(true);
+        collision.api.group = "another.io".into();
+        collision.api.api_version = "another.io/v1".into();
+        catalog.resources.push(collision);
+        assert!(matches!(
+            resolve_target(&catalog, &reference),
             Err(Unknown::Unsupported)
         ));
     }

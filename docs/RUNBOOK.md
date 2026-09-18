@@ -39,6 +39,17 @@ verified). Network/storage resolver families and UI remain pending. Track
 actual checks and live evidence in [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
 No cluster operations performed during this initial foundation work.
 
+Latest continuation: M6.2 network resolver in progress. First guarded live network
+test found EndpointSlice targetRef commonly omits apiVersion; fix/regressions added,
+full suite and exact `bash scripts/test-cluster.sh m6-test` replay running. Wait for
+that result before continuing. Fixtures now include Service/Ingress/TLS-reference
+Secret in isolated sauron-m6. Aggregate checkpoint `92f6b8b`; current code uncommitted.
+
+M6.2 ACCEPTED 2026-09-18: EndpointSlice fix independently reviewed and verified
+(unit + fake HTTP + guarded live m6-test all green with the real controller
+object missing apiVersion). Added the missing reverse Pod→Service selector
+fake HTTP test to close the last required-evidence gap. Continuing to M6.3.
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated

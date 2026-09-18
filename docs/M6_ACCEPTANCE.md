@@ -14,7 +14,7 @@ and status reference are distinct provenance classes. No name heuristics.
 | --- | --- | --- | --- | --- | --- | --- |
 | M6.0 | Canonical scoped identities, provenance, bounded deterministic graph and traversal | TESTED foundation | 5 new unit tests; 110 unit + 19 fake HTTP suite | None | Unresolved-target/source-error presentation arrives with resolver; no UI yet | NOT ACCEPTED live |
 | M6.1 | Generic owner UID validation; Pod/workload explicit references | IMPLEMENTING transport integration | 4 extractor + 2 resolver unit tests; 3 graph fake HTTP; full suite 116 unit + 22 fake HTTP green | Guarded m6-test PASS: Deployment→RS→Pod UID chain, template config/Secret/SA resolution | No aggregate report/UI; no operation-wide request budget yet | NOT ACCEPTED |
-| M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | NOT STARTED | Pending | None | Never infer Pods from IP | NOT ACCEPTED |
+| M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | TESTED | 3 pure network tests + 2 catalog-ambiguity tests + 1 reverse-selector fake HTTP test; 26 fake HTTP + 121 unit green | Guarded m6-test PASS: Service→Pod selector, Ingress→Service/TLS-Secret, real controller EndpointSlice targetRef without apiVersion resolves through unambiguous catalog | Never infer Pods from IP; EndpointSlice apiVersion omission root-caused and fixed (see journal) | ACCEPTED |
 | M6.3 | Storage and bounded reverse config/identity/mount references | NOT STARTED | Pending | None | No arbitrary CRD reference inference | NOT ACCEPTED |
 | M6.4 | Adjacent with UID-safe canonical navigation/history | NOT STARTED | Pending | None | Registry/help/32x9 required | NOT ACCEPTED |
 | M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | NOT STARTED | Pending | None | No global graph database | NOT ACCEPTED |
@@ -74,6 +74,28 @@ forward active: cycles, graph operations, RSS/fds/threads/tasks, errors and part
 These are observations, not proof of leak freedom.
 
 ## Journal
+
+- M6.2 accepted: independent review confirmed the EndpointSlice apiVersion fix is
+  correctly scoped (only `Provenance::StatusReference` tolerates an empty
+  `api_version`; owner/explicit references still require exact GVK) and wired
+  (`mod network;` compiles the split-out extractor). Added the one missing
+  required-evidence item, a fake-HTTP test proving the reverse Pod→Service
+  selector edge (`graph_report_reverse_service_selector_from_pod_root`), since
+  prior coverage only drove the graph from the Service side. Full locked
+  fmt/check/clippy/test green: 121 unit + 26 fake HTTP. Guarded
+  `scripts/test-cluster.sh m6-test` re-run against `kind-sauron-test` passed,
+  including the real controller-produced EndpointSlice missing apiVersion.
+  Proceeding to M6.3.
+
+- M6.2 live bug: `m6-test` failed at the real EndpointSlice targetRef assertion.
+  Direct read of the controller-produced slice confirmed kind/name/namespace/UID
+  present but apiVersion omitted; extractor wrongly required apiVersion and dropped
+  the reference. Root cause is application schema assumption, not fixture/harness.
+  Added omission regression plus catalog-kind collision test. Status references
+  without version now resolve only when discovery offers one canonical resource;
+  ambiguous kinds stay Unsupported, ownerReferences still require exact GVK/UID.
+  Full locked suite and exact guarded live replay running; progression paused until
+  both pass. No IP/name heuristics introduced.
 
 - `377402e` commits M6.1 extraction/transport, not whole-slice acceptance. Added
   aggregate selected-object report with additive issues, exact root revalidation

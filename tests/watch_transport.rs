@@ -405,6 +405,51 @@ async fn graph_report_keeps_verified_edges_when_another_source_is_forbidden() {
 }
 
 #[tokio::test]
+async fn graph_report_reverse_service_selector_from_pod_root() {
+    use sauron::graph::Provenance;
+    use sauron::kube::relationships::report::adjacent;
+    let root = json!({"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"p","uid":"root","resourceVersion":"1","labels":{"app":"web"}}});
+    let body = root.to_string();
+    let server = Server::new(move |path| {
+        if path.ends_with("/pods/p") {
+            (200, body.clone())
+        } else if path.contains("/namespaces/default/pods") {
+            (200,json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[]}).to_string())
+        } else if path.contains("/namespaces/default/services") {
+            (200, json!({"items":[
+                {"apiVersion":"v1","kind":"Service","metadata":{"namespace":"default","name":"svc-match","uid":"svc-match"},"spec":{"selector":{"app":"web"}}},
+                {"apiVersion":"v1","kind":"Service","metadata":{"namespace":"default","name":"svc-other","uid":"svc-other"},"spec":{"selector":{"app":"other"}}}
+            ]}).to_string())
+        } else {
+            (200, json!({"items":[]}).to_string())
+        }
+    }).await;
+    let mut service = resource();
+    service.api.kind = "Service".into();
+    service.api.plural = "services".into();
+    let connection = connection_with(server.client(), vec![resource(), service]);
+    let report = adjacent(
+        &connection,
+        1,
+        &resource(),
+        &Object::new(root),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("pod report with reverse service selector edge");
+    let edges: Vec<_> = report.graph.edges().keys().collect();
+    assert!(edges.iter().any(|e| e.from.resource == "v1/services"
+        && e.to.resource == "v1/pods"
+        && e.provenance == Provenance::SelectorMatch));
+    assert!(
+        !report
+            .nodes
+            .keys()
+            .any(|id| id.resource == "v1/services" && id.name == "svc-other")
+    );
+}
+
+#[tokio::test]
 async fn graph_report_rechecks_root_uid_after_collection() {
     use sauron::{evidence::Unknown, kube::relationships::report::adjacent};
     use std::sync::atomic::{AtomicUsize, Ordering};

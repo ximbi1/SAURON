@@ -1,4 +1,5 @@
 //! Pure typed reference extraction. These are unresolved claims, not graph edges.
+pub mod network;
 use super::Provenance;
 use crate::resources::Object;
 use serde_json::Value;
@@ -27,7 +28,7 @@ impl References {
         if target.name.is_empty()
             || target.name.len() > 253
             || target.kind.is_empty()
-            || target.api_version.is_empty()
+            || (target.api_version.is_empty() && target.provenance != Provenance::StatusReference)
             || path.len() > 1024
         {
             self.malformed = true;
@@ -88,6 +89,7 @@ fn array<'a>(value: &'a Value, key: &str) -> impl Iterator<Item = (usize, &'a Va
 
 pub fn extract(object: &Object) -> References {
     let mut out = References::default();
+    network::extract(object, &mut out);
     for (i, owner) in object
         .value
         .pointer("/metadata/ownerReferences")

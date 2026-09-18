@@ -1,5 +1,5 @@
 //! One selected-object operation; no permanent graph cache or spawned workers.
-use super::{children, fetch_target};
+use super::{candidates, children, fetch_target};
 use crate::{
     evidence::Unknown,
     graph::{
@@ -51,6 +51,45 @@ impl Report {
             false
         } else {
             true
+        }
+    }
+
+    fn link(
+        &mut self,
+        root: &Identity,
+        resource: &Resource,
+        object: &Object,
+        provenance: Provenance,
+        path: &str,
+        reverse: bool,
+    ) {
+        let id = match Identity::observed(root.scope, resource, object) {
+            Ok(id) => id,
+            Err(reason) => {
+                self.issue("candidate identity", reason);
+                return;
+            }
+        };
+        let (from, to) = if reverse {
+            (id.clone(), root.clone())
+        } else {
+            (root.clone(), id.clone())
+        };
+        match self.graph.insert(
+            Edge {
+                from,
+                to,
+                provenance,
+            },
+            path,
+        ) {
+            Ok(()) => {
+                self.nodes.entry(id).or_insert_with(|| Node {
+                    resource: resource.clone(),
+                    health: object.health.clone(),
+                });
+            }
+            Err(reason) => self.issue("candidate graph bound", reason),
         }
     }
 }
@@ -226,6 +265,7 @@ async fn collect(
             Err(reason) => report.issue(format!("{} child scan", child_resource.id()), reason),
         }
     }
+    network(connection, &fresh, &mut report, started, cancel).await?;
     report.requests += 1; // Reserved final validation is mandatory even at scan limit.
     let (_, current, object) = fetch_target(connection, scope, &fresh, &target, cancel).await?;
     if current != root {
@@ -235,4 +275,101 @@ async fn collect(
         return Err(Unknown::Stale);
     }
     Ok(report)
+}
+
+async fn network(
+    connection: &Connection,
+    fresh: &Object,
+    report: &mut Report,
+    started: Instant,
+    cancel: &CancellationToken,
+) -> Result<(), Unknown> {
+    use crate::graph::references::network::selects;
+    let scans: &[(&str, bool)] = match (fresh.api_version.as_str(), fresh.kind.as_str()) {
+        ("v1", "Pod") => &[("v1/services", false)],
+        ("v1", "Service") => &[
+            ("v1/pods", false),
+            ("discovery.k8s.io/v1/endpointslices", true),
+        ],
+        _ => &[],
+    };
+    for (gvr, metadata) in scans {
+        if !report.available(started) {
+            break;
+        }
+        if cancel.is_cancelled() {
+            return Err(Unknown::Stale);
+        }
+        let Some(resource) = connection.catalog.resources.iter().find(|r| r.id() == *gvr) else {
+            report.issue(*gvr, Unknown::Unavailable);
+            continue;
+        };
+        report.requests += 1;
+        match candidates(connection, resource, &fresh.namespace, *metadata, cancel).await {
+            Ok((objects, partial)) => {
+                report.candidates += objects.len();
+                if partial {
+                    report.issue(format!("{gvr} candidate page"), Unknown::Partial);
+                }
+                for object in objects {
+                    let matched = if *metadata {
+                        Ok(object
+                            .value
+                            .pointer("/metadata/labels/kubernetes.io~1service-name")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(fresh.name.as_str()))
+                    } else if fresh.kind == "Service" {
+                        selects(fresh, &object)
+                    } else {
+                        selects(&object, fresh)
+                    };
+                    match matched {
+                        Ok(true) => {
+                            if *metadata {
+                                let owners = extract(&object);
+                                if owners.targets.keys().any(|r| {
+                                    r.kind == "Service"
+                                        && r.api_version == "v1"
+                                        && r.name == fresh.name
+                                        && r.expected_uid.as_ref().is_some_and(|u| u != &fresh.uid)
+                                }) {
+                                    report.issue(
+                                        "EndpointSlice Service owner",
+                                        Unknown::TargetReplaced,
+                                    );
+                                    continue;
+                                }
+                                report.link(
+                                    &report.root.clone(),
+                                    resource,
+                                    &object,
+                                    Provenance::ExplicitReference,
+                                    "/metadata/labels/kubernetes.io~1service-name",
+                                    true,
+                                );
+                            } else {
+                                let selector = if fresh.kind == "Service" {
+                                    &fresh.value["spec"]["selector"]
+                                } else {
+                                    &object.value["spec"]["selector"]
+                                };
+                                report.link(
+                                    &report.root.clone(),
+                                    resource,
+                                    &object,
+                                    Provenance::SelectorMatch,
+                                    &format!("/spec/selector = {selector}"),
+                                    fresh.kind == "Pod",
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(reason) => report.issue(format!("{gvr} selector"), reason),
+                    }
+                }
+            }
+            Err(reason) => report.issue(format!("{gvr} candidate scan"), reason),
+        }
+    }
+    Ok(())
 }

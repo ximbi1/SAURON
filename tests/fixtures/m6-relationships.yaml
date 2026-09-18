@@ -26,6 +26,41 @@ metadata:
   name: m6-sa
   namespace: sauron-m6
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: m6-web
+  namespace: sauron-m6
+spec:
+  selector:
+    app: m6-web
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: m6-tls-fixture
+  namespace: sauron-m6
+type: Opaque
+stringData:
+  fixture: relationship-only-not-a-certificate
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: m6-web
+  namespace: sauron-m6
+spec:
+  defaultBackend:
+    service:
+      name: m6-web
+      port:
+        number: 8080
+  tls:
+    - secretName: m6-tls-fixture
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

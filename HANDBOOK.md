@@ -331,8 +331,34 @@ builders plus streaming byte caps (2 MiB GET/8 MiB metadata list), ignoring erro
 bodies; aggregate overall deadline 30s/concurrency 1/49 logical attempts including
 final validation; 64 issues with explicit overflow marker. Full suite 116 unit +
 25 fake HTTP passed; final fmt-only correction/check rerun passed.
-Pending M6.2/M6.3 edge families remain unimplemented; UI/epoch delivery is next
-after those resolver families. No live user-facing acceptance claimed.
+Aggregate checkpoint committed `92f6b8b`. M6.2 now implementing network references:
+Ingress backend/TLS, EndpointSlice service-name label and explicit targetRef,
+Endpoints targetRef (no IP-only edges), same-namespace equality Service selectors
+and bounded reverse Service candidate scan. Three new pure network tests passed;
+fmt/check/clippy clean. API/live network acceptance pending. M6.3 storage and
+UI/epoch delivery remain next; no user-facing acceptance claimed.
+
+M6.2 live fixture added Service, Ingress and harmless opaque TLS-reference Secret
+in sauron-m6. Real controller EndpointSlice exposed an app bug: targetRef omits
+apiVersion, extractor discarded it. Captured actual metadata/reference only.
+Fixed via unambiguous discovered-kind resolution for versionless StatusReference,
+never defaulting core/v1; ownerReference strict GVK rules unchanged. Added regression
+for omission and collision. Full suite + exact m6-test replay pending; do not resume
+network acceptance or M6.3 until green. No production calls.
+
+### 2026-09-18 — M6.2 ACCEPTED
+
+Independent review confirmed the EndpointSlice apiVersion-omission fix is scoped
+correctly (only `Provenance::StatusReference` tolerates empty `api_version`) and
+wired (`mod network;` in `src/graph/references.rs`). Closed the one remaining
+required-evidence gap: no test drove the graph from a Pod root to prove the
+reverse Pod→Service selector edge, since existing coverage only exercised the
+Service side. Added `graph_report_reverse_service_selector_from_pod_root` fake
+HTTP test. Full locked fmt/check/clippy/test green: 121 unit + 26 fake HTTP.
+Guarded `scripts/test-cluster.sh m6-test` replay against `kind-sauron-test`
+passed, including the real controller EndpointSlice missing apiVersion. M6.2
+ACCEPTED. Proceeding to M6.3 (storage: PVC↔PV, StorageClass, bounded reverse
+config/identity/mount references).
 
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 

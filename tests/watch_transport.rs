@@ -694,10 +694,11 @@ fn verified_policy_context() -> sauron::mutation::policy::PolicyContext {
     }
 }
 fn test_journal() -> (sauron::mutation::journal::Journal, std::path::PathBuf) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "sauron-mutation-test-{}-{}",
         std::process::id(),
-        std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     ));
     let path = dir.join("journal.jsonl");
     (sauron::mutation::journal::Journal::new(&path), dir)

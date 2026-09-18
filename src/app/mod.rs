@@ -1420,7 +1420,17 @@ impl Runtime {
     /// read-only, and never authoritative for execution (`kube::drain::
     /// drain` always re-lists fresh at commit time; this is display-
     /// freshness only, never a TOCTOU shortcut).
+    ///
+    /// `mutation_scope()` (already called by the caller to build the
+    /// cordon scope) only cancels `self.document`, it never reassigns a
+    /// fresh child token -- every other spawn site does that refresh
+    /// itself right before spawning (see `mutation_confirm`/
+    /// `mutation_dry_run`), and this one must too, or the task below
+    /// would capture an already-cancelled token and return immediately
+    /// without ever listing anything, leaving the preview stuck on
+    /// `Loading` forever (found live against the real cluster).
     fn start_drain_preview(&mut self, pod_resource: Resource) {
+        self.document = self.scope.child_token();
         let Some(connection) = self.connection.clone() else {
             return;
         };
@@ -1524,6 +1534,10 @@ impl Runtime {
     /// requests, exactly like a real commit would refuse to.
     fn mutation_dry_run(&mut self) -> Result<()> {
         let connection = self.connection.clone().context("Not connected")?;
+        anyhow::ensure!(
+            self.active_document_mut().is_none_or(|d| d.drain.is_none()),
+            "Dry-run is not implemented for Drain -- use the preview text and the double confirm instead"
+        );
         let workflow = self
             .active_document_mut()
             .and_then(|d| d.workflow.as_ref())
@@ -3322,6 +3336,27 @@ mod tests {
         assert!(text.contains("NO ROLLBACK"));
         assert!(text.contains("CANCELLATION"));
         assert_eq!(rt.mode_name(), "drain");
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn drain_preview_tasks_cancellation_token_is_fresh_not_already_cancelled() {
+        // Regression: found live against the real cluster. `mutation_scope()`
+        // (called to build the cordon scope) only cancels `self.document`, it
+        // never reassigns a fresh child token -- every other spawn site does
+        // that refresh itself right before spawning. `start_drain_preview`
+        // originally captured the stale, already-cancelled token, so its
+        // task returned immediately without ever listing anything, leaving
+        // the preview stuck on `Loading` forever with zero visible error.
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_node_drain_preview(&mut rt);
+        assert!(
+            !rt.document.is_cancelled(),
+            "the preview-list task's cancellation token must not already be \
+             cancelled at spawn time"
+        );
         rt.shutdown().await;
     }
 

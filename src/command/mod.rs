@@ -368,7 +368,7 @@ impl Keymap {
                 entry.keys = keys.clone();
             }
         }
-        for mode in ["table", "document", "logs", "forwards", "mutation"] {
+        for mode in ["table", "document", "logs", "forwards", "mutation", "drain"] {
             let mut used = Vec::new();
             for binding in bindings.iter().filter(|b| available(b.mode, mode)) {
                 for key in &binding.keys {
@@ -429,7 +429,14 @@ pub fn available(binding: &str, mode: &str) -> bool {
     binding == "global"
         || binding == mode
         || (mode != "input" && binding == "navigation")
-        || (matches!(mode, "logs" | "forwards" | "mutation") && binding == "document")
+        || (matches!(mode, "logs" | "forwards" | "mutation" | "drain") && binding == "document")
+        // M8B.5: a Drain document reuses the exact same MutationConfirm
+        // key as every other mutation preview (mutation_confirm() itself
+        // dispatches to drain_confirm() when the open document is a
+        // Drain) -- found live: without this, "mutation"-category
+        // bindings (including confirm) were never available in "drain"
+        // mode, so pressing confirm silently did nothing.
+        || (mode == "drain" && binding == "mutation")
 }
 fn normalize(mut m: KeyModifiers, c: KeyCode) -> KeyModifiers {
     if matches!(c, KeyCode::Char(_)) {
@@ -992,6 +999,38 @@ mod tests {
             );
         }
     }
+}
+#[test]
+fn drain_mode_resolves_the_same_mutation_confirm_dry_run_and_document_keys_as_mutation_mode() {
+    // Regression: found live. `mode_name()` returns "drain" for a Drain
+    // document, but `available()` originally only let "mutation"-category
+    // bindings (confirm/dry-run) through for modes "logs"/"forwards"/
+    // "mutation" -- "drain" was missing, so pressing the real confirm key
+    // resolved to no action at all and silently did nothing.
+    let keys = Keymap::compile(&BTreeMap::new()).expect("default map");
+    assert_eq!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            "drain"
+        ),
+        Some(Action::MutationConfirm)
+    );
+    assert_eq!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            "drain"
+        ),
+        Some(Action::MutationDryRun)
+    );
+    // Scrolling ("G"/navigation) and search must also still work while a
+    // Drain document (much taller than one screen) is open.
+    assert!(
+        keys.action(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            "drain"
+        )
+        .is_some()
+    );
 }
 #[test]
 fn logs_inherit_documents_and_validate_conflicts() {

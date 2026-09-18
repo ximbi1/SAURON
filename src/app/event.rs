@@ -20,6 +20,7 @@ pub enum Payload {
         request: u64,
         title: String,
         text: String,
+        adjacent: Vec<crate::adjacent::Target>,
     },
     DocumentError {
         request: u64,

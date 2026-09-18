@@ -55,6 +55,13 @@ Config/Secret/ServiceAccount/PVC scanning added and live-verified against a
 real dynamically-provisioned local-path PV, including exact claimRef UID
 match. Continuing to M6.4 (`:adjacent` view).
 
+M6.4 ACCEPTED 2026-09-18: `:adjacent`/`a` opens a grouped relationship view
+(OWNED BY/OWNS/SELECTED BY/REFERENCES/REFERENCED BY); `enter` (Follow) jumps
+to the related object under the cursor via its exact canonical identity,
+reusing the existing history stack. Unit + app-level + live coverage green.
+No interactive terminal smoke test run this session. Continuing to M6.5
+(Xray).
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated

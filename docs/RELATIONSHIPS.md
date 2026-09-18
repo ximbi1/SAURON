@@ -59,3 +59,57 @@ PARTIAL, not arbitrary cluster-wide completeness. Maximum 64 source issues with 
 explicit omitted-issues marker. Root UID and resourceVersion are revalidated after
 collection; a changed root is rejected as replaced/stale, not labeled current.
 No permanent graph cache. Request counts are logical attempts, not middleware retries.
+
+## M6.2: network references (ACCEPTED)
+
+`graph::references::network` extracts Service equality selectors (never applied
+across namespaces, an empty/absent selector selects nothing), Ingress
+defaultBackend/rule-path/TLS Secret references, EndpointSlice's owning-Service
+label and every endpoint's explicit `targetRef`, and Endpoints' subset
+addresses. An IP address alone never creates an edge — only an explicit
+`targetRef` does, and a missing `kind`/`name` on it is `malformed`, not
+silently dropped. Kubernetes' EndpointSlice controller commonly omits
+`targetRef.apiVersion`; this is tolerated only for `Provenance::StatusReference`
+targets, resolved against the discovery catalog only when exactly one resource
+of that `kind` exists — a same-kind cross-group collision stays `Unsupported`
+rather than guessing. `kube::relationships::report` adds a `network()` pass:
+Pod→Service and Service→Pod selector matches (bounded candidate page, reverse
+presented but never treated as ownership) and Service→EndpointSlice via the
+owning-Service label, with an EndpointSlice-claims-a-different-Service-UID
+mismatch rejected as `TargetReplaced`, never silently accepted.
+
+## M6.3: storage references (ACCEPTED)
+
+`graph::references::storage` extracts PVC `spec.volumeName`→PersistentVolume,
+PV `spec.claimRef`→PersistentVolumeClaim (the PV-side UID Kubernetes populates
+on bind is carried verbatim and later UID-validated by the existing resolver —
+`claimRef`'s kind/apiVersion are hardcoded because the field is schema-fixed to
+name exactly one PVC, unlike EndpointSlice's targetRef which can point at any
+kind), and PVC/PV `spec.storageClassName`→cluster-scoped StorageClass.
+`kube::relationships::report::reverse_references()` adds bounded reverse
+lookups for ConfigMap/Secret/ServiceAccount/PVC roots: an explicit built-in
+workload candidate list (Pods, Deployments, StatefulSets, DaemonSets, Jobs,
+CronJobs) is scanned per namespace and linked back via each candidate's own
+extractor. A denied kind records an issue but never removes edges already
+found via another kind. Still no arbitrary CRD reference inference.
+
+## M6.4: Adjacent (ACCEPTED)
+
+`src/adjacent.rs` renders a `report::Report` as text grouped by intrinsic
+direction and provenance: OWNED BY / OWNS (`OwnerReference`, split by which
+side the selected object is on), SELECTED BY (`SelectorMatch`, one group
+regardless of direction — selection is never ownership), REFERENCES /
+REFERENCED BY (`ExplicitReference` and `StatusReference`, split by direction;
+a `StatusReference` row is annotated "(status reference)" rather than folded
+indistinguishably into a user-authored reference). Each rendered row records
+its exact line index plus canonical GVK/namespace/UID as an `adjacent::Target`.
+
+The `:adjacent`/`a` action opens this view through its own resolver call
+(`kube::relationships::report::adjacent`), not the generic per-action
+`kube::evidence::document` path used by Yaml/Explain/Events. `enter` (`Follow`)
+maps the document's current scroll position to the nearest target at or after
+the top of the viewport and navigates via the *exact* `Resource` already
+resolved for that target (never a re-resolved name string) plus its UID,
+reusing the same `push_history`/`apply_history`/`finish_history` stack as
+`[`/`]` history navigation — Adjacent navigation is an ordinary, reversible
+history entry, not a special case.

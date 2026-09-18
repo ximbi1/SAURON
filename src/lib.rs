@@ -1,3 +1,4 @@
+pub mod adjacent;
 pub mod app;
 pub mod brand;
 pub mod command;

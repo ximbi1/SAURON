@@ -16,7 +16,7 @@ and status reference are distinct provenance classes. No name heuristics.
 | M6.1 | Generic owner UID validation; Pod/workload explicit references | IMPLEMENTING transport integration | 4 extractor + 2 resolver unit tests; 3 graph fake HTTP; full suite 116 unit + 22 fake HTTP green | Guarded m6-test PASS: Deployment→RS→Pod UID chain, template config/Secret/SA resolution | No aggregate report/UI; no operation-wide request budget yet | NOT ACCEPTED |
 | M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | TESTED | 3 pure network tests + 2 catalog-ambiguity tests + 1 reverse-selector fake HTTP test; 26 fake HTTP + 121 unit green | Guarded m6-test PASS: Service→Pod selector, Ingress→Service/TLS-Secret, real controller EndpointSlice targetRef without apiVersion resolves through unambiguous catalog | Never infer Pods from IP; EndpointSlice apiVersion omission root-caused and fixed (see journal) | ACCEPTED |
 | M6.3 | Storage and bounded reverse config/identity/mount references | TESTED | 3 storage-extraction unit tests + 1 reverse-reference fake HTTP test; 27 fake HTTP + 124 unit green | Guarded m6-test PASS: PVC→PV, PVC→StorageClass, PV→PVC via claimRef with exact UID match, PV→StorageClass, reverse Pod→PVC, against a real dynamically-provisioned local-path PV | claimRef kind/apiVersion hardcoded as schema-fixed (not a guess, unlike EndpointSlice targetRef); reverse scan bounded to an explicit built-in workload candidate list (Pods/Deployments/StatefulSets/DaemonSets/Jobs/CronJobs), no arbitrary CRD reference inference | ACCEPTED |
-| M6.4 | Adjacent with UID-safe canonical navigation/history | NOT STARTED | Pending | None | Registry/help/32x9 required | NOT ACCEPTED |
+| M6.4 | Adjacent with UID-safe canonical navigation/history | TESTED | 2 render unit tests + 2 app-level navigation tests; 127 unit + 27 fake HTTP green | Guarded m6-test PASS: real Deployment adjacent report renders OWNS/REFERENCES groups with UID-real navigable targets | `:adjacent`/`a` opens grouped view (OWNED BY/OWNS/SELECTED BY/REFERENCES/REFERENCED BY); `enter` (`Follow`) jumps via exact GVK+namespace+UID reusing the existing history stack, never by name; no interactive terminal smoke test run in this automated session, only headless unit+live coverage | ACCEPTED |
 | M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | NOT STARTED | Pending | None | No global graph database | NOT ACCEPTED |
 | M6.6 | Combined adversarial acceptance, regressions, soak | NOT STARTED | Pending | None | Tag prohibited until complete | NOT ACCEPTED |
 
@@ -74,6 +74,34 @@ forward active: cycles, graph operations, RSS/fds/threads/tasks, errors and part
 These are observations, not proof of leak freedom.
 
 ## Journal
+
+- M6.4 accepted: added `src/adjacent.rs`, rendering a `report::Report` as text
+  grouped by intrinsic direction/provenance (OWNED BY / OWNS / SELECTED BY /
+  REFERENCES / REFERENCED BY — SelectorMatch is its own group regardless of
+  direction; StatusReference edges fold into REFERENCES/REFERENCED BY with an
+  explicit "(status reference)" annotation, never silently equated with a
+  user-authored ExplicitReference). Each rendered row carries its exact line
+  index plus canonical GVK/namespace/UID as an `adjacent::Target`. Wired
+  `Action::Adjacent` (key `a`, table mode) through the existing
+  `open_document`/`refresh_document` path via a new `start_adjacent` branch
+  (Adjacent has its own resolver, `relationships::report::adjacent`, not the
+  generic per-action `kube::evidence::document`), and `Action::Follow` (key
+  `enter`, document mode): maps the document's current scroll position back to
+  the nearest target at/after the top of the viewport, then reuses the exact
+  same `push_history`/`apply_history`/`finish_history` stack as `[`/`]` and
+  `HistoryBack`/`HistoryForward` — so navigating from Adjacent is a normal,
+  reversible history entry, not a special case, and the destination resource is
+  the caller's already-resolved `Resource` (never a re-resolved name string).
+  Added 2 render unit tests and 2 app-level tests
+  (`adjacent_follow_navigates_by_canonical_identity_and_history_returns`,
+  `follow_without_an_adjacent_target_errors_instead_of_navigating`). Extended
+  the live m6-test to call the real renderer against the live Deployment
+  report and assert every produced target carries a real UID. Full locked
+  fmt/check/clippy/test green: 127 unit + 27 fake HTTP. Guarded
+  `scripts/test-cluster.sh m6-test` replay passed. No interactive terminal
+  smoke test was run in this automated session — only headless unit and live
+  API-level coverage; flag this explicitly if a manual TUI pass is wanted
+  before M6.6's combined acceptance. M6.4 ACCEPTED. Proceeding to M6.5 (Xray).
 
 - M6.3 accepted: added `src/graph/references/storage.rs` (PVC.spec.volumeName->PV,
   PV.spec.claimRef->PVC with UID carried verbatim from the field Kubernetes

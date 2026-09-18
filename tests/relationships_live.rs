@@ -95,6 +95,22 @@ async fn ownership_and_template_references_resolve_live() {
             .iter()
             .any(|i| i.source.contains("reverse ownership limited"))
     );
+    let (adjacent_text, adjacent_targets) = sauron::adjacent::report(&report);
+    assert!(
+        adjacent_text.contains("OWNS"),
+        "owned ReplicaSet is grouped"
+    );
+    assert!(
+        adjacent_text.contains("REFERENCES"),
+        "template Secret/ConfigMap/PVC are grouped"
+    );
+    assert!(
+        !adjacent_targets.is_empty(),
+        "each grouped row is a navigable canonical target"
+    );
+    for target in &adjacent_targets {
+        assert!(!target.uid.is_empty(), "every Adjacent target is UID-real");
+    }
     let svc_resource = c
         .catalog
         .resolve("v1/services", &c.settings.aliases)

@@ -1,5 +1,5 @@
 //! One document model for YAML, describe, evidence, static help and logs.
-use crate::{command::Action, kube::discovery::Resource, resources::SharedObject};
+use crate::{adjacent, command::Action, kube::discovery::Resource, resources::SharedObject};
 use chrono::{DateTime, Utc};
 use regex::{Regex, RegexBuilder};
 use std::{collections::VecDeque, ops::Range};
@@ -52,6 +52,9 @@ pub struct Document {
     /// re-renders directly from the in-memory `Store`, like the forward
     /// manager -- no network call, no `Source`.
     pub timeline_for: Option<String>,
+    /// Adjacent-only: navigable related objects keyed to their rendered line.
+    /// Empty for every other action.
+    pub adjacent: Vec<adjacent::Target>,
     pub source_errors: Vec<String>,
     pub filter_matches: bool,
     pub evicted: u64,
@@ -91,6 +94,7 @@ impl Document {
             log_request: None,
             exec_request: None,
             timeline_for: None,
+            adjacent: vec![],
             source_errors: vec![],
             filter_matches: false,
             evicted: 0,
@@ -244,6 +248,11 @@ impl Document {
         }
         self.scroll = self.scroll.min(self.visual.len().saturating_sub(1));
         self.horizontal = (self.horizontal as usize).min(self.max_width.saturating_sub(1)) as u16;
+    }
+    /// The original (pre-wrap) line index currently at the top of the
+    /// viewport, used only to map `Follow` onto the nearest Adjacent target.
+    pub fn top_line(&self) -> usize {
+        self.visual.get(self.scroll).map_or(0, |v| v.line)
     }
     pub fn visible_lines(&self) -> impl Iterator<Item = &str> {
         self.visual

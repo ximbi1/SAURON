@@ -377,6 +377,25 @@ fake HTTP. Guarded `scripts/test-cluster.sh m6-test` replay passed, including
 asserting the PV's real claimRef UID matches the live PVC exactly. M6.3
 ACCEPTED. Proceeding to M6.4 (`:adjacent` view, UID-safe canonical navigation).
 
+### 2026-09-18 — M6.4 ACCEPTED
+
+Added `src/adjacent.rs` rendering a relationship `Report` as text grouped by
+intrinsic direction/provenance (OWNED BY/OWNS/SELECTED BY/REFERENCES/
+REFERENCED BY); each row carries its exact line plus canonical GVK/namespace/
+UID. Wired `Action::Adjacent` (`a`, table mode) via a new `start_adjacent`
+path alongside the existing `open_document`/`refresh_document` flow, and
+`Action::Follow` (`enter`, document mode), which maps the current scroll
+position to the nearest target and reuses the existing
+`push_history`/`apply_history` stack -- Adjacent navigation is a normal,
+reversible history entry, using the already-resolved `Resource` directly,
+never a re-resolved name. Added 2 render unit tests + 2 app-level tests.
+Extended the live m6-test to render the real Deployment report and assert
+every produced target has a real UID. Full locked fmt/check/clippy/test
+green: 127 unit + 27 fake HTTP. Guarded `scripts/test-cluster.sh m6-test`
+replay passed. No interactive terminal smoke test was run this session --
+only headless unit and live API-level coverage. M6.4 ACCEPTED. Proceeding to
+M6.5 (Xray: bounded cycle-safe traversal reusing existing health).
+
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 
 New `scripts/accept-m5-combined.py` ran all 12 combined sequences from the

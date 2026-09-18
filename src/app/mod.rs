@@ -482,16 +482,19 @@ impl Runtime {
                 request,
                 title,
                 text,
+                adjacent,
             } if request == self.state.request => {
                 if let Some(doc) = self.active_document_mut() {
                     doc.title = title;
                     doc.replace(text);
+                    doc.adjacent = adjacent;
                     doc.freshness = document::Freshness::Snapshot(chrono::Utc::now());
                 }
             }
             Payload::DocumentError { request, error } if request == self.state.request => {
                 if let Some(doc) = self.active_document_mut() {
                     doc.replace(String::new());
+                    doc.adjacent = vec![];
                     doc.freshness = document::Freshness::Error(error);
                 } else {
                     self.state.error = Some(error);
@@ -843,7 +846,8 @@ impl Runtime {
                 };
             }
             Help => self.open_static("Keyboard reference", self.state.keymap.help()),
-            Yaml | Describe | Explain | Events => self.open_document(action)?,
+            Yaml | Describe | Explain | Events | Adjacent => self.open_document(action)?,
+            Follow => self.follow_adjacent()?,
             Timeline => {
                 let object = self.state.selected_object().context("Select a row first")?;
                 let uid = object.uid.clone();
@@ -1074,6 +1078,17 @@ impl Runtime {
             }
             return Ok(());
         }
+        if self
+            .active_document_mut()
+            .and_then(|d| d.source.as_ref())
+            .is_some_and(|s| s.action == Action::Adjacent)
+        {
+            let source = self
+                .active_document_mut()
+                .and_then(|d| d.source.clone())
+                .context("No document open")?;
+            return self.start_adjacent(source);
+        }
         let connection = self.connection.clone().context("Not connected")?;
         let doc = self.active_document_mut().context("No document open")?;
         let source = doc
@@ -1101,9 +1116,92 @@ impl Runtime {
         self.tasks.spawn(async move {
             let document::Source { resource, selected:object, action, warning_only } = source;
             let result=tokio::select!{biased;_=cancel.cancelled()=>return,result=crate::kube::evidence::document(&connection,&resource,&object,action,warning_only,metrics)=>result};
-            let payload=match result{Ok(text)=>Payload::Document{request,title:format!("{action:?}: {}",object.name),text},Err(e)=>Payload::DocumentError{request,error:e.to_string()}};
+            let payload=match result{Ok(text)=>Payload::Document{request,title:format!("{action:?}: {}",object.name),text,adjacent:vec![]},Err(e)=>Payload::DocumentError{request,error:e.to_string()}};
             tokio::select!{_=cancel.cancelled()=>{},_=tx.send(Event{epoch,payload})=>{}}
         });
+        Ok(())
+    }
+    /// Adjacent has its own resolver (`kube::relationships::report::adjacent`),
+    /// not the generic per-action `kube::evidence::document` path, since it
+    /// returns a structured graph the document must keep as navigable targets.
+    fn start_adjacent(&mut self, source: document::Source) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected")?;
+        if let Some(doc) = self.active_document_mut() {
+            doc.freshness = document::Freshness::Refreshing;
+        }
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let scope = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        self.tasks.spawn(async move {
+            let document::Source { resource, selected: object, .. } = source;
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                result = crate::kube::relationships::report::adjacent(&connection, scope, &resource, &object, &cancel) => result,
+            };
+            let payload = match result {
+                Ok(report) => {
+                    let (text, adjacent) = crate::adjacent::report(&report);
+                    Payload::Document {
+                        request,
+                        title: format!("Adjacent: {}", object.name),
+                        text,
+                        adjacent,
+                    }
+                }
+                Err(e) => Payload::DocumentError {
+                    request,
+                    error: e.to_string(),
+                },
+            };
+            tokio::select! { _ = cancel.cancelled() => {}, _ = tx.send(Event { epoch, payload }) => {} }
+        });
+        Ok(())
+    }
+    /// Jump to the related object nearest the top of the Adjacent view, via its
+    /// exact canonical identity (UID-verified on arrival by the normal watch/
+    /// rebuild path) -- never by name alone. Reuses the same history stack as
+    /// `[`/`]` so this is a normal, reversible navigation, not a special case.
+    fn follow_adjacent(&mut self) -> Result<()> {
+        let top = self
+            .active_document_mut()
+            .context("No document open")?
+            .top_line();
+        let doc = self.active_document_mut().context("No document open")?;
+        let target = doc
+            .adjacent
+            .iter()
+            .find(|t| t.line >= top)
+            .or_else(|| doc.adjacent.last())
+            .cloned()
+            .context("No related object in this document")?;
+        let context = self
+            .connection
+            .as_ref()
+            .context("Not connected")?
+            .context
+            .clone();
+        self.push_history();
+        let entry = state::HistoryEntry {
+            context,
+            namespace: target
+                .resource
+                .namespaced
+                .then_some(target.namespace.clone()),
+            resource: target.resource,
+            labels: None,
+            fields: None,
+            filter_text: String::new(),
+            sort: "NAME".into(),
+            descending: false,
+            selected: Some(target.uid),
+        };
+        self.apply_history(entry);
         Ok(())
     }
     fn open_logs(&mut self, container: Option<String>, previous: bool) -> Result<()> {
@@ -2194,6 +2292,80 @@ mod tests {
         let sort = rt.state.sort.clone();
         assert!(rt.command("sort name:wrong").is_err());
         assert_eq!(rt.state.sort, sort);
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn adjacent_follow_navigates_by_canonical_identity_and_history_returns() {
+        let mut rt = runtime();
+        let configmap = Resource {
+            api: ::kube::core::ApiResource {
+                group: String::new(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "ConfigMap".into(),
+                plural: "configmaps".into(),
+            },
+            namespaced: true,
+            short_names: vec![],
+            verbs: vec!["watch".into()],
+        };
+        rt.connection
+            .as_mut()
+            .expect("connected")
+            .catalog
+            .resources
+            .push(configmap.clone());
+        let root = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"p","uid":"root-uid"}
+        }));
+        rt.state.selected = Some("root-uid".into());
+        let mut doc = Document::new(
+            "Adjacent: p".into(),
+            "ADJACENT: v1/pods test/p\n\nREFERENCES\n  v1/configmaps n/cm [Healthy] via path\n"
+                .into(),
+        );
+        doc.source = Some(document::Source {
+            resource: rt.state.resource.clone().expect("resource"),
+            selected: std::sync::Arc::new(root),
+            action: Action::Adjacent,
+            warning_only: false,
+        });
+        doc.adjacent = vec![crate::adjacent::Target {
+            line: 3,
+            resource: configmap,
+            namespace: "n".into(),
+            name: "cm".into(),
+            uid: "cm-uid".into(),
+        }];
+        rt.state.mode = Mode::Document(doc);
+        // Follow with the viewport already scrolled past the target's line must
+        // still resolve to it, never to nothing: `Follow` picks the nearest
+        // target at or after the top of view, falling back to the last one.
+        if let Mode::Document(doc) = &mut rt.state.mode {
+            doc.scroll = 10;
+        }
+        rt.action(Action::Follow).expect("follow");
+        assert_eq!(rt.history.len(), 1, "the pods view is pushed onto history");
+        assert!(matches!(rt.state.mode, Mode::Table));
+        assert_eq!(rt.state.query.resource, "v1/configmaps");
+        assert_eq!(rt.state.query.namespace.as_deref(), Some("n"));
+        assert_eq!(
+            rt.state.selected.as_deref(),
+            Some("cm-uid"),
+            "selection is the exact UID, never the name alone"
+        );
+        rt.action(Action::HistoryBack).expect("back");
+        assert_eq!(rt.state.query.resource, "v1/pods");
+        assert_eq!(rt.state.query.namespace.as_deref(), Some("test"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn follow_without_an_adjacent_target_errors_instead_of_navigating() {
+        let mut rt = runtime();
+        rt.state.mode = Mode::Document(Document::new("Yaml: p".into(), "kind: Pod".into()));
+        assert!(rt.action(Action::Follow).is_err());
+        assert!(rt.history.is_empty());
         rt.shutdown().await;
     }
     #[tokio::test]

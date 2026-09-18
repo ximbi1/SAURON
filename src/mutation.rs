@@ -75,6 +75,12 @@ pub enum PolicyReason {
     ConfirmationRequired,
     StrongerConfirmationRequired,
     Unsupported,
+    /// M8B.6: this specific intent skips graceful termination
+    /// (`grace_period_seconds=0`) -- always accompanies
+    /// `StrongerConfirmationRequired`, never a substitute for it, so a
+    /// future policy audit can grep for exactly this reason instead of
+    /// having to infer it from `source_action`.
+    ForceSemantics,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

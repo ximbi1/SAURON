@@ -137,6 +137,41 @@ async fn delete_request(
     classify(dispatch(connection, request, cancel).await)
 }
 
+/// M8B.6: force delete's own, genuinely separate request path --
+/// `delete_request` above is NEVER touched by this function and never
+/// gains a `grace_period_seconds` parameter, so it is structurally
+/// impossible for a future refactor to leak force semantics into an
+/// ordinary `:delete` by sharing a code path. Still carries the same
+/// server-side UID precondition as `delete_request` (grace=0 and a
+/// precondition are independent `DeleteParams` fields, no conflict).
+async fn force_delete_request(
+    connection: &Connection,
+    target: &MutationTarget,
+    dry_run: bool,
+    cancel: &CancellationToken,
+) -> MutationOutcome {
+    let namespace = target
+        .resource
+        .namespaced
+        .then_some(target.scope.namespace.as_str());
+    let api = target.resource.api(connection.client.clone(), namespace);
+    let builder = kube::core::Request::new(api.resource_url());
+    let params = DeleteParams {
+        dry_run,
+        grace_period_seconds: Some(0),
+        preconditions: Some(Preconditions {
+            resource_version: None,
+            uid: Some(target.scope.uid.clone()),
+        }),
+        ..Default::default()
+    };
+    let request = match builder.delete(&target.scope.name, &params) {
+        Ok(r) => r,
+        Err(_) => return MutationOutcome::Unsupported,
+    };
+    classify(dispatch(connection, request, cancel).await)
+}
+
 /// M8B.4: the eviction subresource -- never a plain DELETE. Unlike
 /// `delete_request`, there is no UID precondition field on the Eviction
 /// API itself, so client-side TOCTOU (`revalidate`, called before this
@@ -244,6 +279,9 @@ pub async fn preflight(
         // Restart/Label both using `Modify` despite being distinct actions.
         MutationEffect::Delete if intent.source_action == "evict" => {
             evict_request(connection, &intent.target, true, cancel).await
+        }
+        MutationEffect::Delete if intent.source_action == "force_delete" => {
+            force_delete_request(connection, &intent.target, true, cancel).await
         }
         MutationEffect::Delete => delete_request(connection, &intent.target, true, cancel).await,
         MutationEffect::Modify => match payload {
@@ -430,6 +468,9 @@ pub async fn commit(
         MutationEffect::Delete if intent.source_action == "evict" => {
             evict_request(connection, &intent.target, false, cancel).await
         }
+        MutationEffect::Delete if intent.source_action == "force_delete" => {
+            force_delete_request(connection, &intent.target, false, cancel).await
+        }
         MutationEffect::Delete => delete_request(connection, &intent.target, false, cancel).await,
         MutationEffect::Modify => match &payload {
             Some(p) => patch_request(connection, &intent.target, p, false, cancel).await,
@@ -457,7 +498,14 @@ pub async fn commit(
             Some(evaluation.decision),
             &reasons,
             Some(&outcome),
-            Some(format!("{outcome:?}")),
+            // M8B.6: an auditor must be able to tell a force delete apart
+            // from an ordinary one directly from this one record, without
+            // cross-referencing `source_action` elsewhere.
+            Some(if intent.source_action == "force_delete" {
+                format!("{outcome:?} (grace_period_seconds=0)")
+            } else {
+                format!("{outcome:?}")
+            }),
         ))
         .is_ok();
     if !wrote && matches!(outcome, MutationOutcome::Committed) {

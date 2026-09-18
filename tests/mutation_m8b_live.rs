@@ -492,6 +492,104 @@ async fn live_evict_denied_by_pdb_then_succeeds_on_a_pdb_free_pod() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[tokio::test]
+#[ignore = "explicit isolated kind config and m8b-fixtures (m8b-force-delete Pod) required"]
+async fn live_force_delete_removes_the_pod_with_grace_period_zero() {
+    let path = std::env::var_os("SAURON_TEST_KUBECONFIG").expect("explicit test kubeconfig");
+    let c = kube::connect(
+        ConnectOptions {
+            kubeconfig: Some(path.into()),
+            context: Some("kind-sauron-test".into()),
+            force_readonly: false,
+            mutation_test_cluster_verified: false,
+        },
+        Config::default(),
+    )
+    .await
+    .expect("connect");
+    let pod_resource = c
+        .catalog
+        .resolve("v1/pods", &c.settings.aliases)
+        .expect("canonical pod");
+    let pod_api = pod_resource.api(c.client.clone(), Some("sauron-m8b"));
+    let pod = Object::new(
+        serde_json::to_value(
+            pod_api
+                .get("m8b-force-delete")
+                .await
+                .expect("m8b-force-delete"),
+        )
+        .unwrap(),
+    );
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: c.context.clone(),
+        cluster: c.cluster.clone(),
+        resource: pod_resource.id(),
+        namespace: pod.namespace.clone(),
+        name: pod.name.clone(),
+        uid: pod.uid.clone(),
+    };
+    let cancel = CancellationToken::new();
+    let built =
+        workflow::force_delete(scope, pod_resource, 1).expect("force_delete is supported for Pod");
+    let evaluation = policy::evaluate(&verified_policy(), &built.intent);
+    assert_eq!(
+        evaluation.decision,
+        PolicyDecision::RequireStrongerConfirmation
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&sauron::mutation::PolicyReason::ForceSemantics),
+        "force delete must carry its own auditable policy reason: {:?}",
+        evaluation.reasons
+    );
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Strong,
+    };
+    let (journal, dir) = new_journal("force-delete");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    let mut last = Verification::Unknown;
+    let mut resolved_gone = false;
+    for _ in 0..20 {
+        last = executor::verify(&c, &built.intent, None, &cancel).await;
+        if last == Verification::ObservedGone {
+            resolved_gone = true;
+            break;
+        }
+        assert!(
+            matches!(
+                last,
+                Verification::DeletionInProgress | Verification::Pending
+            ),
+            "unexpected force-delete verification state: {last:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        resolved_gone,
+        "force delete never resolved to ObservedGone within the bounded poll window (last: {last:?})"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn new_journal(label: &str) -> (sauron::mutation::journal::Journal, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!(
         "sauron-m8b-live-journal-{label}-{}",

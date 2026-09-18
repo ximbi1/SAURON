@@ -124,7 +124,7 @@ silently skipping multi-node drain coverage without saying so.
 | M8B.3 | CronJob trigger (create a Job from a CronJob template) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- first real `MutationEffect::Create` in the executor; `MutationIntent.create_resource` added; `policy::evaluate`'s Create-bypasses-confirmation rule removed (a real bug in an untested speculative rule, found while implementing this); traceability via label/annotation, not a real `ownerReference` (matches `kubectl create job --from=cronjob` semantics) |
 | M8B.4 | Evict Pod (eviction subresource, PDB-aware) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- uses `POST .../pods/NAME/eviction`, never a plain DELETE; new `MutationOutcome::DisruptionBudgetDenied` for 429; live-verified real PDB denial + real success. Found and fixed a significant, codebase-wide bug: kube-rs's transport-level auto-retry (`default_retry`, on by default) silently retried 429/503/504 below every request this app has ever made, contradicting the "no automatic retry" guarantee -- now explicitly disabled |
 | M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | ENGINE ACCEPTED (unit/fake-HTTP only); NO `:drain` command/UI entry point exists yet, and live evidence is deliberately NOT planned (resolved open question, option (c)) -- both required before this slice can be folded into M8B.7's combined acceptance |
-| M8B.6 | Force delete (highest risk; explicit, narrow, no default grace=0 leakage) | PLANNED |
+| M8B.6 | Force delete (highest risk; explicit, narrow, no default grace=0 leakage) | ACCEPTED |
 | M8B.7 | Combined adversarial acceptance, full M1-M8 regression, soak | PLANNED |
 
 Ordering rationale: M8B.1-M8B.3 are the lowest-complexity, single-request
@@ -1031,6 +1031,74 @@ the authoritative record of M8's own bugs.
   live evidence (by design, per the resolved option (c) above). The
   engine (`mutation::drain`, `kube::drain::drain()`) is real, tested, and
   ready to be wired to a command -- that wiring is the remaining work.
+- 2026-09-19: M8B.6 (Force delete) implemented and ACCEPTED with live
+  evidence. Resolved this document's own open questions as follows,
+  adopting each section's own stated proposal as the final decision (no
+  objection raised):
+  - **Resource kinds**: kept deliberately narrow -- `FORCE_DELETE_KINDS
+    = ["Pod"]` only, exactly as proposed; Job/CronJob-created Pods are
+    already covered since they are still Pods, no separate allowance
+    needed.
+  - **Semantic treatment**: `force_delete_request` in `kube::mutation`
+    is a genuinely separate function from `delete_request` -- it is
+    never called by, and never shares a parameter with, the ordinary
+    delete path. `:force_delete` is its own grammar command, never a
+    flag on `:delete`. A regression test
+    (`mutation_ordinary_delete_never_sends_grace_period_zero_force_
+    delete_exists_alongside_it`) proves the ordinary path's request body
+    never contains `gracePeriodSeconds` even with force delete's code
+    present alongside it.
+  - **Policy/risk**: `PolicyReason::ForceSemantics` added, pushed
+    whenever `source_action == "force_delete"`, always alongside (never
+    instead of) the `StrongerConfirmationRequired` that `effect ==
+    Delete` already guarantees. `MutationRisk::Destructive` reused
+    rather than adding a new risk tier -- the existing
+    `RequireStrongerConfirmation` ceiling was already the correct
+    outcome, so a new tier would have added a distinction without a
+    behavioral difference.
+  - **Preview text**: explains the specific consequence in the change
+    description itself (surfaced verbatim in the confirmation UI):
+    graceful termination is skipped, and containers may keep running
+    past Kubernetes considering the Pod gone if the node is unreachable
+    -- stated as a known Kubernetes caveat, not a SAURON limitation.
+  - **TOCTOU/UID**: `force_delete_request` keeps the exact same
+    `Preconditions { uid: Some(...) }` precondition as ordinary delete;
+    proven live and via fake-HTTP that `grace_period_seconds=0` and the
+    UID precondition are both present on the same request, confirming
+    they are independent `DeleteParams` fields as expected, not a real
+    conflict.
+  - **No automatic retry**: unaffected -- `force_delete_request` shares
+    the same `dispatch`/`classify` path as every other mutation, so the
+    already-fixed `default_retry = false` transport setting (M8B.4's
+    finding) applies here too, with no new retry surface introduced.
+  - **Journal**: `commit()`'s `CommitResult` record for a force delete
+    carries `detail` = `"{outcome:?} (grace_period_seconds=0)"`, visibly
+    distinct from an ordinary delete's plain `"{outcome:?}"`, exactly as
+    proposed -- an auditor can tell the two apart from the journal alone.
+  - **Post-commit verification**: reused M8.3's existing Delete
+    verification (`DeletionInProgress`/`ObservedGone`/`Pending`) with no
+    new `Verification` variant, exactly as proposed.
+  Live evidence: `tests/fixtures/m8b-evict.yaml` extended with a third,
+  disposable Pod (`m8b-force-delete`) for the mechanism proof -- not the
+  specific stuck-on-an-unreachable-node scenario, which is out of
+  proportion to reproduce live on a healthy `kind-sauron-test` cluster.
+  `m8b-fixtures`/`m8b-reset` both apply it and wait for Ready.
+  `live_force_delete_removes_the_pod_with_grace_period_zero` in
+  `tests/mutation_m8b_live.rs` force-deletes it, asserts
+  `PolicyReason::ForceSemantics` is present alongside
+  `RequireStrongerConfirmation`, commits, and polls verification to a
+  real `ObservedGone`. Run twice via `scripts/test-cluster.sh m8b-test`
+  (alongside every other M8B live test in the same file, 5 tests total),
+  both clean; fixtures reset cleanly afterward, cluster left in its
+  pristine state.
+  2 unit tests (`mutation::workflow::tests`: unsupported-kind rejection,
+  exact payload/risk/distinct-source_action-from-delete); 2 policy tests
+  (`ForceSemantics` present for `force_delete`, absent for ordinary
+  delete); 2 fake-HTTP tests (grace_period_seconds=0 + UID precondition
+  both present on the force delete request; ordinary delete regression
+  proof); 1 grammar test; 1 app-level zero-write-under-readonly test.
+  Full locked suite: 230 unit + 65 fake HTTP, fmt/check/clippy (`-D
+  warnings`) clean.
 
 ## Final acceptance conditions (proposed, mirroring M8's own structure)
 

@@ -988,6 +988,125 @@ async fn mutation_delete_commit_carries_the_exact_uid_server_side_precondition()
 }
 
 #[tokio::test]
+async fn mutation_force_delete_sends_grace_period_zero_and_the_uid_precondition() {
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::{Confirmation, workflow};
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("DELETE"), "unexpected method: {request}");
+            assert!(
+                request.contains("\"gracePeriodSeconds\":0"),
+                "force delete must send grace_period_seconds=0: {request}"
+            );
+            assert!(
+                request.contains("\"uid\":\"uid-1\""),
+                "force delete must still carry the exact UID precondition: {request}"
+            );
+            (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let scope = sauron::app::session::Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/pods".into(),
+        namespace: "sauron-m7".into(),
+        name: "m7-target".into(),
+        uid: "uid-1".into(),
+    };
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let built =
+        workflow::force_delete(scope, pod_resource, 1).expect("force_delete supported for Pod");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Strong,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    let records = journal.recent(10);
+    assert!(
+        records.iter().any(
+            |r| r.phase == sauron::mutation::journal::Phase::CommitResult
+                && r.detail.as_deref() == Some("Committed (grace_period_seconds=0)")
+        ),
+        "the journal detail must distinguish a force delete from an ordinary one: {records:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_ordinary_delete_never_sends_grace_period_zero_force_delete_exists_alongside_it() {
+    // Regression proof on M8.3's own delete path: force_delete's existence
+    // as a genuinely separate function/code path must never leak
+    // grace_period_seconds=0 into an ordinary :delete.
+    use sauron::kube::mutation::commit;
+    use sauron::mutation::Confirmation;
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            assert!(request.starts_with("DELETE"), "unexpected method: {request}");
+            assert!(
+                !request.contains("gracePeriodSeconds"),
+                "an ordinary delete must never carry a gracePeriodSeconds field at all: {request}"
+            );
+            (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let intent = mutation_intent("uid-1", sauron::mutation::MutationEffect::Delete);
+    let confirmation = Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Strong,
+    };
+    let outcome = commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &intent,
+        Some(&confirmation),
+        None,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn mutation_cordon_requires_strong_confirmation_and_commits_the_exact_patch() {
     use sauron::app::session::Scope;
     use sauron::kube::{discovery::Resource, mutation::commit};

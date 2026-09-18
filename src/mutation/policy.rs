@@ -128,6 +128,15 @@ pub fn evaluate(context: &PolicyContext, intent: &MutationIntent) -> PolicyEvalu
     if intent.risk == MutationRisk::Destructive {
         reasons.push(PolicyReason::DestructiveEffect);
     }
+    // M8B.6: force delete's own distinct, auditable reason -- checked by
+    // `source_action` (the same precedent `kube::mutation`'s own dispatch
+    // already uses to tell force delete/evict/set_image apart from their
+    // ordinary counterparts, all of which share an effect), never a
+    // substitute for the `StrongerConfirmationRequired` that `effect ==
+    // Delete` already guarantees below.
+    if intent.source_action == "force_delete" {
+        reasons.push(PolicyReason::ForceSemantics);
+    }
 
     if hard_deny {
         return PolicyEvaluation {
@@ -330,6 +339,24 @@ mod tests {
         );
         assert_eq!(eval.decision, PolicyDecision::RequireStrongerConfirmation);
         assert!(eval.reasons.contains(&PolicyReason::DestructiveEffect));
+    }
+
+    #[test]
+    fn force_delete_gets_its_own_auditable_policy_reason_alongside_strong_confirmation() {
+        let mut i = intent("sauron-m7", "Pod", "u", MutationEffect::Delete);
+        i.source_action = "force_delete".into();
+        let eval = evaluate(&verified(), &i);
+        assert_eq!(eval.decision, PolicyDecision::RequireStrongerConfirmation);
+        assert!(eval.reasons.contains(&PolicyReason::ForceSemantics));
+    }
+
+    #[test]
+    fn an_ordinary_delete_never_gets_the_force_semantics_reason() {
+        let eval = evaluate(
+            &verified(),
+            &intent("sauron-m7", "Pod", "u", MutationEffect::Delete),
+        );
+        assert!(!eval.reasons.contains(&PolicyReason::ForceSemantics));
     }
 
     #[test]

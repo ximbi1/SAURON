@@ -247,6 +247,48 @@ pub fn evict(scope: Scope, resource: Resource, request_id: u64) -> Result<Built,
     })
 }
 
+pub const FORCE_DELETE_KINDS: &[&str] = &["Pod"];
+
+/// M8B.6: the highest-risk operation in M8/M8B. Pod only, deliberately
+/// narrow -- Deployment/StatefulSet/DaemonSet/ConfigMap etc. already have
+/// a working, non-force Delete path (M8.3); force semantics for them
+/// would risk orphaned dependents/stuck finalizers disproportionate to
+/// any real need this covers (a Pod stuck `Terminating` because its node
+/// is unreachable). Its own distinct `source_action` keeps
+/// `grace_period_seconds=0` structurally impossible to leak into
+/// ordinary `:delete` -- `kube::mutation::force_delete_request` is a
+/// genuinely separate function, never a parameter `delete_request` also
+/// accepts. The preview `change` text states the real consequence
+/// (skips graceful termination; on an unreachable node, containers may
+/// keep running even though Kubernetes considers the Pod gone) rather
+/// than a bare "delete NAME".
+pub fn force_delete(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !FORCE_DELETE_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("force_delete", &kind));
+    }
+    let change = format!(
+        "force delete {} {}/{} -- skips graceful termination (preStop/terminationGracePeriodSeconds \
+         are ignored); if the node is unreachable, its containers may keep running until it \
+         recovers even though Kubernetes will already consider this Pod gone",
+        kind, scope.namespace, scope.name
+    );
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Delete,
+            MutationRisk::Destructive,
+            "delete (grace_period_seconds=0)".into(),
+            &None,
+            "force_delete",
+            request_id,
+        ),
+        payload: None,
+        change,
+    })
+}
+
 pub const CORDON_KINDS: &[&str] = &["Node"];
 
 /// M8B.1: Node-only, `unschedulable` is an *implementation detail* of this
@@ -661,6 +703,30 @@ mod tests {
         assert_eq!(built.intent.effect, MutationEffect::Delete);
         assert_eq!(built.intent.source_action, "evict");
         assert!(built.change.contains("PodDisruptionBudget"));
+    }
+
+    #[test]
+    fn force_delete_unsupported_kind_is_rejected() {
+        assert!(force_delete(scope(), resource("Deployment"), 1).is_err());
+    }
+
+    #[test]
+    fn force_delete_supported_kind_has_a_distinct_source_action_and_explains_consequences() {
+        let built = force_delete(scope(), resource("Pod"), 1).unwrap();
+        assert!(built.payload.is_none());
+        assert_eq!(built.intent.risk, MutationRisk::Destructive);
+        assert_eq!(built.intent.effect, MutationEffect::Delete);
+        assert_eq!(built.intent.source_action, "force_delete");
+        assert_ne!(
+            built.intent.source_action,
+            delete(scope(), resource("Pod"), 1)
+                .unwrap()
+                .intent
+                .source_action,
+            "force_delete must never share delete's source_action"
+        );
+        assert!(built.change.contains("graceful termination"));
+        assert!(built.change.contains("unreachable"));
     }
 
     fn node_scope() -> Scope {

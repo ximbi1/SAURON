@@ -40,3 +40,18 @@ spec:
         requests:
           cpu: 5m
           memory: 8Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: m8b-force-delete
+  namespace: sauron-m8b
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 5m
+          memory: 8Mi

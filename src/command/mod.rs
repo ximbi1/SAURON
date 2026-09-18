@@ -528,6 +528,7 @@ pub enum Command {
     },
     Trigger,
     Evict,
+    ForceDelete,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -800,6 +801,13 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :evict");
             return Ok(Command::Evict);
         }
+        // Deliberately its own command, never a flag on ":delete" -- see
+        // workflow::force_delete's own doc comment for why this must stay
+        // a genuinely separate path, not a shared parameter.
+        "force_delete" => {
+            ensure!(tail.is_empty(), "Use :force_delete");
+            return Ok(Command::ForceDelete);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -879,6 +887,7 @@ pub fn command_names() -> Vec<&'static str> {
         "set_image",
         "trigger",
         "evict",
+        "force_delete",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1081,6 +1090,12 @@ fn trigger_takes_no_arguments() {
 fn evict_takes_no_arguments() {
     assert!(matches!(parse(":evict"), Ok(Command::Evict)));
     assert!(parse(":evict now").is_err());
+}
+#[test]
+fn force_delete_takes_no_arguments_and_is_its_own_distinct_command_from_delete() {
+    assert!(matches!(parse(":force_delete"), Ok(Command::ForceDelete)));
+    assert!(parse(":force_delete now").is_err());
+    assert!(matches!(parse(":delete"), Ok(Command::Delete)));
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

@@ -17,7 +17,7 @@ and status reference are distinct provenance classes. No name heuristics.
 | M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | TESTED | 3 pure network tests + 2 catalog-ambiguity tests + 1 reverse-selector fake HTTP test; 26 fake HTTP + 121 unit green | Guarded m6-test PASS: Service→Pod selector, Ingress→Service/TLS-Secret, real controller EndpointSlice targetRef without apiVersion resolves through unambiguous catalog | Never infer Pods from IP; EndpointSlice apiVersion omission root-caused and fixed (see journal) | ACCEPTED |
 | M6.3 | Storage and bounded reverse config/identity/mount references | TESTED | 3 storage-extraction unit tests + 1 reverse-reference fake HTTP test; 27 fake HTTP + 124 unit green | Guarded m6-test PASS: PVC→PV, PVC→StorageClass, PV→PVC via claimRef with exact UID match, PV→StorageClass, reverse Pod→PVC, against a real dynamically-provisioned local-path PV | claimRef kind/apiVersion hardcoded as schema-fixed (not a guess, unlike EndpointSlice targetRef); reverse scan bounded to an explicit built-in workload candidate list (Pods/Deployments/StatefulSets/DaemonSets/Jobs/CronJobs), no arbitrary CRD reference inference | ACCEPTED |
 | M6.4 | Adjacent with UID-safe canonical navigation/history | TESTED | 2 render unit tests + 2 app-level navigation tests; 127 unit + 27 fake HTTP green | Guarded m6-test PASS: real Deployment adjacent report renders OWNS/REFERENCES groups with UID-real navigable targets | `:adjacent`/`a` opens grouped view (OWNED BY/OWNS/SELECTED BY/REFERENCES/REFERENCED BY); `enter` (`Follow`) jumps via exact GVK+namespace+UID reusing the existing history stack, never by name; no interactive terminal smoke test run in this automated session, only headless unit+live coverage | ACCEPTED |
-| M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | NOT STARTED | Pending | None | No global graph database | NOT ACCEPTED |
+| M6.5 | Bounded cycle-safe Xray, existing health, no causal claims | TESTED | 1 two-hop-plus-cycle-safety unit test + 1 traversal fake HTTP test; 128 unit + 28 fake HTTP green | Guarded m6-test PASS: real Deployment→ReplicaSet→Pod 2-hop Xray renders HOP 1/HOP 2 with UID-real targets | `:xray`/`x` opens a bounded (depth clamped 1-3, UI default 2) BFS traversal reusing Adjacent's exact `expand()` single-hop logic and existing deterministic health verbatim (no second "graph health"); each frontier node is freshly re-read and UID-validated before its own edges are trusted, so mid-traversal replacement is rejected per-node, not silently inherited; no global graph database | ACCEPTED |
 | M6.6 | Combined adversarial acceptance, regressions, soak | NOT STARTED | Pending | None | Tag prohibited until complete | NOT ACCEPTED |
 
 ## Required evidence
@@ -74,6 +74,37 @@ forward active: cycles, graph operations, RSS/fds/threads/tasks, errors and part
 These are observations, not proof of leak freedom.
 
 ## Journal
+
+- M6.5 accepted: refactored `kube::relationships::report` so `adjacent()`'s
+  single-hop logic (forward references, bounded reverse ownership, network
+  selectors/EndpointSlice, reverse Config/Secret/ServiceAccount/PVC scans) is
+  a shared `expand(..., center: &Identity, ...)` function taking an explicit
+  center identity instead of the report's global root — `adjacent()` calls it
+  once with center=root (byte-identical behavior, verified by the full
+  existing test suite passing unchanged); the new `xray()` calls it once per
+  frontier node across a BFS bounded to depth 1-3 (clamped; UI uses 2). Each
+  frontier node is re-fetched fresh and UID-validated (via the same
+  `fetch_target` UID-pin used everywhere else) before `expand()` trusts its
+  edges, so a same-name replacement mid-traversal is rejected for that node,
+  never silently inherited. A `visited` set makes the BFS cycle-safe by
+  construction — re-discovering an already-expanded node (verified with a
+  real ownerReference cycle back to the root in the fake-HTTP test) produces
+  an edge, never a second expansion or an infinite loop. Added
+  `src/xray.rs`, rendering depth-grouped text (`HOP 1`, `HOP 2`, ...) that
+  reuses Adjacent's exact direction/provenance labels via a shared
+  `adjacent::label()` helper and the same deterministic health — never a
+  second, parallel "graph health". Wired `:xray`/`x` (table mode) through the
+  same `start_adjacent` document path as Adjacent (branching on
+  `Action::Xray` to call `report::xray`/`xray::report` instead of
+  `report::adjacent`/`adjacent::report`); `Follow` (`enter`) works identically
+  since both views populate the same `Document.adjacent` target list. Added 1
+  two-hop-plus-cycle-safety unit test and 1 fake-HTTP traversal test. Extended
+  the live m6-test to run a real 2-hop Xray against the Deployment and assert
+  both HOP 1 and HOP 2 render with UID-real targets, including a real Pod at
+  hop 2. Full locked fmt/check/clippy/test green: 128 unit + 28 fake HTTP.
+  Guarded `scripts/test-cluster.sh m6-test` replay passed. No interactive
+  terminal smoke test run this session. M6.5 ACCEPTED. Proceeding to M6.6
+  (combined adversarial acceptance, full M1-M5 regression, soak).
 
 - M6.4 accepted: added `src/adjacent.rs`, rendering a `report::Report` as text
   grouped by intrinsic direction/provenance (OWNED BY / OWNS / SELECTED BY /

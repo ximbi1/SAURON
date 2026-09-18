@@ -26,8 +26,9 @@ const GROUPS: [&str; 5] = [
     "REFERENCED BY",
 ];
 
-fn group(root: &Identity, from: &Identity, provenance: Provenance) -> &'static str {
-    let outgoing = from == root;
+/// Shared by Xray so the two views never diverge on what a direction/
+/// provenance pair means.
+pub(crate) fn label(outgoing: bool, provenance: Provenance) -> &'static str {
     match provenance {
         Provenance::OwnerReference => {
             if outgoing {
@@ -45,6 +46,10 @@ fn group(root: &Identity, from: &Identity, provenance: Provenance) -> &'static s
             }
         }
     }
+}
+
+fn group(root: &Identity, from: &Identity, provenance: Provenance) -> &'static str {
+    label(from == root, provenance)
 }
 
 pub fn report(report: &Report) -> (String, Vec<Target>) {

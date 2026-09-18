@@ -396,6 +396,26 @@ replay passed. No interactive terminal smoke test was run this session --
 only headless unit and live API-level coverage. M6.4 ACCEPTED. Proceeding to
 M6.5 (Xray: bounded cycle-safe traversal reusing existing health).
 
+### 2026-09-18 — M6.5 ACCEPTED
+
+Refactored `kube::relationships::report` so Adjacent's single-hop logic is a
+shared `expand(..., center: &Identity, ...)` function; `adjacent()` calls it
+once with center=root (existing test suite passed unchanged, confirming
+byte-identical behavior), and the new `xray()` calls it once per frontier
+node across a BFS bounded to depth 1-3. Each frontier node is re-fetched
+fresh and UID-validated before its edges are trusted, so a same-name
+replacement mid-traversal is rejected per-node. A `visited` set makes the
+BFS cycle-safe by construction, verified with a real ownerReference cycle
+back to the root in a fake-HTTP test. Added `src/xray.rs` rendering
+depth-grouped text (HOP 1, HOP 2, ...) reusing Adjacent's exact
+direction/provenance labels and the same deterministic health. Wired
+`:xray`/`x` through the same document path as Adjacent. Full locked
+fmt/check/clippy/test green: 128 unit + 28 fake HTTP. Guarded
+`scripts/test-cluster.sh m6-test` replay passed, including a real 2-hop
+Deployment→ReplicaSet→Pod traversal. No interactive terminal smoke test run
+this session. M6.5 ACCEPTED. Proceeding to M6.6 (combined adversarial
+acceptance, full M1-M5 regression, 75-minute soak).
+
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 
 New `scripts/accept-m5-combined.py` ran all 12 combined sequences from the

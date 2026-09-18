@@ -846,7 +846,7 @@ impl Runtime {
                 };
             }
             Help => self.open_static("Keyboard reference", self.state.keymap.help()),
-            Yaml | Describe | Explain | Events | Adjacent => self.open_document(action)?,
+            Yaml | Describe | Explain | Events | Adjacent | Xray => self.open_document(action)?,
             Follow => self.follow_adjacent()?,
             Timeline => {
                 let object = self.state.selected_object().context("Select a row first")?;
@@ -1081,7 +1081,7 @@ impl Runtime {
         if self
             .active_document_mut()
             .and_then(|d| d.source.as_ref())
-            .is_some_and(|s| s.action == Action::Adjacent)
+            .is_some_and(|s| matches!(s.action, Action::Adjacent | Action::Xray))
         {
             let source = self
                 .active_document_mut()
@@ -1121,9 +1121,9 @@ impl Runtime {
         });
         Ok(())
     }
-    /// Adjacent has its own resolver (`kube::relationships::report::adjacent`),
-    /// not the generic per-action `kube::evidence::document` path, since it
-    /// returns a structured graph the document must keep as navigable targets.
+    /// Adjacent and Xray share this path instead of the generic per-action
+    /// `kube::evidence::document`, since both return a structured graph the
+    /// document must keep as navigable targets, not a plain evidence string.
     fn start_adjacent(&mut self, source: document::Source) -> Result<()> {
         let connection = self.connection.clone().context("Not connected")?;
         if let Some(doc) = self.active_document_mut() {
@@ -1138,18 +1138,30 @@ impl Runtime {
         let tx = self.tx.clone();
         let cancel = self.document.clone();
         self.tasks.spawn(async move {
-            let document::Source { resource, selected: object, .. } = source;
-            let result = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return,
-                result = crate::kube::relationships::report::adjacent(&connection, scope, &resource, &object, &cancel) => result,
+            let document::Source { resource, selected: object, action, .. } = source;
+            let result = if action == Action::Xray {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    result = crate::kube::relationships::report::xray(&connection, scope, &resource, &object, &cancel, 2) => result,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return,
+                    result = crate::kube::relationships::report::adjacent(&connection, scope, &resource, &object, &cancel) => result,
+                }
             };
             let payload = match result {
                 Ok(report) => {
-                    let (text, adjacent) = crate::adjacent::report(&report);
+                    let (text, adjacent) = if action == Action::Xray {
+                        crate::xray::report(&report, 2)
+                    } else {
+                        crate::adjacent::report(&report)
+                    };
                     Payload::Document {
                         request,
-                        title: format!("Adjacent: {}", object.name),
+                        title: format!("{}: {}", if action == Action::Xray { "Xray" } else { "Adjacent" }, object.name),
                         text,
                         adjacent,
                     }

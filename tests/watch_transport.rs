@@ -513,6 +513,99 @@ async fn graph_report_reverse_configmap_reference_from_pod_and_deployment() {
 }
 
 #[tokio::test]
+async fn xray_traverses_two_hops_cycle_safely_and_bounds_at_depth() {
+    use sauron::graph::Provenance;
+    use sauron::kube::relationships::report::xray;
+    let dep_json = json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"namespace":"default","name":"dep","uid":"dep-uid","resourceVersion":"1"}});
+    let dep_body = dep_json.to_string();
+    let root = Object::new(dep_json);
+    // A real ownerReference back to the root: proves revisiting an already-
+    // expanded node during deeper traversal never re-expands or cycles.
+    let rs_body = json!({"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"namespace":"default","name":"rs","uid":"rs-uid","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"dep","uid":"dep-uid"}]}}).to_string();
+    let server = Server::new(move |path| {
+        if path.ends_with("/deployments/dep") {
+            (200, dep_body.clone())
+        } else if path.contains("/replicasets/rs") {
+            (200, rs_body.clone())
+        } else if path.contains("/namespaces/default/deployments") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[]}).to_string())
+        } else if path.contains("/namespaces/default/replicasets") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[
+                {"metadata":{"namespace":"default","name":"rs","uid":"rs-uid","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"dep","uid":"dep-uid"}]}}
+            ]}).to_string())
+        } else if path.contains("/namespaces/default/pods") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[
+                {"metadata":{"namespace":"default","name":"pod","uid":"pod-uid","ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"rs","uid":"rs-uid"}]}}
+            ]}).to_string())
+        } else {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","items":[]}).to_string())
+        }
+    })
+    .await;
+    let mut deployment = resource();
+    deployment.api.kind = "Deployment".into();
+    deployment.api.group = "apps".into();
+    deployment.api.api_version = "apps/v1".into();
+    deployment.api.plural = "deployments".into();
+    let mut replicaset = resource();
+    replicaset.api.kind = "ReplicaSet".into();
+    replicaset.api.group = "apps".into();
+    replicaset.api.api_version = "apps/v1".into();
+    replicaset.api.plural = "replicasets".into();
+    let connection = connection_with(
+        server.client(),
+        vec![deployment.clone(), resource(), replicaset],
+    );
+    // depth 1 behaves exactly like Adjacent: only the direct neighbor (the
+    // owned ReplicaSet) is visible, the Pod two hops away is not.
+    let shallow = xray(
+        &connection,
+        1,
+        &deployment,
+        &root,
+        &CancellationToken::new(),
+        1,
+    )
+    .await
+    .expect("depth 1");
+    assert!(
+        shallow
+            .nodes
+            .keys()
+            .any(|id| id.resource == "apps/v1/replicasets")
+    );
+    assert!(!shallow.nodes.keys().any(|id| id.resource == "v1/pods"));
+    // depth 2 follows one more hop: the ReplicaSet is re-fetched fresh and
+    // expanded, discovering the Pod it owns.
+    let deep = xray(
+        &connection,
+        1,
+        &deployment,
+        &root,
+        &CancellationToken::new(),
+        2,
+    )
+    .await
+    .expect("depth 2");
+    assert!(deep.nodes.keys().any(|id| id.resource == "v1/pods"));
+    // The RS's own ownerReference back to the already-expanded root produces
+    // an edge, not a second expansion or an infinite loop.
+    assert!(
+        deep.graph
+            .edges()
+            .keys()
+            .any(|e| e.from.resource == "apps/v1/replicasets"
+                && e.to.resource == "apps/v1/deployments"
+                && e.provenance == Provenance::OwnerReference)
+    );
+    assert!(
+        deep.issues
+            .iter()
+            .any(|i| i.source.contains("traversal bounded at depth 2"))
+    );
+}
+
+#[tokio::test]
 async fn graph_report_rechecks_root_uid_after_collection() {
     use sauron::{evidence::Unknown, kube::relationships::report::adjacent};
     use std::sync::atomic::{AtomicUsize, Ordering};

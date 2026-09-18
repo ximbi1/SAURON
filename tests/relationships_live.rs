@@ -111,6 +111,23 @@ async fn ownership_and_template_references_resolve_live() {
     for target in &adjacent_targets {
         assert!(!target.uid.is_empty(), "every Adjacent target is UID-real");
     }
+    let xray_report =
+        relationships::report::xray(&c, 1, &deployment_resource, &deployment, &cancel, 2)
+            .await
+            .expect("2-hop xray report");
+    let (xray_text, xray_targets) = sauron::xray::report(&xray_report, 2);
+    assert!(
+        xray_text.contains("HOP 1"),
+        "the owned ReplicaSet is one hop away"
+    );
+    assert!(
+        xray_text.contains("HOP 2"),
+        "the ReplicaSet's owned Pod is a real second hop"
+    );
+    assert!(xray_targets.iter().any(|t| t.resource.api.kind == "Pod"));
+    for target in &xray_targets {
+        assert!(!target.uid.is_empty(), "every Xray target is UID-real");
+    }
     let svc_resource = c
         .catalog
         .resolve("v1/services", &c.settings.aliases)

@@ -20,6 +20,7 @@ pub enum Action {
     Explain,
     Adjacent,
     Follow,
+    Xray,
     Events,
     Timeline,
     Logs,
@@ -165,6 +166,13 @@ pub fn registry() -> Vec<Binding> {
             "document",
             "Adjacent: navigate to the related object nearest the top of view",
             "enter",
+        ),
+        (
+            Action::Xray,
+            "xray",
+            "table",
+            "Bounded 2-hop relationship + health traversal",
+            "x",
         ),
         (Action::Events, "events", "table", "Related Events", "E"),
         (

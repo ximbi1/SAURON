@@ -10,7 +10,7 @@ use crate::{
     resources::{Object, health::Health},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -145,7 +145,193 @@ async fn collect(
         requests: 1,
         candidates: 0,
     };
-    let references = extract(&fresh);
+    expand(
+        connection,
+        scope,
+        resource,
+        &fresh,
+        &root,
+        &mut report,
+        started,
+        cancel,
+    )
+    .await?;
+    report.requests += 1; // Reserved final validation is mandatory even at scan limit.
+    let (_, current, object) = fetch_target(connection, scope, &fresh, &target, cancel).await?;
+    if current != root {
+        return Err(Unknown::TargetReplaced);
+    }
+    if object.version != fresh.version {
+        return Err(Unknown::Stale);
+    }
+    Ok(report)
+}
+
+/// Bounded cycle-safe traversal: reuses `expand` (Adjacent's exact single-hop
+/// logic) around each frontier node in turn, never a second parallel "graph
+/// health" -- every node's health is the same deterministic value shown
+/// elsewhere. Each frontier node is freshly re-read and UID-validated before
+/// its own edges are trusted, so a same-name replacement mid-traversal is
+/// rejected for that node rather than silently inheriting stale edges.
+pub async fn xray(
+    connection: &Connection,
+    scope: u64,
+    resource: &Resource,
+    selected: &Object,
+    cancel: &CancellationToken,
+    depth: usize,
+) -> Result<Report, Unknown> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(Unknown::Stale),
+        result = tokio::time::timeout(
+            Duration::from_secs(45),
+            collect_xray(connection, scope, resource, selected, cancel, depth.clamp(1, 3)),
+        ) => result.unwrap_or(Err(Unknown::TimedOut)),
+    }
+}
+
+async fn refetch(
+    connection: &Connection,
+    scope: u64,
+    resource: &Resource,
+    id: &Identity,
+    cancel: &CancellationToken,
+) -> Result<Object, Unknown> {
+    let target = Target {
+        api_version: resource.api.api_version.clone(),
+        kind: resource.api.kind.clone(),
+        namespace: id.namespace.clone(),
+        name: id.name.clone(),
+        expected_uid: Some(id.uid.clone()),
+        provenance: Provenance::ExplicitReference,
+    };
+    let dummy = Object::new(serde_json::json!({}));
+    fetch_target(connection, scope, &dummy, &target, cancel)
+        .await
+        .map(|(_, _, object)| object)
+}
+
+async fn collect_xray(
+    connection: &Connection,
+    scope: u64,
+    resource: &Resource,
+    selected: &Object,
+    cancel: &CancellationToken,
+    depth: usize,
+) -> Result<Report, Unknown> {
+    let started = Instant::now();
+    let target = self_target(resource, selected);
+    let (_, root, fresh) = fetch_target(connection, scope, selected, &target, cancel).await?;
+    let mut report = Report {
+        root: root.clone(),
+        graph: Graph::new(scope, Limits::default()),
+        nodes: BTreeMap::from([(
+            root.clone(),
+            Node {
+                resource: resource.clone(),
+                health: fresh.health.clone(),
+            },
+        )]),
+        issues: vec![],
+        requests: 1,
+        candidates: 0,
+    };
+    let mut expanded: BTreeSet<Identity> = BTreeSet::new();
+    let mut frontier = vec![(root.clone(), resource.clone(), fresh.clone())];
+    let mut truncated = false;
+    for level in 0..depth {
+        if frontier.is_empty() {
+            break;
+        }
+        for (id, node_resource, object) in std::mem::take(&mut frontier) {
+            if expanded.contains(&id) {
+                continue;
+            }
+            if !report.available(started) {
+                truncated = true;
+                break;
+            }
+            if cancel.is_cancelled() {
+                return Err(Unknown::Stale);
+            }
+            expand(
+                connection,
+                scope,
+                &node_resource,
+                &object,
+                &id,
+                &mut report,
+                started,
+                cancel,
+            )
+            .await?;
+            expanded.insert(id);
+        }
+        if level + 1 == depth {
+            break;
+        }
+        let pending: Vec<Identity> = report
+            .nodes
+            .keys()
+            .filter(|id| !expanded.contains(id))
+            .cloned()
+            .collect();
+        for id in pending {
+            if !report.available(started) {
+                truncated = true;
+                break;
+            }
+            if cancel.is_cancelled() {
+                return Err(Unknown::Stale);
+            }
+            let node_resource = report.nodes[&id].resource.clone();
+            report.requests += 1;
+            match refetch(connection, scope, &node_resource, &id, cancel).await {
+                Ok(object) => frontier.push((id, node_resource, object)),
+                Err(reason) => {
+                    report.issue(
+                        format!("{} refresh for deeper traversal", id.resource),
+                        reason,
+                    );
+                    expanded.insert(id);
+                }
+            }
+        }
+    }
+    if truncated || report.nodes.keys().any(|id| !expanded.contains(id)) {
+        report.issue(
+            format!("traversal bounded at depth {depth}"),
+            Unknown::Partial,
+        );
+    }
+    report.requests += 1;
+    let (_, current, object) = fetch_target(connection, scope, &fresh, &target, cancel).await?;
+    if current != root {
+        return Err(Unknown::TargetReplaced);
+    }
+    if object.version != fresh.version {
+        return Err(Unknown::Stale);
+    }
+    Ok(report)
+}
+
+/// Adjacent's single-hop logic around one center node. Shared verbatim by
+/// `adjacent()` (center = the selected root) and `xray()`'s traversal (center
+/// = each frontier node in turn) so the two never diverge in what counts as
+/// a verified relationship.
+#[allow(clippy::too_many_arguments)]
+async fn expand(
+    connection: &Connection,
+    scope: u64,
+    resource: &Resource,
+    object: &Object,
+    center: &Identity,
+    report: &mut Report,
+    started: Instant,
+    cancel: &CancellationToken,
+) -> Result<(), Unknown> {
+    let references = extract(object);
     if references.partial {
         report.issue("reference extraction bound", Unknown::Partial);
     }
@@ -160,10 +346,10 @@ async fn collect(
             return Err(Unknown::Stale);
         }
         report.requests += 1;
-        match fetch_target(connection, scope, &fresh, &reference, cancel).await {
-            Ok((resource, id, object)) => {
+        match fetch_target(connection, scope, object, &reference, cancel).await {
+            Ok((resource, id, fetched)) => {
                 let edge = Edge {
-                    from: root.clone(),
+                    from: center.clone(),
                     to: id.clone(),
                     provenance: reference.provenance,
                 };
@@ -179,7 +365,7 @@ async fn collect(
                         id,
                         Node {
                             resource,
-                            health: object.health,
+                            health: fetched.health,
                         },
                     );
                 }
@@ -215,7 +401,7 @@ async fn collect(
             return Err(Unknown::Stale);
         }
         report.requests += 1;
-        match children(connection, &fresh, &child_resource, cancel).await {
+        match children(connection, object, &child_resource, cancel).await {
             Ok((children, partial, inspected)) => {
                 report.candidates += inspected;
                 if partial {
@@ -234,7 +420,7 @@ async fn collect(
                     };
                     for (owner, paths) in extract(&child).targets {
                         if owner.provenance != Provenance::OwnerReference
-                            || owner.expected_uid.as_ref() != Some(&root.uid)
+                            || owner.expected_uid.as_ref() != Some(&center.uid)
                         {
                             continue;
                         }
@@ -242,7 +428,7 @@ async fn collect(
                             match report.graph.insert(
                                 Edge {
                                     from: id.clone(),
-                                    to: root.clone(),
+                                    to: center.clone(),
                                     provenance: Provenance::OwnerReference,
                                 },
                                 &path,
@@ -265,22 +451,15 @@ async fn collect(
             Err(reason) => report.issue(format!("{} child scan", child_resource.id()), reason),
         }
     }
-    network(connection, &fresh, &mut report, started, cancel).await?;
-    reverse_references(connection, &fresh, &mut report, started, cancel).await?;
-    report.requests += 1; // Reserved final validation is mandatory even at scan limit.
-    let (_, current, object) = fetch_target(connection, scope, &fresh, &target, cancel).await?;
-    if current != root {
-        return Err(Unknown::TargetReplaced);
-    }
-    if object.version != fresh.version {
-        return Err(Unknown::Stale);
-    }
-    Ok(report)
+    network(connection, object, center, report, started, cancel).await?;
+    reverse_references(connection, object, center, report, started, cancel).await?;
+    Ok(())
 }
 
 async fn network(
     connection: &Connection,
     fresh: &Object,
+    center: &Identity,
     report: &mut Report,
     started: Instant,
     cancel: &CancellationToken,
@@ -341,7 +520,7 @@ async fn network(
                                     continue;
                                 }
                                 report.link(
-                                    &report.root.clone(),
+                                    center,
                                     resource,
                                     &object,
                                     Provenance::ExplicitReference,
@@ -355,7 +534,7 @@ async fn network(
                                     &object.value["spec"]["selector"]
                                 };
                                 report.link(
-                                    &report.root.clone(),
+                                    center,
                                     resource,
                                     &object,
                                     Provenance::SelectorMatch,
@@ -382,6 +561,7 @@ async fn network(
 async fn reverse_references(
     connection: &Connection,
     fresh: &Object,
+    center: &Identity,
     report: &mut Report,
     started: Instant,
     cancel: &CancellationToken,
@@ -442,7 +622,7 @@ async fn reverse_references(
                     });
                     if let Some(path) = path {
                         report.link(
-                            &report.root.clone(),
+                            center,
                             candidate_resource,
                             &object,
                             Provenance::ExplicitReference,

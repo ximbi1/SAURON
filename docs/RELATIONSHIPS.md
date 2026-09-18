@@ -113,3 +113,29 @@ resolved for that target (never a re-resolved name string) plus its UID,
 reusing the same `push_history`/`apply_history`/`finish_history` stack as
 `[`/`]` history navigation — Adjacent navigation is an ordinary, reversible
 history entry, not a special case.
+
+## M6.5: Xray (ACCEPTED)
+
+`kube::relationships::report` factors Adjacent's single-hop logic (forward
+references, bounded reverse ownership, network selectors/EndpointSlice,
+reverse Config/Secret/ServiceAccount/PVC scans) into a shared `expand(...,
+center: &Identity, ...)` taking an explicit center instead of always the
+report's global root. `adjacent()` calls it once with center = root
+(unchanged behavior). `xray()` calls it once per frontier node across a BFS
+bounded to depth 1-3 (clamped; the UI opens at depth 2). Before `expand()`
+trusts a frontier node's edges, that node is re-fetched fresh and
+UID-validated the same way every other reference is — a same-name
+replacement mid-traversal is rejected for that node, never silently
+inherited into the graph. A `visited` identity set makes the BFS cycle-safe
+by construction: re-discovering an already-expanded node (e.g. a real
+ownerReference pointing back to the root) produces an edge, never a second
+expansion or an infinite loop.
+
+`src/xray.rs` renders the traversal as depth-grouped text (`HOP 1`, `HOP 2`,
+...), reusing Adjacent's exact direction/provenance labels via a shared
+`adjacent::label()` helper and the same deterministic health per node —
+never a second, parallel "graph health", and never a claim that a related
+object is the cause of a problem. `:xray`/`x` opens through the same
+document path as Adjacent (`start_adjacent`, branching on `Action::Xray`);
+`Follow` (`enter`) works identically since both views populate the same
+`Document.adjacent` navigable-target list.

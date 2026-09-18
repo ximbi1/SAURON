@@ -11,3 +11,4 @@ pub mod kube;
 pub mod resources;
 pub mod safety;
 pub mod ui;
+pub mod xray;

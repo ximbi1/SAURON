@@ -62,6 +62,13 @@ reusing the existing history stack. Unit + app-level + live coverage green.
 No interactive terminal smoke test run this session. Continuing to M6.5
 (Xray).
 
+M6.5 ACCEPTED 2026-09-18: `:xray`/`x` opens a bounded (depth 1-3) cycle-safe
+BFS reusing Adjacent's exact single-hop logic and the same deterministic
+health per node. Each frontier node is re-fetched and UID-validated before
+its edges are trusted. Live-verified with a real 2-hop
+Deployment→ReplicaSet→Pod traversal. Continuing to M6.6 (combined
+adversarial acceptance, full M1-M5 regression, soak) -- the final M6 slice.
+
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial
 acceptance + full M1-M4 regression + 75-minute soak) all ACCEPTED. Local annotated

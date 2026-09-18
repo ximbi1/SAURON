@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod drain;
 pub mod evidence;
 pub mod exec;
 pub mod forward;

@@ -2,6 +2,7 @@
 //! user-facing mutation workflows on top of this. Nothing in this module (or
 //! `policy`) issues a network request; that lives in `kube::mutation`'s
 //! executor. NO MUTATION WITHOUT POLICY. UNKNOWN never silently means Allow.
+pub mod drain;
 pub mod journal;
 pub mod policy;
 pub mod view;

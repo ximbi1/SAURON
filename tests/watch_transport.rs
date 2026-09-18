@@ -1551,6 +1551,235 @@ async fn verify_trigger_cronjob_reports_pending_when_the_job_is_not_yet_visible(
 }
 
 #[tokio::test]
+async fn drain_orchestrates_cordon_then_a_mixed_batch_of_eviction_outcomes() {
+    use sauron::app::session::Scope;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Three Pods on the node: one DaemonSet-owned (never attempted, excluded
+    // during planning), one that evicts successfully, one denied by a PDB.
+    let list_body = json!({
+        "apiVersion":"v1","kind":"PodList",
+        "items": [
+            {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"ds-pod","uid":"uid-ds","ownerReferences":[{"kind":"DaemonSet","name":"x","uid":"y"}]},"spec":{}},
+            {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"ok-pod","uid":"uid-ok"},"spec":{}},
+            {"apiVersion":"v1","kind":"Pod","metadata":{"namespace":"default","name":"denied-pod","uid":"uid-denied"},"spec":{}},
+        ],
+    })
+    .to_string();
+    let eviction_attempts = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = eviction_attempts.clone();
+    let server = Server::with_request(move |request| {
+        if request.starts_with("PATCH") {
+            // Cordon commit.
+            (200, json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"node-1","uid":"node-uid"}}).to_string())
+        } else if request.contains("/eviction") {
+            counter.fetch_add(1, Ordering::SeqCst);
+            if request.contains("denied-pod") {
+                (429, json!({"kind":"Status","apiVersion":"v1","status":"Failure","code":429}).to_string())
+            } else {
+                (200, json!({"kind":"Status","apiVersion":"v1","status":"Success"}).to_string())
+            }
+        } else if request.starts_with("GET") && request.contains("fieldSelector") {
+            (200, list_body.clone())
+        } else if request.starts_with("GET") && request.contains("nodes/node-1") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"name":"node-1","uid":"node-uid","resourceVersion":"5"}}).to_string())
+        } else {
+            // Per-Pod revalidate/verify GET -- reuse the same UID either way.
+            let (name, uid) = if request.contains("ok-pod") {
+                ("ok-pod", "uid-ok")
+            } else {
+                ("denied-pod", "uid-denied")
+            };
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"default","name":name,"uid":uid,"resourceVersion":"5"}}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "node-uid".into(),
+    };
+    let mut node_resource = resource();
+    node_resource.api.group = String::new();
+    node_resource.api.kind = "Node".into();
+    node_resource.api.plural = "nodes".into();
+    node_resource.namespaced = false;
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let report = sauron::kube::drain::drain(
+        &connection,
+        &verified_policy_context(),
+        1,
+        node_scope,
+        node_resource,
+        pod_resource,
+        1,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        report.cordon_outcome,
+        sauron::mutation::MutationOutcome::Committed
+    );
+    assert_eq!(
+        report.steps.len(),
+        3,
+        "every planned Pod gets exactly one row, never collapsed"
+    );
+    let ds_step = report.steps.iter().find(|s| s.name == "ds-pod").unwrap();
+    assert!(matches!(
+        ds_step.outcome,
+        sauron::mutation::drain::StepOutcome::Excluded(
+            sauron::mutation::drain::Exclusion::DaemonSetOwned
+        )
+    ));
+    let ok_step = report.steps.iter().find(|s| s.name == "ok-pod").unwrap();
+    assert!(matches!(
+        ok_step.outcome,
+        sauron::mutation::drain::StepOutcome::Attempted(
+            sauron::mutation::MutationOutcome::Committed
+        )
+    ));
+    let denied_step = report
+        .steps
+        .iter()
+        .find(|s| s.name == "denied-pod")
+        .unwrap();
+    assert!(matches!(
+        denied_step.outcome,
+        sauron::mutation::drain::StepOutcome::Attempted(
+            sauron::mutation::MutationOutcome::DisruptionBudgetDenied
+        )
+    ));
+    // Exactly two eviction POSTs -- the DaemonSet-owned Pod's exclusion must
+    // never even attempt a request, and a PDB denial must never be retried.
+    assert_eq!(eviction_attempts.load(Ordering::SeqCst), 2);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn drain_never_attempts_any_eviction_when_the_cordon_itself_fails() {
+    use sauron::app::session::Scope;
+    let server = Server::with_request(|request| {
+        assert!(
+            !request.contains("/eviction"),
+            "a failed cordon must mean zero eviction attempts: {request}"
+        );
+        if request.starts_with("GET") {
+            (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"name":"node-1","uid":"node-uid","resourceVersion":"5"}}).to_string(),
+            )
+        } else {
+            (403, json!({"kind":"Status","apiVersion":"v1","status":"Failure","code":403}).to_string())
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "node-uid".into(),
+    };
+    let mut node_resource = resource();
+    node_resource.api.group = String::new();
+    node_resource.api.kind = "Node".into();
+    node_resource.api.plural = "nodes".into();
+    node_resource.namespaced = false;
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let report = sauron::kube::drain::drain(
+        &connection,
+        &verified_policy_context(),
+        1,
+        node_scope,
+        node_resource,
+        pod_resource,
+        1,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        report.cordon_outcome,
+        sauron::mutation::MutationOutcome::Forbidden
+    );
+    assert!(
+        report.steps.is_empty(),
+        "no Pod list is even fetched when the cordon itself fails"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn drain_pre_cancelled_attempts_nothing_and_reports_zero_steps() {
+    use sauron::app::session::Scope;
+    let server = Server::new(|_| {
+        panic!("a pre-cancelled drain must send zero requests of any kind, including the cordon")
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let node_scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/nodes".into(),
+        namespace: String::new(),
+        name: "node-1".into(),
+        uid: "node-uid".into(),
+    };
+    let mut node_resource = resource();
+    node_resource.api.group = String::new();
+    node_resource.api.kind = "Node".into();
+    node_resource.api.plural = "nodes".into();
+    node_resource.namespaced = false;
+    let mut pod_resource = resource();
+    pod_resource.api.kind = "Pod".into();
+    pod_resource.api.plural = "pods".into();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let report = sauron::kube::drain::drain(
+        &connection,
+        &verified_policy_context(),
+        1,
+        node_scope,
+        node_resource,
+        pod_resource,
+        1,
+        &journal,
+        &cancel,
+    )
+    .await;
+    // Cancellation never undoes anything already committed -- there is
+    // nothing to undo here, since nothing was ever attempted: the cordon
+    // itself is Cancelled, and Drain correctly never lists (let alone
+    // evicts) any Pod on a Node it never even tried to cordon.
+    assert_eq!(
+        report.cordon_outcome,
+        sauron::mutation::MutationOutcome::Cancelled
+    );
+    assert!(report.steps.is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn mutation_evict_pdb_denial_is_distinct_and_never_falls_back_to_delete() {
     use sauron::kube::mutation::commit;
     use sauron::mutation::{Confirmation, workflow};

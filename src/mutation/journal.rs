@@ -29,6 +29,16 @@ pub enum Phase {
     /// the `CommitResult` it follows -- never implies the commit itself was
     /// re-evaluated or retried.
     VerificationResult,
+    /// M8B.5: Drain's own bracket around a cordon + a sequence of per-Pod
+    /// eviction attempts -- each of which still produces its OWN ordinary
+    /// `PolicyEvaluated`/`CommitStarted`/`CommitResult`/`VerificationResult`
+    /// records (nothing about Drain replaces or bypasses those); these three
+    /// phases only mark where a drain run started, each Pod step within it,
+    /// and where it finished, so the audit trail can be grouped without
+    /// inventing a second journal.
+    DrainStarted,
+    DrainStep,
+    DrainFinished,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

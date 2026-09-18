@@ -322,7 +322,7 @@ async fn revalidate(
     Ok(resource_version)
 }
 
-fn record(
+pub(crate) fn record(
     intent: &MutationIntent,
     phase: Phase,
     decision: Option<PolicyDecision>,

@@ -13,7 +13,7 @@ and status reference are distinct provenance classes. No name heuristics.
 | Slice | Contract | Implementation | Unit / fake API | Live evidence | Bugs / gaps | Verdict |
 | --- | --- | --- | --- | --- | --- | --- |
 | M6.0 | Canonical scoped identities, provenance, bounded deterministic graph and traversal | TESTED foundation | 5 new unit tests; 110 unit + 19 fake HTTP suite | None | Unresolved-target/source-error presentation arrives with resolver; no UI yet | NOT ACCEPTED live |
-| M6.1 | Generic owner UID validation; Pod/workload explicit references | NOT STARTED | Pending | None | Metadata-only Secret resolution required | NOT ACCEPTED |
+| M6.1 | Generic owner UID validation; Pod/workload explicit references | IMPLEMENTING transport integration | 4 extractor + 2 resolver unit tests; 3 graph fake HTTP; full suite 116 unit + 22 fake HTTP green | Guarded m6-test PASS: Deployment→RS→Pod UID chain, template config/Secret/SA resolution | No aggregate report/UI; no operation-wide request budget yet | NOT ACCEPTED |
 | M6.2 | Service selectors, reverse selectors, EndpointSlice/Endpoints, Ingress | NOT STARTED | Pending | None | Never infer Pods from IP | NOT ACCEPTED |
 | M6.3 | Storage and bounded reverse config/identity/mount references | NOT STARTED | Pending | None | No arbitrary CRD reference inference | NOT ACCEPTED |
 | M6.4 | Adjacent with UID-safe canonical navigation/history | NOT STARTED | Pending | None | Registry/help/32x9 required | NOT ACCEPTED |
@@ -74,6 +74,18 @@ forward active: cycles, graph operations, RSS/fds/threads/tasks, errors and part
 These are observations, not proof of leak freedom.
 
 ## Journal
+
+- M6.1: shared extractor covers every requested PodSpec path including six workload
+  prefixes. Exact GVK lookup, namespace validation, expected UID rejection,
+  metadata-only Secret reads (406 stays unsupported), cancellation and per-request
+  timeout implemented. Reverse owner scans inspect one explicit GVR/page, 200
+  candidates/50 children, exact owner UID/GVK/name; metadata only. Cluster-owner
+  to namespaced-child scan currently explicitly Unsupported (no implicit all-ns
+  widening). Fake HTTP proves metadata Accept header/no fallback and replacement.
+  Full locked checks green: 116 unit + 22 fake HTTP. Added isolated `sauron-m6`
+  fixtures and `relationships_live` opt-in test through guarded m6-test script;
+  first live run PASS: real owner chain and three template reference targets;
+  Secret result has neither data nor stringData. No production access.
 
 - M6.0 foundation: canonical GVR/GVK/scope/UID validation, separate provenance,
   ordered evidence dedup, atomic node/edge bounds, cycle/depth handling, shared

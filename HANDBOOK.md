@@ -305,8 +305,22 @@ Five unit tests cover scope/replacement identity, GVK/namespace validation,
 cycles, deterministic dedup, evidence and atomic bounds. Locked fmt/check/clippy
 clean; 110 unit + 19 fake HTTP passed, one opt-in live test ignored.
 Corrected stale feature-matrix/limitation text left over before M5 acceptance.
-Next: finish model validation (unresolved targets, freshness, source errors),
-then M6.1 reference extraction/resolution. Do not treat foundation as live acceptance.
+Foundation committed as `14f4562`. M6.1 now has pure typed reference extraction
+in `src/graph/references.rs`: generic owner claims with required UID; common
+PodSpec extractor for six workloads plus Pods, including init/ephemeral/env/
+projected volumes. Exact JSON-pointer evidence, dedup, 128 targets/16 paths,
+4096 inspected array entries; malformed/partial remain explicit. These are
+unresolved claims, not verified graph edges. Four tests added, checks pending.
+Transport now in `src/kube/relationships.rs`: exact catalog GVK resolution,
+owner scope/UID checks, metadata-only Secret GET (no full-body fallback),
+cancellation/timeout and bounded per-GVR metadata reverse-ownership scan.
+116 unit + 22 fake HTTP green in full locked suite. Guarded fixture addition
+created only `sauron-m6` namespace and m6-config/m6-secret/m6-sa/m6-web;
+`scripts/test-cluster.sh m6-test` runs new opt-in relationships_live test.
+First live run PASS (real Deployment→RS→Pod ownership, config/Secret/SA
+references; Secret content absent). Next: aggregate reports with operation-wide budgets,
+source failures and target freshness; then network/storage edges and UI.
+No UI or M6 slice acceptance yet; Explain is unchanged.
 
 ### 2026-09-17 — M5.6 accepted, M5 fully closed (combined adversarial pass + soak)
 

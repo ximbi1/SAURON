@@ -221,6 +221,10 @@ impl Drop for Server {
 }
 impl Server {
     async fn new(handler: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Self {
+        Self::with_request(move |request| handler(request.split_whitespace().nth(1).unwrap_or("/")))
+            .await
+    }
+    async fn with_request(handler: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let url = format!("http://{}", listener.local_addr().expect("address"));
         let handler = Arc::new(handler);
@@ -237,8 +241,7 @@ impl Server {
                     data.extend_from_slice(&buffer[..n]);
                 }
                 let request = String::from_utf8_lossy(&data);
-                let path = request.split_whitespace().nth(1).unwrap_or("/");
-                let (code, body) = handler(path);
+                let (code, body) = handler(&request);
                 let response = format!(
                     "HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -251,6 +254,115 @@ impl Server {
     fn client(&self) -> Client {
         Client::try_from(Config::new(self.url.parse().expect("URI"))).expect("client")
     }
+}
+
+#[tokio::test]
+async fn graph_secret_resolution_requests_metadata_only_without_fallback() {
+    use sauron::{
+        evidence::Unknown,
+        graph::{Provenance, references::Target},
+        kube::relationships::fetch_target,
+    };
+    for code in [200, 403, 406] {
+        let server = Server::with_request(move |request| {
+            assert!(request.starts_with("GET /api/v1/namespaces/default/secrets/s "));
+            let header = request.lines().find(|line| line.to_ascii_lowercase().starts_with("accept:")).expect("accept");
+            assert!(header.contains("as=PartialObjectMetadata"));
+            assert!(!header.contains(','), "no full-object fallback");
+            let body = if code == 200 { json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"default","name":"s","uid":"secret-uid"}}) }
+            else { json!({"kind":"Status","apiVersion":"v1","status":"Failure","message":"private sentinel","reason":"Forbidden","code":code}) };
+            (code, body.to_string())
+        }).await;
+        let mut secret = resource();
+        secret.api.kind = "Secret".into();
+        secret.api.plural = "secrets".into();
+        let connection = connection_with(server.client(), vec![secret]);
+        let source = Object::new(pod("p-uid", "1", "p"));
+        let target = Target {
+            api_version: "v1".into(),
+            kind: "Secret".into(),
+            namespace: "default".into(),
+            name: "s".into(),
+            expected_uid: None,
+            provenance: Provenance::ExplicitReference,
+        };
+        let result =
+            fetch_target(&connection, 1, &source, &target, &CancellationToken::new()).await;
+        if code == 200 {
+            let (_, id, object) = result.expect("metadata");
+            assert_eq!(id.uid, "secret-uid");
+            assert!(object.value.get("data").is_none());
+        } else {
+            assert_eq!(
+                result.expect_err("explicit unknown"),
+                if code == 403 {
+                    Unknown::Forbidden
+                } else {
+                    Unknown::Unsupported
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn graph_target_replacement_and_precancel_reject_identity() {
+    use sauron::{
+        evidence::Unknown,
+        graph::{Provenance, references::Target},
+        kube::relationships::fetch_target,
+    };
+    let server = Server::new(|_| (200, pod("replacement", "2", "p").to_string())).await;
+    let connection = connection(server.client());
+    let source = Object::new(pod("source", "1", "child"));
+    let target = Target {
+        api_version: "v1".into(),
+        kind: "Pod".into(),
+        namespace: "default".into(),
+        name: "p".into(),
+        expected_uid: Some("original".into()),
+        provenance: Provenance::OwnerReference,
+    };
+    let cancel = CancellationToken::new();
+    assert_eq!(
+        fetch_target(&connection, 1, &source, &target, &cancel)
+            .await
+            .expect_err("replacement"),
+        Unknown::TargetReplaced
+    );
+    cancel.cancel();
+    assert_eq!(
+        fetch_target(&connection, 1, &source, &target, &cancel)
+            .await
+            .expect_err("cancel"),
+        Unknown::Stale
+    );
+}
+
+#[tokio::test]
+async fn graph_reverse_ownership_is_uid_scoped_bounded_and_metadata_only() {
+    use sauron::kube::relationships::children;
+    let server = Server::with_request(|request| {
+        assert!(request.contains("limit=200"));
+        assert!(request.contains("as=PartialObjectMetadataList"));
+        let matching = json!({"apiVersion":"apps/v1","kind":"ReplicaSet","name":"rs","uid":"owner"});
+        let stale = json!({"apiVersion":"apps/v1","kind":"ReplicaSet","name":"rs","uid":"replacement"});
+        let items: Vec<_> = (0..60).map(|n| json!({"metadata":{"namespace":"default","name":format!("child-{n}"),"uid":format!("uid-{n}"),"ownerReferences":[if n==0 {stale.clone()} else {matching.clone()}]}})).collect();
+        (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","metadata":{"continue":"more"},"items":items}).to_string())
+    }).await;
+    let connection = connection(server.client());
+    let owner = Object::new(
+        json!({"apiVersion":"apps/v1","kind":"ReplicaSet","metadata":{"namespace":"default","name":"rs","uid":"owner"}}),
+    );
+    let (objects, partial, inspected) =
+        children(&connection, &owner, &resource(), &CancellationToken::new())
+            .await
+            .expect("list");
+    assert!(partial);
+    assert_eq!(inspected, 60);
+    assert_eq!(objects.len(), 50);
+    assert!(!objects.iter().any(|o| o.name == "child-0"));
+    assert!(objects.iter().all(|o| o.value.get("spec").is_none()));
 }
 fn resource() -> Resource {
     Resource {

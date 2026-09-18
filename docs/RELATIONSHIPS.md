@@ -31,3 +31,20 @@ and [metadata-only negotiation](https://kubernetes.io/docs/reference/using-api/a
 Namespaced owners must share the dependent's namespace; cluster-scoped dependents
 cannot have namespaced owners. Secret resolution will request PartialObjectMetadata
 only and must not fall back to fetching Secret bodies when negotiation fails.
+
+## M6.1 implementation in progress
+
+`graph::references` shares one PodSpec extractor across Pods, apps/v1 Deployment,
+StatefulSet, DaemonSet, ReplicaSet, batch/v1 Job and CronJob. It preserves JSON
+pointer evidence for ordinary/projected ConfigMap and Secret volumes, PVCs,
+imagePullSecrets, nodeName, serviceAccountName, env/valueFrom and envFrom in regular,
+init and ephemeral containers. Extraction deduplicates targets with multiple paths;
+128 targets, 16 paths/target and 4096 inspected array entries bound allocations/work.
+Unknown CRD spec fields are never interpreted; generic ownerReferences still apply.
+
+`kube::relationships` resolves exact discovered GVK (not aliases or guessed plurals),
+validates namespace rules and expected owner UID, and offers cancellable timed reads.
+Core Secret reads use kube's `get_metadata` with no full-object fallback. Errors retain
+Forbidden/NotFound/Unsupported/TargetReplaced/TimedOut rather than empty relationships.
+These helpers are not yet wired into UI; reverse scans and operation-wide budgets
+remain pending. No new live acceptance claim.

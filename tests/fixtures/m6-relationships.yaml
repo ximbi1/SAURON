@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sauron-m6
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m6-config
+  namespace: sauron-m6
+data:
+  setting: fixture-only
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: m6-secret
+  namespace: sauron-m6
+type: Opaque
+stringData:
+  fixture: not-a-credential
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: m6-sa
+  namespace: sauron-m6
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: m6-web
+  namespace: sauron-m6
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: m6-web
+  template:
+    metadata:
+      labels:
+        app: m6-web
+    spec:
+      serviceAccountName: m6-sa
+      automountServiceAccountToken: false
+      initContainers:
+        - name: initialize
+          image: busybox:1.37
+          command: ["sh", "-c", "exit 0"]
+          envFrom:
+            - configMapRef:
+                name: m6-config
+      containers:
+        - name: app
+          image: busybox:1.37
+          command: ["sleep", "86400"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              memory: 32Mi
+          env:
+            - name: FIXTURE
+              valueFrom:
+                secretKeyRef:
+                  name: m6-secret
+                  key: fixture
+          volumeMounts:
+            - name: configuration
+              mountPath: /fixture
+              readOnly: true
+      volumes:
+        - name: configuration
+          projected:
+            sources:
+              - configMap:
+                  name: m6-config
+              - secret:
+                  name: m6-secret

@@ -1,4 +1,5 @@
 //! On-demand topology metadata, not another Kubernetes object store.
+pub mod references;
 use crate::{
     evidence::{Observation, Origin, Unknown},
     kube::discovery::Resource,

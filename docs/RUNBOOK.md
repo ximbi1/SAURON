@@ -30,7 +30,11 @@ It never falls back to the default kubeconfig and has no production cleanup path
 M6 started 2026-09-18 from accepted M5 (`1a45dbd`; HEAD also includes README).
 M6.0 graph metadata foundation and ledger implemented in the working tree;
 no relationship API collector or UI yet, no M6 acceptance. Current continuation:
-finish M6.0 validation/checks, then explicit-reference/owner resolution. Track
+M6.0 foundation committed `14f4562` (110 unit + 19 fake HTTP green); M6.1
+typed Pod/workload/owner extraction and timed metadata-aware transport implemented.
+Full locked suite 116 unit + 22 fake HTTP green; new guarded `m6-fixtures` and
+`m6-test` commands, live ownership/template reference check PASS. Aggregate
+collector and UI next. Track
 actual checks and live evidence in [M6_ACCEPTANCE.md](M6_ACCEPTANCE.md).
 No cluster operations performed during this initial foundation work.
 

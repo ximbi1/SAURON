@@ -5,6 +5,7 @@ pub mod forward;
 pub mod logs;
 pub mod metrics;
 pub mod printer;
+pub mod relationships;
 pub mod watch;
 
 use crate::config::{Config as AppConfig, Settings};

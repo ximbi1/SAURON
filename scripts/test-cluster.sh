@@ -54,6 +54,14 @@ case "${1:-check}" in
   m5-health-fixtures)
     kube_test apply -f "$repo_dir/tests/fixtures/m5-health.yaml"
     ;;
+  m6-fixtures)
+    kube_test apply -f "$repo_dir/tests/fixtures/m6-relationships.yaml"
+    kube_test rollout status deployment/m6-web -n sauron-m6 --timeout=120s
+    ;;
+  m6-test)
+    cd "$repo_dir"
+    SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test relationships_live -- --ignored --nocapture
+    ;;
   m4-recreate)
     kube_test delete pod m4-sessions -n sauron-fixtures --wait=true --timeout=45s
     kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"

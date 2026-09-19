@@ -407,43 +407,139 @@ combined acceptance twice. Then reconcile `HANDBOOK.md`,
 `docs/RUNBOOK.md`, `README.md`, this document; clean worktree; local
 annotated tag `m9-accepted`; never pushed without explicit authorization.
 
-## Live-test strategy (open question, must resolve before M9.1's live evidence)
+## Live-test strategy (RESOLVED 2026-09-19 — option (b), dedicated cluster)
 
-Installing full Flux and/or Argo CD controllers into the existing
-`kind-sauron-test` cluster risks destabilizing the M1-M8B regression
-fixtures/namespaces this same cluster already hosts (resource pressure on
-a constrained kind node, CRD/webhook interactions, controller-owned
-namespaces). Three options, to be decided per-integration as each slice
-starts rather than pre-committed here:
+**Decision**: option (b) — a dedicated, disposable second kind cluster
+for GitOps controller-backed live evidence. `kind-sauron-test` is never
+touched by Flux or Argo CD installation and remains exactly as it is for
+M1-M8B regression. Rationale: installing full Flux and/or Argo CD
+controllers into the existing cluster risks destabilizing the M1-M8B
+regression fixtures/namespaces it already hosts (resource pressure,
+CRD/webhook interactions, controller-owned namespaces) — a dedicated
+cluster removes that risk entirely rather than accepting or mitigating
+it.
 
-(a) Install real Flux/Argo CD controllers into `kind-sauron-test`
-    alongside existing fixtures, accepting the resource/stability risk,
-    with a documented rollback plan if regression fixtures degrade.
-(b) Provision a dedicated, disposable second kind cluster for GitOps
-    controller-backed live evidence, keeping `kind-sauron-test` untouched
-    for M1-M8B regression exactly as today.
-(c) CRD-fixture-only for read paths (apply the CRDs and hand-crafted
-    Custom Resource fixtures with realistic `status` blocks, without a
-    real reconciling controller) plus fake-HTTP for guarded actions,
-    with an explicit, permanent bounded-limitation note (mirroring
-    M8B.5 Drain's own "no live single-node drain test" precedent) that
-    no *real* controller-backed convergence was exercised live.
+### M9 dedicated cluster lifecycle
+
+- **Cluster**: `sauron-m9` (Docker container `sauron-m9-control-plane`,
+  same `kindest/node:v1.33.1` image and `tests/fixtures/kind.yaml`
+  config as `kind-sauron-test` — no new kind config needed).
+- **Context**: `kind-sauron-m9`.
+- **Kubeconfig**: `.test-cluster-m9/config` (dedicated, `chmod 600`,
+  gitignored — mirrors `.test-cluster/config` exactly, never the
+  default `~/.kube/config`).
+- **Create**: `scripts/bootstrap-test-cluster-m9.sh` — mirrors
+  `scripts/bootstrap-test-cluster.sh` verbatim (refuses a non-local
+  Docker endpoint, backs up any previous dedicated kubeconfig under
+  `.test-cluster-m9/previous.*` rather than overwriting silently,
+  `kind create cluster --name sauron-m9 ... --kubeconfig
+  .test-cluster-m9/config`, `chmod 600`). Idempotent: if the container
+  already exists, it just re-verifies instead of recreating.
+- **Verify (the identity guard)**: `scripts/test-cluster-m9.sh` — the
+  exact same three-part guard `test-cluster.sh` uses for
+  `kind-sauron-test`, restated for this cluster: (1) the dedicated
+  kubeconfig file must exist, (2) `docker inspect`'s
+  `io.x-k8s.kind.cluster` label on `sauron-m9-control-plane` must equal
+  `sauron-m9` (never inferred from the container *name* alone), (3) the
+  kubeconfig's own recorded API server URL must exactly equal
+  `https://<the Docker-reported loopback port binding>` for that same
+  container. All three must hold before any command in the script runs
+  — exactly the non-heuristic, external-proof model `test-cluster.sh`
+  already established, applied to a second cluster rather than weakened
+  or shortcut for it. **No mutation authorization ever comes from the
+  context name string** — the app's own `mutation_test_cluster_verified`
+  flag (set only via the explicit `--mutation-test-cluster-verified` CLI
+  flag when launching against this cluster) is the actual authorization,
+  identical to every M7/M8/M8B live test's own model; this guard script
+  is what makes it *safe* to pass that flag, not what grants it.
+- **Install Flux**: `scripts/test-cluster-m9.sh flux-install` — fetches
+  the pinned `v2.9.5` official install manifest once (cached under
+  `.test-cluster-m9/flux-install-v2.9.5.yaml`, gitignored) and applies
+  it with plain `kubectl apply -f` — no `flux` CLI involved at all, not
+  even for cluster setup (consistent with M9's own "never shell out"
+  principle, and with `test-cluster.sh`'s own precedent of installing
+  `metrics-server` via a plain kustomize/kubectl path, not a vendor
+  CLI). Waits for `source-controller`/`kustomize-controller`/
+  `helm-controller`/`notification-controller` rollouts before returning.
+- **Fixtures**: `scripts/test-cluster-m9.sh flux-fixtures` — applies
+  `tests/fixtures/m9-flux.yaml` (a real `GitRepository` against a small
+  public repo, a `Kustomization` reconciling from it, a `HelmRepository`,
+  and a `HelmRelease` — real, controller-reconciled objects, not
+  hand-crafted status stand-ins, since the whole point of the dedicated
+  cluster is real controller-backed evidence).
+- **Reset**: `scripts/test-cluster-m9.sh flux-reset` — re-applies the
+  same fixture file (Flux's own reconciliation is idempotent and
+  self-correcting, so re-apply is sufficient; no delete+recreate dance
+  needed, unlike M8B's disposable-Pod fixtures).
+- **Live tests**: `scripts/test-cluster-m9.sh flux-test` — runs
+  `cargo test --test mutation_m9_live -- --ignored --nocapture` against
+  `SAURON_TEST_M9_KUBECONFIG`, mirroring `m8b-test`'s own convention
+  exactly (a distinct env var name so a stray unset `SAURON_TEST_
+  KUBECONFIG` can never accidentally point M9 live tests at
+  `kind-sauron-test` instead).
+- **Destroy**: `kind delete cluster --name sauron-m9` (manual, not
+  wrapped in a script — destruction is rare enough, and dangerous enough
+  as a scriptable one-liner, that it stays an explicit manual command
+  exactly like nothing in this repo auto-deletes `kind-sauron-test`
+  either).
+- `scripts/test-cluster.sh` (the `kind-sauron-test` guard) is
+  **untouched** — no new cases, no shared code path, no parameterization
+  that could weaken its own guard for the M1-M8B cluster. The two
+  scripts are siblings, not a shared abstraction, specifically so a bug
+  in the M9 script can never affect the M1-M8B script's own behavior.
+
+### Environment finding recorded during first bootstrap (classified: environment, not app)
+
+The first `flux-install` attempt failed: every Flux controller entered
+`CrashLoopBackOff` with **zero log output**, and `kube-apiserver` itself
+logged `error creating fsnotify watcher: too many open files` while
+CoreDNS could not even reach the API server's ClusterIP. Root cause:
+`fs.inotify.max_user_instances` was at the Linux default (128) — too low
+to run two kind clusters' control planes simultaneously on this host
+(each apiserver/kubelet/controller creates its own inotify watchers for
+cert/CA file rotation). This is a well-known kind-on-Linux host
+requirement, not a SAURON defect, not a Flux defect, and not a memory
+problem (RAM headroom was ample throughout). Fixed by raising
+`fs.inotify.max_user_instances` to 512 and `fs.inotify.max_user_watches`
+to 524288 (both `sysctl -w` immediately and persisted in
+`/etc/sysctl.d/99-sauron-kind.conf`), then destroying and recreating
+`sauron-m9` fresh so every control-plane component started clean under
+the corrected limit (raising the limit alone did not self-heal the
+already-degraded first attempt — the API server's own retry loop had
+already left it in a bad state). After recreation, all 7 Flux
+controllers reached `Running`/`Ready` with zero restarts. Recorded here
+as a **host prerequisite** for anyone reproducing M9's live evidence,
+not as a workaround baked into any script (the sysctl change is a
+one-time host setup step, correctly outside `bootstrap-test-cluster-m9.sh`
+itself, which does not require elevated privileges).
 
 Helm needs no controller at all (`helm` itself is a client-side
 operation against Kubernetes storage objects), so Helm's live evidence
-can use a real, disposable Helm release installed into a dedicated
-`sauron-m9` namespace on the existing `kind-sauron-test` cluster with far
-less risk than Flux/Argo — this is the default plan for M9.5/M9.6 unless
-a concrete problem emerges.
+(M9.5/M9.6) uses a real, disposable Helm release installed into a
+dedicated namespace on the existing `kind-sauron-test` cluster — far
+lower risk than a reconciling controller, and no reason to place it on
+`sauron-m9` instead.
 
-Whichever option is chosen for Flux/Argo, it is decided and recorded in
-the Journal at the start of M9.1/M9.3 respectively, not silently assumed.
+Argo CD's own cluster placement (same `sauron-m9`, alongside Flux, vs. a
+third dedicated cluster) is deliberately **not** decided here — see Open
+question 1a below, which must be resolved before M9.3 starts.
 
 ## Open architectural questions requiring resolution before implementation
 
-1. **Flux/Argo live evidence cluster** (see Live-test strategy above) —
-   resolve at the start of M9.1 (Flux) and M9.3 (Argo CD) independently;
-   they may reach different answers.
+1. **Flux/Argo live evidence cluster** — **RESOLVED 2026-09-19**: a
+   dedicated `sauron-m9` kind cluster (option (b), see Live-test strategy
+   above), never `kind-sauron-test`. Flux is installed there now.
+   1a. **Argo CD's own cluster placement** — still open, resolve at the
+       start of M9.3: install Argo CD alongside Flux in the same
+       `sauron-m9` cluster, or provision a third dedicated cluster?
+       Considerations to weigh then (not pre-judged here): Argo CD's own
+       controller/repo-server/API-server/redis footprint is larger than
+       Flux's, so combined resource pressure on one kind node needs a
+       real check (not an assumption) before deciding; conversely a
+       third cluster multiplies the same inotify/host-limit exposure
+       this document's own environment finding just surfaced. This is
+       exactly the kind of decision this milestone's own instructions
+       require stopping and asking about before proceeding into M9.3.
 2. **Argo CD sync execution path** — does the installed Argo CD version's
    CRD alone support requesting a sync (a spec-level operation field), or
    does it require calling the Argo API service? Resolve at the start of
@@ -533,6 +629,29 @@ only then continue.
   warnings`) clean.
   Next: M9.1 (Flux read-only views), starting with resolving the
   Live-test-strategy open question for Flux specifically.
+- 2026-09-19: Live-test strategy open question RESOLVED (option (b)) and
+  the M9 dedicated cluster stood up, per explicit user instruction before
+  M9.1 began. `scripts/bootstrap-test-cluster-m9.sh` and
+  `scripts/test-cluster-m9.sh` added (siblings of the existing
+  `kind-sauron-test` scripts, zero shared code path, zero changes to
+  `scripts/test-cluster.sh` itself); `.test-cluster-m9/` gitignored. The
+  guard script enforces the exact same three-part non-heuristic identity
+  proof (kubeconfig file presence, Docker label, API-server-URL-matches-
+  reported-port) as `test-cluster.sh`, applied to `sauron-m9`/
+  `kind-sauron-m9` instead of `sauron-test`/`kind-sauron-test`.
+  Real Flux `v2.9.5` installed via a pinned, cached, plain-`kubectl`-
+  applied manifest (no `flux` CLI anywhere in the setup path).
+  **Environment finding** (classified environment, not app -- see the
+  Live-test strategy section above for the full account): the first
+  install attempt left every Flux controller in a silent, log-less
+  `CrashLoopBackOff` because `fs.inotify.max_user_instances` was at the
+  Linux default (128), too low to run two kind control planes on this
+  host at once. Fixed by raising it to 512 (`fs.inotify.max_user_watches`
+  to 524288) and recreating `sauron-m9` fresh; all 7 controllers then
+  reached `Running` with zero restarts. `kind-sauron-test` was verified
+  unaffected throughout (`scripts/test-cluster.sh check` stayed green).
+  Recorded as a one-time host prerequisite, not a script workaround.
+  Next: M9.1 implementation proper (Flux read-only views), now unblocked.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

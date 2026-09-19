@@ -124,6 +124,33 @@ pub fn extract(object: &Object) -> References {
             format!("/metadata/ownerReferences/{i}"),
         );
     }
+    // Matched by API group only, never the exact version -- Flux's own
+    // sourceRef/dependsOn schema is stable across its v1beta2->v1
+    // migrations, and group+kind is exactly what M9.0's own capability
+    // discovery already keys on for the same reason.
+    match (group(&object.api_version), object.kind.as_str()) {
+        ("kustomize.toolkit.fluxcd.io", "Kustomization") => {
+            flux_source_ref(
+                &mut out,
+                &object.value,
+                &object.namespace,
+                "/spec/sourceRef",
+            );
+            flux_depends_on(&mut out, object);
+            return out;
+        }
+        ("helm.toolkit.fluxcd.io", "HelmRelease") => {
+            flux_source_ref(
+                &mut out,
+                &object.value,
+                &object.namespace,
+                "/spec/chart/spec/sourceRef",
+            );
+            flux_depends_on(&mut out, object);
+            return out;
+        }
+        _ => {}
+    }
     let base = match (object.api_version.as_str(), object.kind.as_str()) {
         ("v1", "Pod") => "/spec",
         ("apps/v1", "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet")
@@ -135,6 +162,89 @@ pub fn extract(object: &Object) -> References {
         pod_spec(&mut out, spec, base, &object.namespace);
     }
     out
+}
+
+fn group(api_version: &str) -> &str {
+    api_version.split_once('/').map(|(g, _)| g).unwrap_or("")
+}
+
+// Flux does not persist a resolved apiVersion inside sourceRef (only
+// kind/name/namespace), and its source kinds' own API version has
+// migrated over Flux's history (v1beta2 -> v1) -- StatusReference is the
+// existing, already-designed escape hatch for "the kind is known, the
+// exact served version is not", exactly like PV's own claimRef
+// (storage.rs) already uses it for the same reason, not a new provenance
+// meaning invented for Flux.
+fn flux_source_ref(out: &mut References, root: &Value, ns: &str, pointer: &str) {
+    let Some(source) = root.pointer(pointer) else {
+        return;
+    };
+    let (Some(kind), Some(name)) = (
+        source.get("kind").and_then(Value::as_str),
+        source
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty()),
+    ) else {
+        out.malformed = true;
+        return;
+    };
+    let namespace = source
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or(ns);
+    out.add(
+        Target {
+            api_version: String::new(),
+            kind: kind.into(),
+            namespace: namespace.into(),
+            name: name.into(),
+            expected_uid: None,
+            provenance: Provenance::StatusReference,
+        },
+        pointer.into(),
+    );
+}
+
+// dependsOn always names another object of the SAME kind/apiVersion as
+// the referencing one -- unlike sourceRef, there is no version ambiguity
+// here at all, so this is a plain ExplicitReference.
+fn flux_depends_on(out: &mut References, object: &Object) {
+    let Some(deps) = object
+        .value
+        .pointer("/spec/dependsOn")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for (i, dep) in deps.iter().enumerate() {
+        if !out.budget() {
+            return;
+        }
+        let Some(name) = dep
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            out.malformed = true;
+            continue;
+        };
+        let namespace = dep
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or(&object.namespace);
+        out.add(
+            Target {
+                api_version: object.api_version.clone(),
+                kind: object.kind.clone(),
+                namespace: namespace.into(),
+                name: name.into(),
+                expected_uid: None,
+                provenance: Provenance::ExplicitReference,
+            },
+            format!("/spec/dependsOn/{i}"),
+        );
+    }
 }
 
 fn pod_spec(out: &mut References, spec: &Value, base: &str, ns: &str) {
@@ -297,5 +407,93 @@ mod tests {
         let refs = extract(&pod(json!({"imagePullSecrets":secrets})));
         assert_eq!(refs.targets.len(), 128);
         assert!(refs.partial);
+    }
+
+    #[test]
+    fn kustomization_source_ref_is_a_status_reference_with_no_guessed_api_version() {
+        let o = Object::new(json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+            "kind": "Kustomization",
+            "metadata": {"namespace": "sauron-m9", "name": "podinfo-kustomize"},
+            "spec": {"sourceRef": {"kind": "GitRepository", "name": "podinfo"}},
+        }));
+        let refs = extract(&o);
+        assert_eq!(refs.targets.len(), 1);
+        let (target, paths) = refs.targets.iter().next().unwrap();
+        assert_eq!(target.kind, "GitRepository");
+        assert_eq!(target.name, "podinfo");
+        assert_eq!(
+            target.namespace, "sauron-m9",
+            "sourceRef.namespace defaults to the referencing object's own namespace"
+        );
+        assert_eq!(
+            target.api_version, "",
+            "Flux does not persist a resolved apiVersion in sourceRef -- never guessed"
+        );
+        assert_eq!(target.provenance, Provenance::StatusReference);
+        assert_eq!(paths.iter().next().unwrap(), "/spec/sourceRef");
+        assert!(!refs.malformed);
+    }
+
+    #[test]
+    fn kustomization_depends_on_targets_the_same_kind_and_version_unambiguously() {
+        let o = Object::new(json!({
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+            "kind": "Kustomization",
+            "metadata": {"namespace": "sauron-m9", "name": "podinfo-dependent"},
+            "spec": {
+                "sourceRef": {"kind": "GitRepository", "name": "podinfo-missing"},
+                "dependsOn": [{"name": "podinfo-kustomize"}, {"name": "other", "namespace": "ns2"}],
+            },
+        }));
+        let refs = extract(&o);
+        assert_eq!(refs.targets.len(), 3);
+        let dep = refs
+            .targets
+            .keys()
+            .find(|t| t.name == "podinfo-kustomize")
+            .expect("dependsOn target");
+        assert_eq!(dep.kind, "Kustomization");
+        assert_eq!(dep.api_version, "kustomize.toolkit.fluxcd.io/v1");
+        assert_eq!(dep.namespace, "sauron-m9");
+        assert_eq!(dep.provenance, Provenance::ExplicitReference);
+        let other = refs
+            .targets
+            .keys()
+            .find(|t| t.name == "other")
+            .expect("explicit-namespace dependsOn target");
+        assert_eq!(other.namespace, "ns2");
+    }
+
+    #[test]
+    fn helm_release_chart_source_ref_is_extracted_from_its_own_nested_path() {
+        let o = Object::new(json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2",
+            "kind": "HelmRelease",
+            "metadata": {"namespace": "sauron-m9", "name": "podinfo-helm"},
+            "spec": {"chart": {"spec": {"sourceRef": {"kind": "HelmRepository", "name": "podinfo", "namespace": "sauron-m9"}}}},
+        }));
+        let refs = extract(&o);
+        assert_eq!(refs.targets.len(), 1);
+        let target = refs.targets.keys().next().unwrap();
+        assert_eq!(target.kind, "HelmRepository");
+        assert_eq!(target.name, "podinfo");
+        assert_eq!(target.provenance, Provenance::StatusReference);
+        assert!(!refs.malformed);
+    }
+
+    #[test]
+    fn a_flux_crd_with_an_unrelated_group_never_matches_the_flux_dispatch() {
+        // A foreign CRD that happens to reuse the Kind "Kustomization" in a
+        // different group must never be mistaken for Flux's own -- dispatch
+        // is by (group, kind), never kind alone, matching M9.0's own
+        // discovery precedent.
+        let o = Object::new(json!({
+            "apiVersion": "other.example.com/v1",
+            "kind": "Kustomization",
+            "metadata": {"namespace": "n"},
+            "spec": {"sourceRef": {"kind": "GitRepository", "name": "x"}},
+        }));
+        assert!(extract(&o).targets.is_empty());
     }
 }

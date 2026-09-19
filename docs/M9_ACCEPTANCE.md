@@ -147,7 +147,7 @@ context name. Never push/publish anything without explicit authorization.
 | Slice | Scope | Verdict |
 | --- | --- | --- |
 | M9.0 | Shared integration identity/capability-discovery model | ACCEPTED |
-| M9.1 | Flux read-only views (Kustomization, HelmRelease, GitRepository, OCIRepository, HelmRepository, Bucket, Image* if available) | PLANNED |
+| M9.1 | Flux read-only views (Kustomization, HelmRelease, GitRepository, OCIRepository, HelmRepository, Bucket, Image* if available) | ACCEPTED |
 | M9.2 | Flux guarded actions (reconcile, suspend, resume) | PLANNED |
 | M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | PLANNED |
 | M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | PLANNED |
@@ -652,6 +652,98 @@ only then continue.
   unaffected throughout (`scripts/test-cluster.sh check` stayed green).
   Recorded as a one-time host prerequisite, not a script workaround.
   Next: M9.1 implementation proper (Flux read-only views), now unblocked.
+- 2026-09-19: M9.1 (Flux read-only views) implemented and ACCEPTED.
+  - **Listing/browsing needed zero new code**, exactly as this document's
+    own contract predicted: Flux's CRDs (`Kustomization`, `HelmRelease`,
+    `GitRepository`, `OCIRepository`, `HelmRepository`, `Bucket`, and the
+    three Image* automation kinds) are just catalogued resources once
+    discovered (M9.0's own `Catalog::group_kind`); M3's existing CRD
+    `additionalPrinterColumns` support already renders each kind's own
+    `STATUS`/`Ready` column in the generic table with no Flux-specific
+    code -- confirmed live (`:kustomizations.kustomize.toolkit.fluxcd.io`
+    showed a real `STATUS` column with `Ready=True` immediately).
+  - **`integrations::flux`** added: `KINDS` (the 9 expected kinds for
+    M9.0's discovery), `STATUS_KINDS` (the 6 with reconciliation-shaped
+    status: `Kustomization`/`HelmRelease`/`GitRepository`/
+    `OCIRepository`/`HelmRepository`/`Bucket`), and `status_report()` --
+    a pure renderer showing every condition Flux reported (never
+    filtered to just `Ready`; `HelmRelease` reports `Ready` AND
+    `Released` as two separate facts, both shown), `observedGeneration`
+    staleness (including Flux's own `-1` "never reconciled" sentinel,
+    discovered live and shown distinctly from ordinary staleness),
+    suspend state, revision fields, `dependsOn`, and the source
+    reference -- all rendered verbatim as evidence, never fed into a
+    second health engine. The three Image* automation kinds are
+    discovered and generically browsable but do not get a dedicated
+    status renderer in this pass (their own shape -- image scan
+    results/policies -- is different enough to warrant separate design
+    later): a bounded, documented limitation, not a silent gap.
+  - **Adjacent/Xray integration** (`graph::references.rs`): a new
+    `(group, kind)`-matched dispatch branch (group-only, version-
+    tolerant, matching M9.0's own discovery precedent and Flux's real
+    v1beta2->v1 migration history) extracts `Kustomization.spec.
+    sourceRef`/`HelmRelease.spec.chart.spec.sourceRef` and both kinds'
+    `spec.dependsOn`. **Real finding while building this against live
+    data**: Flux does not persist a resolved `apiVersion` inside
+    `sourceRef` at all (confirmed against a real `kubectl get -o json`)
+    -- hardcoding one would silently break across Flux's own API version
+    migrations. Resolved by reusing `Provenance::StatusReference`'s
+    existing "kind is known, exact served version is not" exemption
+    (already established by `storage.rs`'s own `claimRef` handling for
+    the same underlying reason), rather than inventing a new provenance
+    meaning or guessing a version. `dependsOn` has no such ambiguity
+    (same kind/version as the referencing object) and uses a plain
+    `ExplicitReference`.
+  - **`:flux` command** added (palette-only, no bound key yet): shows
+    the currently selected object's own Flux status
+    (`integrations::flux::is_status_kind` gate) if one of the 6
+    reconciliation kinds is selected, otherwise the M9.0 capability
+    report for the whole cluster. Read-only, zero network beyond what
+    discovery/watch already fetched.
+  - **Live evidence**: real Flux `v2.9.5` on `sauron-m9`, real `podinfo`
+    `GitRepository`/`Kustomization`/`HelmRepository`/`HelmRelease`
+    (`tests/fixtures/m9-flux.yaml`, mirroring the standard Flux
+    getting-started tutorial's own fixture shape) plus a deliberately
+    suspended, never-reconciled `Kustomization` with a missing source and
+    a real `dependsOn` edge, for exactly the "missing referenced source"/
+    "never reconciled"/"dependsOn" coverage this document's own M9.1
+    contract required. `tests/mutation_m9_live.rs` (4 tests, run twice
+    clean via `scripts/test-cluster-m9.sh flux-test`): discovery reports
+    every installed kind present; a `Ready` Kustomization's status and
+    resolved `GitRepository` source reference (resolved against the
+    REAL discovery catalog, not a fake one, proving the empty-
+    `api_version`/`StatusReference` path genuinely works live); a
+    `HelmRelease` showing both `Ready` and `Released`; the suspended
+    Kustomization showing the `-1` sentinel, its real `dependsOn` edge,
+    and proof that its missing source's KIND resolves (GitRepository is
+    installed) while the named OBJECT genuinely does not exist (a real
+    404, never fabricated). Full M1-M8B regression (`accept-m3.py`
+    through `accept-m8b.py`) reconfirmed green -- zero drift from
+    touching shared `graph::references.rs`/`app/mod.rs`.
+  - **Interactive evidence**: a manual tmux smoke check (not a full
+    `accept-m9.py` script, which is deferred to M9.7 per M8B's own
+    precedent of deferring combined interactive acceptance to its `.7`
+    slice) confirmed `:flux`'s status view, the generic table's own CRD
+    printer columns, and Adjacent's live reference resolution all work
+    end-to-end in the real terminal against `sauron-m9`.
+  Evidence: 6 unit tests (`integrations::flux::tests`); 4 unit tests
+  (`graph::references::tests`: sourceRef is a `StatusReference` with no
+  guessed `api_version`; `dependsOn` targets the same kind/version
+  unambiguously and honors an explicit namespace; HelmRelease's nested
+  chart sourceRef path; an unrelated CRD sharing the `Kustomization`
+  Kind name in a different group never matches); 2 app-level tests
+  (`:flux` shows the capability report when Flux is absent, and the
+  object status when a Flux kind is selected -- both issue zero network
+  tasks); 1 grammar test; 4 live tests (above), run twice. No new fake-
+  HTTP test: M9.1 introduces zero new network code (discovery reuses the
+  connect-time `Catalog`, status rendering reads already-synced
+  watch/store data) -- everything network-shaped is already covered by
+  M6's own `read_bounded`/`resolve_target` fake-HTTP tests, reused
+  as-is. Full locked suite: 265 unit + 66 fake HTTP, fmt/check/clippy
+  (`-D warnings`) clean.
+  Next: M9.2 (Flux guarded actions -- reconcile/suspend/resume),
+  continuing automatically per this milestone's own instruction (no new
+  architectural blocker identified).
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

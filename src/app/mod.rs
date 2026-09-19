@@ -1075,6 +1075,7 @@ impl Runtime {
                     pod_resource,
                 )
             }
+            Command::Flux => self.open_flux_view(),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -1333,6 +1334,46 @@ impl Runtime {
         let policy_context = self.mutation_policy_context();
         let text = crate::mutation::view::policy_report(&policy_context, &scope, &resource);
         self.open_static(&format!("Policy: {}", object.name), text);
+        Ok(())
+    }
+    /// M9.1: read-only, no network beyond what discovery already fetched at
+    /// connect time. If the currently selected object is one of Flux's own
+    /// reconciliation kinds (`integrations::flux::is_status_kind`), shows
+    /// that object's own status (conditions/observedGeneration/suspend/
+    /// revision/sourceRef) rendered verbatim; otherwise shows the overall
+    /// Flux capability report (which kinds are actually installed) --
+    /// never a guess from names alone, matching M9.0's own contract.
+    fn open_flux_view(&mut self) -> Result<()> {
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let selected = self
+            .state
+            .resource
+            .as_ref()
+            .filter(|r| crate::integrations::flux::is_status_kind(&r.api.kind))
+            .and_then(|_| self.state.selected_object());
+        let (title, text) = match selected {
+            Some(object) => {
+                let resource = self.state.resource.as_ref().expect("filtered above");
+                let text = crate::integrations::flux::status_report(
+                    &resource.api.kind,
+                    &object.name,
+                    &object.value,
+                );
+                (format!("Flux: {}", object.name), text)
+            }
+            None => {
+                let discovery = crate::integrations::discover(
+                    &connection.catalog,
+                    crate::integrations::Integration::Flux,
+                    crate::integrations::flux::KINDS,
+                );
+                (
+                    "Flux".to_string(),
+                    crate::integrations::view::discovery_report(&discovery),
+                )
+            }
+        };
+        self.open_static(&title, text);
         Ok(())
     }
     /// M8.0: the single place that builds a `PolicyContext` from live runtime
@@ -3533,6 +3574,51 @@ mod tests {
         );
         let doc = rt.active_document_mut().expect("doc open");
         assert_eq!(doc.title, "Mutation journal");
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn flux_view_shows_capability_report_when_flux_is_not_installed() {
+        let mut rt = runtime();
+        let tasks_before = rt.tasks.len();
+        rt.command(":flux").expect("flux capability view");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "the capability report issues no network task -- it only reads the already-fetched catalog"
+        );
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Flux");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Flux CAPABILITIES"));
+        assert!(text.contains("STATE: Unsupported"));
+        assert!(text.contains("[absent]  Kustomization"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn flux_view_shows_object_status_when_a_flux_kind_is_selected() {
+        let mut rt = runtime();
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.group = "kustomize.toolkit.fluxcd.io".into();
+        resource.api.api_version = "kustomize.toolkit.fluxcd.io/v1".into();
+        resource.api.kind = "Kustomization".into();
+        resource.api.plural = "kustomizations".into();
+        rt.state.resource = Some(resource);
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+            "metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1","generation":1},
+            "spec":{"sourceRef":{"kind":"GitRepository","name":"podinfo"}},
+            "status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True","reason":"ReconciliationSucceeded","message":"Applied revision: master@sha1:abc"}]}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        let tasks_before = rt.tasks.len();
+        rt.command(":flux").expect("flux status view");
+        assert_eq!(rt.tasks.len(), tasks_before);
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Flux: podinfo-kustomize");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("FLUX STATUS: Kustomization/podinfo-kustomize"));
+        assert!(text.contains("Ready = True (ReconciliationSucceeded)"));
         rt.shutdown().await;
     }
     #[tokio::test]

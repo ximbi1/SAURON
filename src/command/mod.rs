@@ -538,6 +538,9 @@ pub enum Command {
     ForceDelete,
     Drain,
     Flux,
+    FluxSuspend,
+    FluxResume,
+    FluxReconcile,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -825,6 +828,18 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :flux");
             return Ok(Command::Flux);
         }
+        "flux_suspend" => {
+            ensure!(tail.is_empty(), "Use :flux_suspend");
+            return Ok(Command::FluxSuspend);
+        }
+        "flux_resume" => {
+            ensure!(tail.is_empty(), "Use :flux_resume");
+            return Ok(Command::FluxResume);
+        }
+        "flux_reconcile" => {
+            ensure!(tail.is_empty(), "Use :flux_reconcile");
+            return Ok(Command::FluxReconcile);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -907,6 +922,9 @@ pub fn command_names() -> Vec<&'static str> {
         "force_delete",
         "drain",
         "flux",
+        "flux_suspend",
+        "flux_resume",
+        "flux_reconcile",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1157,6 +1175,18 @@ fn drain_takes_no_arguments() {
 fn flux_takes_no_arguments() {
     assert!(matches!(parse(":flux"), Ok(Command::Flux)));
     assert!(parse(":flux now").is_err());
+}
+#[test]
+fn flux_suspend_resume_reconcile_take_no_arguments_and_are_distinct_commands() {
+    assert!(matches!(parse(":flux_suspend"), Ok(Command::FluxSuspend)));
+    assert!(matches!(parse(":flux_resume"), Ok(Command::FluxResume)));
+    assert!(matches!(
+        parse(":flux_reconcile"),
+        Ok(Command::FluxReconcile)
+    ));
+    assert!(parse(":flux_suspend now").is_err());
+    assert!(parse(":flux_resume now").is_err());
+    assert!(parse(":flux_reconcile now").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

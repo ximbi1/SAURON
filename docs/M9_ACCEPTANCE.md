@@ -148,7 +148,7 @@ context name. Never push/publish anything without explicit authorization.
 | --- | --- | --- |
 | M9.0 | Shared integration identity/capability-discovery model | ACCEPTED |
 | M9.1 | Flux read-only views (Kustomization, HelmRelease, GitRepository, OCIRepository, HelmRepository, Bucket, Image* if available) | ACCEPTED |
-| M9.2 | Flux guarded actions (reconcile, suspend, resume) | PLANNED |
+| M9.2 | Flux guarded actions (reconcile, suspend, resume) | ACCEPTED |
 | M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | PLANNED |
 | M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | PLANNED |
 | M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | PLANNED |
@@ -557,12 +557,22 @@ question 1a below, which must be resolved before M9.3 starts.
    the start of M9.6 with a concrete crate/approach evaluation recorded
    here.
 5. **New `Verification`/`MutationOutcome` vocabulary for "request
-   accepted vs. controller converged vs. workload healthy"** — M9.0
-   deliberately does not add this; M9.2 (the first slice that needs it)
-   decides whether the existing `Verification` enum's shape already
-   covers it (likely, since "Pending" already means "accepted but not
-   yet reflected") or a new variant is genuinely needed, and records
-   that decision here.
+   accepted vs. controller converged vs. workload healthy"** —
+   **RESOLVED 2026-09-19 by M9.2: the existing model already suffices,
+   zero new variants needed.** `MutationOutcome`/`Verification` continue
+   to describe only "was the request accepted" and "does a fresh read
+   match the exact requested change" (unchanged meaning). The third fact
+   -- controller convergence -- is presented by reusing M9.1's own
+   `integrations::flux::status_report` on a fresh read of the same
+   object, shown as separate, clearly-labeled context alongside the
+   commit/verification result, never folded into either enum and never
+   awaited/polled for. Confirmed live: a real run of
+   `live_flux_suspend_resume_and_reconcile_round_trip_on_a_real_
+   kustomization` caught the controller genuinely still reconciling
+   (`Reconciling=True`, `Ready=Unknown`, a real `STALE`
+   observedGeneration) immediately after a reconcile commit -- exactly
+   the honest, un-awaited fact this design exists to surface, not a bug
+   the test had to work around.
 6. **Flux `ImageRepository`/`ImagePolicy`/`ImageUpdateAutomation` scope**
    — include only if the installed Flux version's API actually exposes
    them (image-automation controllers are a separate, optional Flux
@@ -744,6 +754,82 @@ only then continue.
   Next: M9.2 (Flux guarded actions -- reconcile/suspend/resume),
   continuing automatically per this milestone's own instruction (no new
   architectural blocker identified).
+- 2026-09-19: M9.2 (Flux guarded actions: reconcile, suspend, resume)
+  implemented and ACCEPTED. No architectural blocker -- confirmed the
+  design test in full: every action reuses the existing gateway with
+  zero new policy/journal/transport/verification code.
+  - **`mutation::workflow`**: `flux_suspend`/`flux_resume` are the exact
+    same shape as M8B.1's `cordon`/`uncordon` (`set_unschedulable`
+    generalized) -- a shared private `flux_set_suspend` builder with an
+    inverted boolean, `MutationEffect::Modify`, `MutationRisk::Routine`
+    (Flux CRDs hit no cluster-critical/privilege-sensitive hardcoded
+    list, so risk tier only affects the displayed `PolicyReason`, not
+    confirmation strength -- confirmed by reading `policy::evaluate`'s
+    own `strong` rule before choosing this, not guessed). `flux_reconcile`
+    is structurally identical to M8's own `restart` (an annotation bump,
+    `reconcile.fluxcd.io/requestedAt`, Flux's own documented control
+    surface). `FLUX_SUSPENDABLE_KINDS`/`FLUX_RECONCILABLE_KINDS` cover
+    the 6 kinds confirmed via a real `kubectl explain <plural>.spec.
+    suspend` against the live `sauron-m9` install (not assumed) --
+    `Kustomization`/`HelmRelease`/`GitRepository`/`OCIRepository`/
+    `HelmRepository`/`Bucket`. The three Image* kinds are excluded: their
+    exact reconcile/suspend semantics were not independently confirmed.
+  - **Zero new `kube::mutation` dispatch code**: `verify()`'s existing
+    generic `Modify`/`leaf_path_and_value` path (including M8B.1's own
+    boolean-`omitempty` fix) handles both `spec.suspend` and the
+    annotation bump unmodified -- proved by 2 fake-HTTP tests
+    (`mutation_flux_suspend_and_reconcile_commit_via_the_generic_modify_
+    path`, `verify_flux_suspend_and_reconcile_confirm_via_the_generic_
+    modify_path_zero_new_code`) and live.
+  - **Open question 5 RESOLVED** (see its own entry above): the existing
+    `Verification`/`MutationOutcome` vocabulary already suffices for
+    "request accepted" and "fresh read matches"; the third fact
+    (controller convergence) is presented by reusing M9.1's own
+    `status_report` on a fresh read, shown as separate context, never
+    folded into either enum, never awaited/polled for.
+  - **`:flux_suspend`/`:flux_resume`/`:flux_reconcile` commands** added
+    (palette-only), each following the exact `mutation_scope` ->
+    builder -> `open_workflow_document` pattern every M8/M8B action
+    uses -- no new app-layer machinery.
+  - **Live evidence**: `live_flux_suspend_resume_and_reconcile_round_
+    trip_on_a_real_kustomization` against the real `podinfo-kustomize`
+    Kustomization on `sauron-m9` -- suspends (commits, verifies
+    `spec.suspend: true`), resumes (commits, verifies `spec.suspend:
+    false`, explicitly left unsuspended -- self-restoring, no drift),
+    then reconciles (commits, verifies the exact annotation timestamp)
+    and reads Flux's own fresh status afterward. **Real finding, kept as
+    evidence rather than smoothed over**: the first run of this test
+    caught the controller genuinely still reconciling immediately after
+    the commit (`Reconciling=True`, `Ready=Unknown`, a real `STALE`
+    observedGeneration lag) -- proving the three-fact separation is not
+    just a paper design, an actual race a naive "commit succeeded =
+    healthy" implementation would have hidden. Run twice clean via
+    `scripts/test-cluster-m9.sh flux-test` (5 live tests total in the
+    file now). Full M1-M8B regression (`accept-m3.py` through
+    `accept-m8b.py`) reconfirmed green.
+  - **Interactive evidence**: manual tmux smoke check confirmed
+    `:flux_suspend`'s readonly denial and `:flux_reconcile`'s preview
+    (`POLICY: RequireConfirmation`, `CONFIRMATION: required (press
+    confirm once)` -- Standard, not Strong, exactly as designed) render
+    correctly against the real cluster. Full `accept-m9.py` interactive
+    coverage remains deferred to M9.7, per M8B's own precedent.
+  Evidence: 5 unit tests (`mutation::workflow::tests`: unsupported-kind
+  rejection for both suspend/resume; exact payload + distinct
+  `source_action` for suspend vs. resume; every confirmed kind supported;
+  unsupported-kind rejection and exact annotation payload for reconcile);
+  2 app-level tests (readonly denies suspend/resume and sends zero
+  requests; a Routine-risk Modify requires only Standard confirmation and
+  commits on the first press -- proving the risk-tier choice was
+  correct, not assumed); 1 grammar test; 2 fake-HTTP tests (commit sends
+  the exact PATCH body for both actions; verify confirms via the
+  existing generic path with zero new dispatch code); 1 live test (3
+  real actions chained, self-restoring), run twice. Full locked suite:
+  273 unit + 68 fake HTTP, fmt/check/clippy (`-D warnings`) clean.
+  Next: M9.3 (Argo CD read-only views) -- but Open question 1a (Argo
+  CD's own cluster placement: alongside Flux in `sauron-m9`, or a third
+  dedicated cluster?) is exactly the kind of decision this milestone's
+  own instructions require stopping for. Stopping here to ask before
+  proceeding into M9.3.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

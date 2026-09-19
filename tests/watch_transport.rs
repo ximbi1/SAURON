@@ -1182,6 +1182,192 @@ async fn mutation_cordon_requires_strong_confirmation_and_commits_the_exact_patc
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[tokio::test]
+async fn mutation_flux_suspend_and_reconcile_commit_via_the_generic_modify_path() {
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::commit};
+    use sauron::mutation::{
+        Confirmation, ConfirmationRequirement, MutationOutcome, PolicyDecision, policy, workflow,
+    };
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "kustomize.toolkit.fluxcd.io/v1/kustomizations".into(),
+        namespace: "sauron-m9".into(),
+        name: "podinfo-kustomize".into(),
+        uid: "uid-1".into(),
+    };
+    let flux_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = "kustomize.toolkit.fluxcd.io".into();
+            a.api_version = "kustomize.toolkit.fluxcd.io/v1".into();
+            a.kind = "Kustomization".into();
+            a.plural = "kustomizations".into();
+            a
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+
+    // --- Suspend: commit only (a dedicated `verify()`-only test below
+    // proves the zero-new-verification-code claim, matching
+    // `verify_cordon_confirms_observed_unschedulable_flip_with_zero_new_
+    // code`'s own precedent of testing revalidate+PATCH and a fresh-read
+    // verify against two independently-scripted fake servers, never one
+    // static-response server standing in for both a pre-mutation
+    // revalidation GET and a post-mutation verification GET at once).
+    let built = workflow::flux_suspend(scope.clone(), flux_resource.clone(), 1)
+        .expect("flux_suspend supported for Kustomization");
+    let evaluation = policy::evaluate(&verified_policy_context(), &built.intent);
+    assert_eq!(evaluation.decision, PolicyDecision::RequireConfirmation);
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1","resourceVersion":"5"}}).to_string())
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(request.contains("\"suspend\":true"), "the exact suspend payload must be sent: {request}");
+            (200, json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization","metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1"},"spec":{"suspend":true}}).to_string())
+        }
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &fake_connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // --- Reconcile: commit only, same rationale as above.
+    let built = workflow::flux_reconcile(scope, flux_resource, "2026-09-19T00:00:00Z", 2)
+        .expect("flux_reconcile supported for Kustomization");
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1","resourceVersion":"5"}}).to_string())
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(request.contains("reconcile.fluxcd.io/requestedAt"), "the exact reconcile annotation must be sent: {request}");
+            (200, json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization","metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1","annotations":{"reconcile.fluxcd.io/requestedAt":"2026-09-19T00:00:00Z"}}}).to_string())
+        }
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &fake_connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn verify_flux_suspend_and_reconcile_confirm_via_the_generic_modify_path_zero_new_code() {
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::verify};
+    use sauron::mutation::workflow;
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "kustomize.toolkit.fluxcd.io/v1/kustomizations".into(),
+        namespace: "sauron-m9".into(),
+        name: "podinfo-kustomize".into(),
+        uid: "uid-1".into(),
+    };
+    let flux_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = "kustomize.toolkit.fluxcd.io".into();
+            a.api_version = "kustomize.toolkit.fluxcd.io/v1".into();
+            a.kind = "Kustomization".into();
+            a.plural = "kustomizations".into();
+            a
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+
+    // Design test: a fresh read already reflecting `spec.suspend: true`
+    // must verify as `Verified` with zero new `kube::mutation::verify`
+    // dispatch code -- the exact same generic `Modify`/
+    // `leaf_path_and_value` path, plus M8B.1's own boolean-`omitempty`
+    // fix, that Cordon already exercises.
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization","metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1"},"spec":{"suspend":true}}).to_string(),
+        )
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let built = workflow::flux_suspend(scope.clone(), flux_resource.clone(), 1)
+        .expect("flux_suspend supported for Kustomization");
+    let outcome = verify(
+        &fake_connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+
+    // Reconcile: same generic path as M8's own Restart annotation bump.
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization","metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1","annotations":{"reconcile.fluxcd.io/requestedAt":"2026-09-19T00:00:00Z"}}}).to_string(),
+        )
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let built = workflow::flux_reconcile(scope, flux_resource, "2026-09-19T00:00:00Z", 2)
+        .expect("flux_reconcile supported for Kustomization");
+    let outcome = verify(
+        &fake_connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, sauron::mutation::Verification::Verified);
+}
+
 fn modify_intent_with_payload(
     uid: &str,
     payload: serde_json::Value,

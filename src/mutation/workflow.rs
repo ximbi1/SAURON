@@ -600,6 +600,116 @@ pub fn annotate(
     )
 }
 
+/// M9.2: the 6 Flux kinds that support `spec.suspend` and the
+/// `reconcile.fluxcd.io/requestedAt` annotation control surface --
+/// confirmed against a real installed CRD schema (`kubectl explain`),
+/// not assumed. `ImageRepository`/`ImagePolicy`/`ImageUpdateAutomation`
+/// are deliberately excluded: M9.1 already deferred their own status
+/// rendering as a bounded limitation, and their exact reconcile/suspend
+/// semantics were not independently confirmed here.
+pub const FLUX_SUSPENDABLE_KINDS: &[&str] = &[
+    "Kustomization",
+    "HelmRelease",
+    "GitRepository",
+    "OCIRepository",
+    "HelmRepository",
+    "Bucket",
+];
+pub const FLUX_RECONCILABLE_KINDS: &[&str] = FLUX_SUSPENDABLE_KINDS;
+pub const FLUX_RECONCILE_ANNOTATION: &str = "reconcile.fluxcd.io/requestedAt";
+
+/// M9.2: suspend/resume are the exact same shape as M8B.1's Cordon/
+/// Uncordon (`set_unschedulable`) generalized to a Flux-owned boolean
+/// field -- a shared private builder with an inverted boolean, two
+/// public functions with their own distinct `source_action` so the
+/// journal/preview stay honest about which direction was requested.
+/// `kube::mutation::verify`'s existing generic `Modify`/
+/// `leaf_path_and_value` path (including M8B.1's own boolean-`omitempty`
+/// fix) needs zero new code for this -- confirmed by
+/// `mutation_flux_suspend_commits_and_verifies_via_the_generic_modify_
+/// path` in `tests/watch_transport.rs`.
+fn flux_set_suspend(
+    scope: Scope,
+    resource: Resource,
+    suspend: bool,
+    request_id: u64,
+    source_action: &str,
+) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !FLUX_SUSPENDABLE_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported(source_action, &kind));
+    }
+    let payload = Some(serde_json::json!({"spec": {"suspend": suspend}}));
+    let change = format!("spec.suspend: {} -> {suspend}", !suspend);
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::Routine,
+            "spec.suspend".into(),
+            &payload,
+            source_action,
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
+pub fn flux_suspend(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    flux_set_suspend(scope, resource, true, request_id, "flux_suspend")
+}
+
+pub fn flux_resume(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    flux_set_suspend(scope, resource, false, request_id, "flux_resume")
+}
+
+/// M9.2: Flux's own documented reconciliation request mechanism -- an
+/// annotation bump, structurally identical to M8's own Restart
+/// (`kubectl.kubernetes.io/restartedAt`). `timestamp` must be generated
+/// exactly once by the caller when the intent is first built, exactly
+/// like `restart`'s own contract.
+///
+/// "reconcile requested" is never the same claim as "reconciliation
+/// completed successfully": `MutationOutcome`/`Verification` here only
+/// ever describe whether the annotation itself was accepted and changed
+/// (the exact same two facts every other Modify already reports) --
+/// Flux's own subsequent Ready/Stalled convergence is a third, later
+/// fact, read fresh via `integrations::flux::status_report` on the same
+/// object, never awaited or polled for here and never folded into
+/// `Verification` itself (see docs/M9_ACCEPTANCE.md's Open question 5
+/// resolution).
+pub fn flux_reconcile(
+    scope: Scope,
+    resource: Resource,
+    timestamp: &str,
+    request_id: u64,
+) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !FLUX_RECONCILABLE_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("flux_reconcile", &kind));
+    }
+    let payload = Some(serde_json::json!({
+        "metadata": {"annotations": {FLUX_RECONCILE_ANNOTATION: timestamp}}
+    }));
+    let change = format!("{FLUX_RECONCILE_ANNOTATION}: {timestamp}");
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::Routine,
+            format!("metadata.annotations[\"{FLUX_RECONCILE_ANNOTATION}\"]"),
+            &payload,
+            "flux_reconcile",
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,5 +1249,69 @@ mod tests {
         );
         let fresh = wf.confirmation();
         assert!(fresh.authorizes(&wf.intent));
+    }
+
+    #[test]
+    fn flux_suspend_unsupported_kind_is_rejected_before_building_an_intent() {
+        assert!(flux_suspend(scope(), resource("Deployment"), 1).is_err());
+        assert!(flux_resume(scope(), resource("Deployment"), 1).is_err());
+    }
+
+    #[test]
+    fn flux_suspend_sets_true_and_resume_sets_false_with_distinct_source_actions() {
+        let suspended = flux_suspend(scope(), resource("Kustomization"), 1).unwrap();
+        assert_eq!(
+            suspended.payload,
+            Some(serde_json::json!({"spec": {"suspend": true}}))
+        );
+        assert_eq!(suspended.intent.source_action, "flux_suspend");
+        assert_eq!(suspended.intent.effect, MutationEffect::Modify);
+        assert_eq!(suspended.intent.risk, MutationRisk::Routine);
+        assert!(suspended.change.contains("false -> true"));
+
+        let resumed = flux_resume(scope(), resource("Kustomization"), 2).unwrap();
+        assert_eq!(
+            resumed.payload,
+            Some(serde_json::json!({"spec": {"suspend": false}}))
+        );
+        assert_eq!(resumed.intent.source_action, "flux_resume");
+        assert!(resumed.change.contains("true -> false"));
+    }
+
+    #[test]
+    fn flux_suspend_supports_every_confirmed_kind() {
+        for kind in FLUX_SUSPENDABLE_KINDS {
+            assert!(
+                flux_suspend(scope(), resource(kind), 1).is_ok(),
+                "{kind} must be a supported flux_suspend target"
+            );
+        }
+    }
+
+    #[test]
+    fn flux_reconcile_unsupported_kind_is_rejected_before_building_an_intent() {
+        assert!(
+            flux_reconcile(scope(), resource("Deployment"), "2026-09-19T00:00:00Z", 1).is_err()
+        );
+    }
+
+    #[test]
+    fn flux_reconcile_bumps_the_documented_annotation_with_the_exact_given_timestamp() {
+        let built = flux_reconcile(
+            scope(),
+            resource("Kustomization"),
+            "2026-09-19T00:00:00Z",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            built.payload,
+            Some(serde_json::json!({
+                "metadata": {"annotations": {"reconcile.fluxcd.io/requestedAt": "2026-09-19T00:00:00Z"}}
+            }))
+        );
+        assert_eq!(built.intent.source_action, "flux_reconcile");
+        assert_eq!(built.intent.effect, MutationEffect::Modify);
+        assert!(built.change.contains("2026-09-19T00:00:00Z"));
     }
 }

@@ -1076,6 +1076,51 @@ impl Runtime {
                 )
             }
             Command::Flux => self.open_flux_view(),
+            Command::FluxSuspend => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::flux_suspend(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Flux suspend: {}", object.name), built)
+            }
+            Command::FluxResume => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::flux_resume(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Flux resume: {}", object.name), built)
+            }
+            Command::FluxReconcile => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                // Generated exactly once here, when the intent is first built --
+                // never regenerated on a later render of the same workflow,
+                // matching Restart's own timestamp discipline.
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let built = crate::mutation::workflow::flux_reconcile(
+                    scope, resource, &timestamp, request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Flux reconcile: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -3216,6 +3261,85 @@ mod tests {
             "denied cordon confirm must error, never silently no-op"
         );
         assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    fn flux_kustomization_object() -> crate::resources::Object {
+        crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+            "metadata":{"namespace":"sauron-m9","name":"podinfo-kustomize","uid":"uid-1","generation":1},
+            "spec":{"sourceRef":{"kind":"GitRepository","name":"podinfo"}},
+            "status":{"observedGeneration":1}
+        }))
+    }
+    fn open_flux_kustomization(rt: &mut Runtime) {
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.group = "kustomize.toolkit.fluxcd.io".into();
+        resource.api.api_version = "kustomize.toolkit.fluxcd.io/v1".into();
+        resource.api.kind = "Kustomization".into();
+        resource.api.plural = "kustomizations".into();
+        rt.state.resource = Some(resource);
+        rt.state.rows = vec![std::sync::Arc::new(flux_kustomization_object())];
+        rt.state.selected = Some("uid-1".into());
+    }
+
+    #[tokio::test]
+    async fn mutation_flux_suspend_and_resume_under_readonly_deny_and_send_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        open_flux_kustomization(&mut rt);
+        rt.command(":flux_suspend")
+            .expect("flux_suspend preview opens even when denied");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied flux_suspend confirm must error, never silently no-op"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
+
+        open_flux_kustomization(&mut rt);
+        rt.command(":flux_resume")
+            .expect("flux_resume preview opens even when denied");
+        assert!(rt.action(Action::MutationConfirm).is_err());
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_flux_reconcile_requires_only_standard_confirmation_and_commits_on_first_press()
+     {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_flux_kustomization(&mut rt);
+        rt.command(":flux_reconcile")
+            .expect("flux_reconcile preview opens");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.requirement(),
+            crate::mutation::ConfirmationRequirement::Standard,
+            "a Routine-risk Modify on a non-cluster-critical kind must not require the strong double-press"
+        );
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::MutationConfirm)
+            .expect("first press commits, no arm step for Standard confirmation");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before + 1,
+            "a single press must be enough to send the request"
+        );
         rt.shutdown().await;
     }
 

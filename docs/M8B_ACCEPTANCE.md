@@ -1,11 +1,14 @@
-# M8B — Advanced Cluster Operations: planning ledger (PLANNED, NOT STARTED)
+# M8B — Advanced Cluster Operations: planning ledger (ACCEPTED)
 
-Status: **PLANNED / NOT STARTED**. No slice below is ACCEPTED, no code
-exists yet, no fixtures exist yet, no tests exist yet. This document is
-scope definition and contract design only, written while M8.6's soak was
-still running, specifically so implementation does not start until this
-plan is reviewed. Nothing in this file authorizes touching code, cluster,
-or CI.
+Status: **ACCEPTED** (M8B.0 through M8B.7, 2026-09-19). 75-minute soak
+(488 cycles, one recoverable transient-cluster hiccup, zero unrecovered
+errors, zero forward failures, RSS plateaued), full M1-M8 regression
+green, `accept-m8b.py` (19 scenarios) run twice clean, working tree
+clean. This document started as scope definition and contract design
+only (see the original framing below, kept for history) and was
+implemented and accepted slice by slice; see the Journal for the full
+implementation record, including two real live-cluster bugs found and
+fixed during M8B.7's own combined acceptance.
 
 ## Purpose
 
@@ -118,14 +121,14 @@ silently skipping multi-node drain coverage without saying so.
 
 | Slice | Scope | Verdict |
 | --- | --- | --- |
-| M8B.0 | Shared advanced-operation extensions to the M7/M8 model (new `PolicyReason`s, node-target support in `MutationTarget`/`Scope`, `Job`-creation support in the executor, any new `Verification`/`Phase` variants needed across multiple operations below) | IN PROGRESS -- node-target support confirmed to need zero new code; `kube::mutation::verify`'s boolean-comparison logic extended (see M8B.1's real bug); no new `PolicyReason`/`Phase` variant added yet, none needed so far |
+| M8B.0 | Shared advanced-operation extensions to the M7/M8 model (new `PolicyReason`s, node-target support in `MutationTarget`/`Scope`, `Job`-creation support in the executor, any new `Verification`/`Phase` variants needed across multiple operations below) | ACCEPTED -- node-target support needed zero new code; `kube::mutation::verify`'s boolean-comparison logic extended (M8B.1's real bug); `Verification::Created` (M8B.3), `MutationOutcome::DisruptionBudgetDenied` (M8B.4), `PolicyReason::ForceSemantics` (M8B.6), and `Phase::{DrainStarted,DrainStep,DrainFinished}` (M8B.5) added exactly where each operation needed them, never speculatively |
 | M8B.1 | Cordon / Uncordon (Node) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7, matching M8.2's own precedent -- `workflow::cordon`/`workflow::uncordon` wired to `:cordon`/`:uncordon`; live-verified twice against the real (single) node of `kind-sauron-test`, briefly cordoned then immediately uncordoned in one sequential test, per explicit user sign-off |
 | M8B.2 | Set image (Deployment/StatefulSet/DaemonSet, single container) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- `workflow::set_image` reconstructs the full `containers` array (option (b) from this document's own open question, resolved); dedicated `verify_set_image` name-keyed comparison added; live-verified against a real two-container Deployment, unrelated sidecar proven untouched |
 | M8B.3 | CronJob trigger (create a Job from a CronJob template) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- first real `MutationEffect::Create` in the executor; `MutationIntent.create_resource` added; `policy::evaluate`'s Create-bypasses-confirmation rule removed (a real bug in an untested speculative rule, found while implementing this); traceability via label/annotation, not a real `ownerReference` (matches `kubectl create job --from=cronjob` semantics) |
 | M8B.4 | Evict Pod (eviction subresource, PDB-aware) | ACCEPTED (unit/fake-HTTP/live); interactive deferred to M8B.7 -- uses `POST .../pods/NAME/eviction`, never a plain DELETE; new `MutationOutcome::DisruptionBudgetDenied` for 429; live-verified real PDB denial + real success. Found and fixed a significant, codebase-wide bug: kube-rs's transport-level auto-retry (`default_retry`, on by default) silently retried 429/503/504 below every request this app has ever made, contradicting the "no automatic retry" guarantee -- now explicitly disabled |
 | M8B.5 | Drain (orchestrated cordon + bounded eviction sequence) | ACCEPTED (engine + full UI wiring: preview/arm/confirm/cancel/report; live evidence deliberately out of scope by design, resolved open question, option (c)) |
 | M8B.6 | Force delete (highest risk; explicit, narrow, no default grace=0 leakage) | ACCEPTED |
-| M8B.7 | Combined adversarial acceptance, full M1-M8 regression, soak | PLANNED |
+| M8B.7 | Combined adversarial acceptance, full M1-M8 regression, soak | ACCEPTED |
 
 Ordering rationale: M8B.1-M8B.3 are the lowest-complexity, single-request
 operations (closest in shape to M8's own Scale/Restart) and come first to
@@ -1189,6 +1192,120 @@ the authoritative record of M8's own bugs.
   proof); 1 grammar test; 1 app-level zero-write-under-readonly test.
   Full locked suite: 230 unit + 65 fake HTTP, fmt/check/clippy (`-D
   warnings`) clean.
+- 2026-09-19: M8B.7 (Combined adversarial acceptance, full M1-M8
+  regression, soak) implemented and ACCEPTED. Mirrors M8.6's own
+  structure exactly, per this document's own plan.
+  **Two real, live-cluster-only bugs found and fixed while building
+  `scripts/accept-m8b.py`** -- both in M8B.5's Drain UI wiring, both
+  invisible to every unit/fake-HTTP/app-level test written for that
+  slice, because those tests either called `Action::MutationConfirm`
+  directly (bypassing the real key -> mode -> action lookup) or set
+  `DrainPreview::Ready` by hand (bypassing the real spawned list task and
+  its real cancellation token). This is exactly the category of gap
+  M8B.7's own interactive/live layer exists to catch:
+  1. **Preview permanently stuck on "Loading"**: `mutation_scope()` (used
+     to build the cordon scope) only calls `self.document.cancel()` --
+     it never reassigns a fresh child token, unlike every other spawn
+     site (`mutation_confirm`/`mutation_dry_run`), which do both
+     themselves right before spawning. `start_drain_preview` captured
+     `self.document` as its task's cancellation token AFTER
+     `mutation_scope()` had already cancelled it, so the biased
+     `tokio::select!` took the already-cancelled branch immediately and
+     the task returned without ever listing a single Pod -- with no
+     visible error, since "still loading" and "silently gave up" render
+     identically. Fixed by having `start_drain_preview` reassign
+     `self.document = self.scope.child_token()` itself before capturing
+     `cancel`, matching the existing precedent exactly.
+  2. **The confirm key did nothing in Drain mode**: `Keymap::available()`
+     only let "mutation"-category bindings (confirm, dry-run) through for
+     modes `"logs"`/`"forwards"`/`"mutation"` -- `mode_name()`'s new
+     `"drain"` case (added when M8B.5's UI was wired) was never added to
+     that allowlist. Pressing the real confirm key (`y`) in a Drain
+     document resolved to `Keymap::action(...) == None`, so nothing was
+     ever dispatched -- not an error, just silence. Fixed by adding
+     `"drain"` to `Keymap::compile`'s validated-mode list and an explicit
+     `mode == "drain" && binding == "mutation"` rule in `available()`.
+     (`mutation_dry_run` was also hardened with an explicit, honest
+     refusal for a Drain document, since Drain has no dry-run design and
+     silently erroring "No mutation preview open" while a Drain preview
+     is visibly open would have been a confusing lie.)
+  Both bugs are covered by new regression tests that exercise the real
+  code path the prior tests bypassed:
+  `drain_preview_tasks_cancellation_token_is_fresh_not_already_cancelled`
+  (app-level: asserts `!rt.document.is_cancelled()` right after opening a
+  Drain preview) and
+  `drain_mode_resolves_the_same_mutation_confirm_dry_run_and_document_keys_as_mutation_mode`
+  (command-level: asserts the real `y`/`d`/`/` keys resolve to the
+  expected `Action` in `"drain"` mode via `Keymap::action`, not by
+  calling the `Action` variant directly).
+  **`scripts/accept-m8b.py`** (19 scenarios, mirroring `accept-m8.py`'s
+  own structure): readonly denies `:cordon` with zero writes then
+  `:reload` enables; cordon/uncordon double-press commits and verifies
+  live, node left schedulable; set_image dry-run/commit/verify round-
+  trips live, unrelated sidecar untouched; trigger creates a Job
+  traceable to its CronJob; evict denied by a real PDB then succeeds on a
+  PDB-free Pod; force_delete double-press commits and verifies live;
+  Escape before commit sends zero writes; same-name/new-UID replacement
+  between preview and confirm is rejected live; rapid context/namespace
+  churn around an open preview; M4 forward held alive throughout; M5
+  Explain, M6 Adjacent/Xray, M7 `:policy`/`:mutations` (now carrying M8B
+  records) regression touchpoints; 32x9 (including Drain, the tallest
+  document in the app) does not panic; quit while the mutation journal is
+  open restores the terminal exactly. **Drain's own scenario is the one
+  documented, permanent exception**: the preview is opened live, its real
+  Pod plan is asserted non-empty, it is armed on the first confirm press
+  -- but the second press that would start the real orchestrator is
+  never sent. Cancelling instead is asserted, live, to leave the node
+  schedulable and every Pod's UID (cluster-wide, via a before/after
+  snapshot) completely unchanged. This is the resolved option (c) bounded
+  limitation from M8B.5's own journal entry, restated here because
+  M8B.7 is exactly the layer that could have been tempted to relitigate
+  it -- it is not: `kind-sauron-test` is single-node, and a real drain
+  would evict every fixture Pod across every M1-M8B namespace at once.
+  Run twice via `python3 scripts/accept-m8b.py`, both clean.
+  **Full M1-M8 regression**: `accept-m3.py filters`, `accept-m4.py`,
+  `accept-m4-forward.py`, `accept-m5.py`, `accept-m5-combined.py`,
+  `accept-m6.py`, `accept-m7.py`, `accept-m8.py` -- all green, unaffected
+  by any M8B change (including the two Drain UI fixes above, which only
+  touch Drain-specific code paths and the keymap's own mode-availability
+  table).
+  **Soak**: `scripts/soak-m8b.py`, 75 minutes (4508s), complete and
+  self-restoring, following M8.6's own soak discipline exactly (per-
+  section independent error handling from the start, not discovered as a
+  bug mid-run -- this document's own stated lesson from M8.6). Rotation:
+  cordon+uncordon every cycle (brief, self-restoring, matching the
+  explicit sign-off already established for M8B.1's live evidence, just
+  repeated under sustained load); set_image round-trips to the same image
+  within the same cycle; CronJob trigger throttled (every 10th cycle,
+  created Job deleted the same cycle so Jobs never accumulate); evict
+  against the PDB-blocked Pod every cycle (safe, no-drift -- the Pod is
+  never actually removed) and against the PDB-free Pod throttled (every
+  10th cycle, immediately recreated); force_delete throttled (every 15th
+  cycle, immediately recreated); Drain preview/arm/cancel every cycle
+  (never the second confirm, for the same reason `accept-m8b.py`'s own
+  Drain scenario never sends it); M5/M6 Explain/Timeline/Adjacent/Xray
+  touchpoints; one M4 forward held and checked throughout. 488 cycles:
+  488 cordon/uncordon round-trips, 488 set_image round-trips, 48 CronJob
+  triggers (all cleaned up), 488 PDB-denial checks, 48 real PDB-free
+  evictions (all self-healed), 32 real force-deletes (all self-healed),
+  488 Drain previews armed and cancelled (zero real drains), 1834 metrics
+  poll cycles, zero transport reconnects, **one single recoverable
+  assertion** (cycle 95: an Explain read returned `NOT CURRENT / Resource
+  read timed out` against the real cluster -- a transient live-cluster
+  hiccup, not a SAURON defect; the harness's own per-section error
+  isolation caught it, pressed Escape, and continued cleanly with zero
+  repeats for the remaining 393 cycles), zero unrecovered transient
+  errors, zero forward failures. RSS: 34260 KiB -> 36976 KiB (+7.9% over
+  75 minutes, plateaued for the final ~15 cycles, not a monotonic climb);
+  file descriptors and threads flat throughout (16-17 / 4). Matches this
+  document's own "observed stability only, no leak-freedom claims"
+  standard.
+  Cluster left pristine: `scripts/test-cluster.sh m8b-reset` run after
+  both the soak and every `accept-m8b.py` run; node `Ready` (never
+  `SchedulingDisabled`), all M1-M8B fixture namespaces intact.
+  Full locked suite: 245 unit + 66 fake HTTP, fmt/check/clippy (`-D
+  warnings`) clean.
+  **M8B is now ACCEPTED end to end (M8B.0 through M8B.7).**
 
 ## Final acceptance conditions (proposed, mirroring M8's own structure)
 

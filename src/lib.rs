@@ -7,6 +7,7 @@ pub mod evidence;
 pub mod explain;
 pub mod filters;
 pub mod graph;
+pub mod integrations;
 pub mod kube;
 pub mod mutation;
 pub mod resources;

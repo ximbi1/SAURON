@@ -132,6 +132,19 @@ impl Catalog {
             self.warnings.len()
         )
     }
+    /// Exact-identity lookup by API group and Kind -- unlike `resolve`,
+    /// never does fuzzy alias/shortname/plural matching against a
+    /// human-typed query. A (group, kind) pair identifies at most one
+    /// entry per catalog (kube's own discovery already picked the
+    /// server-preferred version when more than one exists), so this is
+    /// always unambiguous. M9.0: the basis for integration capability
+    /// discovery -- checking whether a specific CRD/API kind is present,
+    /// never inferred from names alone.
+    pub fn group_kind(&self, group: &str, kind: &str) -> Option<&Resource> {
+        self.resources
+            .iter()
+            .find(|r| r.api.group == group && r.api.kind == kind)
+    }
 }
 
 /// One-shot bounded list of object names for `resource` (e.g. namespaces for a picker),
@@ -377,6 +390,34 @@ mod tests {
                 .api
                 .group,
             "custom.io"
+        );
+    }
+    #[test]
+    fn group_kind_is_exact_and_never_fuzzy_matched() {
+        let c = Catalog {
+            resources: vec![
+                resource("", "pods", "Pod", &["po"]),
+                resource(
+                    "kustomize.toolkit.fluxcd.io",
+                    "kustomizations",
+                    "Kustomization",
+                    &[],
+                ),
+            ],
+            warnings: vec![],
+        };
+        assert_eq!(
+            c.group_kind("kustomize.toolkit.fluxcd.io", "Kustomization")
+                .expect("present")
+                .api
+                .plural,
+            "kustomizations"
+        );
+        assert!(c.group_kind("kustomize.toolkit.fluxcd.io", "Pod").is_none());
+        assert!(c.group_kind("", "Kustomization").is_none());
+        assert!(
+            c.group_kind("helm.toolkit.fluxcd.io", "HelmRelease")
+                .is_none()
         );
     }
     #[test]

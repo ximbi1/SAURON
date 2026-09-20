@@ -296,7 +296,10 @@ def main():
         if s:
             s['elapsed_s'] = elapsed
             s['cycle'] = cycle
-            s['metrics_requests'] = metrics_requests_started()
+            # -1 is an explicit "couldn't parse it this cycle" sentinel, never a
+            # silent 0 -- matches this project's own UNKNOWN != ZERO discipline.
+            requests = metrics_requests_started()
+            s['metrics_requests'] = requests if requests is not None else -1
             samples.append(s)
             if cycle % 5 == 0 or cycle == 1:
                 print(f'soak: cycle {cycle} @ {elapsed}s: {s} stats={stats}')

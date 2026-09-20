@@ -152,7 +152,7 @@ context name. Never push/publish anything without explicit authorization.
 | M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | ACCEPTED |
 | M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | ACCEPTED |
 | M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | ACCEPTED |
-| M9.6 | Helm guarded actions (rollback, uninstall; upgrade only if a safe bounded input model is found) | PLANNED |
+| M9.6 | Helm guarded actions (rollback, uninstall; upgrade only if a safe bounded input model is found) | DEFERRED (no safe native execution path found; see M9.6's own write-up) |
 | M9.7 | Combined acceptance, full M1-M8B regression, soak | PLANNED |
 
 ## Per-slice contracts
@@ -516,42 +516,104 @@ untouched `kind-sauron-test` cluster, and Flux/Argo CD's own live test
 suites (9 tests) reconfirmed green on `sauron-m9` — zero drift from
 touching `src/app/mod.rs`.
 
-### M9.6 — Helm guarded actions
+### M9.6 — Helm guarded actions — DEFERRED (2026-09-20, evidence-backed architectural decision)
 
-Candidates: `rollback`, `uninstall`; `upgrade` only if a safe, bounded
-input model is found (strong default expectation: **not** in M9's first
-pass — arbitrary upgrade needs a values/chart input surface this app has
-no safe precedent for; start with rollback + uninstall and revisit
-upgrade only if a genuinely bounded shape emerges, e.g. "roll forward to
-the next already-recorded revision" rather than free-form input).
+**Status: explicitly DEFERRED, not implemented, not attempted as a partial
+approximation.** This is a decided scope outcome of this milestone's own
+required investigation, not an omission.
 
-Execution must go through a real Helm lifecycle path — a Rust Helm
-library/SDK abstraction, or the equivalent documented Helm API contract
-— never direct manipulation of the `Secret`/`ConfigMap` storage records
-as an implementation shortcut (that would bypass Helm's own release
-lifecycle semantics — e.g. its own locking/history bookkeeping — and is
-explicitly disallowed by the kickoff prompt). If no safe native execution
-path is practical within M9's scope, this document is updated to record
-mutation-side Helm actions as explicitly deferred, keeping read-only
-support (M9.5) as the shipped deliverable instead of faking parity.
+Candidates were `rollback` and `uninstall` (upgrade was already scoped
+out of M9's first pass per this section's original text, for unrelated
+reasons — no safe bounded input model for arbitrary chart/values input).
 
-Rollback: exact release, exact target revision, preview current revision
--> target revision, strong confirmation, journal, verification that the
-release's revision/status actually changed as expected — never a claim
-that workloads are healthy solely because Helm itself reports success.
+**Investigation (Open question 4, per this document's own explicit
+"must-stop" list)**: before writing any mutation code, a dedicated
+investigation asked whether a safe native (non-shell-out) Rust execution
+path exists for Helm's own rollback/uninstall lifecycle. Findings:
 
-Uninstall: destructive/high-risk, strongest confirmation tier available
-(mirroring M8B.6 Force delete's own precedent for "highest risk in the
-milestone"), preview of the targeted release plus a bounded resource-
-ownership summary, no hidden force semantics, journal, verification of
-release absence/uninstalled state — never a claim that all owned
-Kubernetes resources are gone unless actually observed gone.
+- **No maintained Rust crate implements Helm's client-side action logic**
+  (the equivalent of Go's `helm.sh/helm/v3/pkg/action`). The only
+  Helm-related crates found (`helm-api`, last published 2019, targets
+  the pre-Helm-3 protobuf/Tiller wire format; a `helm-wrapper-rs` that
+  itself shells out to the `helm` binary) are either dead or themselves
+  violate this project's no-shell-out rule.
+- **Helm v3+ has no server/API component to call instead.** Tiller
+  (Helm v2's in-cluster gRPC server) was permanently removed in Helm v3
+  (2019) and remains removed through Helm 4 — confirmed via Helm's own
+  "Changes Since Helm 2" documentation. There is no RPC endpoint to
+  target as an alternative to embedding logic or shelling out.
+- **Reimplementing "just enough" of rollback/uninstall directly against
+  the `kube` crate + the release Secret storage carries real, specific
+  hazards to Helm's own bookkeeping**, not just this app's own
+  correctness: incorrect revision-number sequencing, status-enum
+  transitions, or malformed stored release records can cause the real
+  `helm` CLI to misbehave or refuse to operate on that release
+  afterward; rollback's actual semantics depend on which apply strategy
+  (three-way strategic-merge vs. Server-Side Apply, per HIP-0023) the
+  release was previously managed under, and getting this wrong causes
+  field-ownership conflicts on the next real `helm upgrade`; hook
+  lifecycle (pre/post-rollback, pre/post-delete, weights, per-hook
+  delete policies) and `helm.sh/resource-policy: keep` filtering are
+  both load-bearing for correctness and easy to get subtly wrong in a
+  from-scratch reimplementation; wrong deletion-propagation choice on
+  uninstall risks deleting resources (e.g. PVCs) Helm itself would have
+  preserved.
+
+**Decision**: none of the three theoretically available paths are
+acceptable inside M9's scope:
+1. Shelling out to the `helm` CLI — explicitly disallowed by this
+   milestone's own kickoff instructions (same rule as Flux/Argo CD).
+2. Directly manipulating Helm's release Secret/ConfigMap storage records
+   as an implementation shortcut — explicitly disallowed by this
+   section's own original text, since it bypasses Helm's own lifecycle/
+   bookkeeping guarantees.
+3. A partial/"simple releases only" native reimplementation (e.g.
+   detecting and only handling releases with no hooks and no
+   `resource-policy: keep`) — rejected even as a reduced-scope option:
+   it would still write Helm's own bookkeeping records by hand, still
+   carries the revision/apply-strategy hazards above, and would let
+   this app silently claim a form of Helm lifecycle compatibility that
+   has not been demonstrated, which this project's own honesty
+   discipline (`UNKNOWN != ZERO`-style precision) does not accept.
+
+**M9.5 (read-only Helm inspection) is therefore the final Helm
+deliverable for M9** — full release decode, secret-safe values/manifest
+rendering, the bounded/TOCTOU-safe raw-body-read exception, history/
+status/chart metadata — exactly as already implemented and ACCEPTED
+above. No Helm mutation surface (`:helm_rollback`/`:helm_uninstall`)
+exists in M9; none is implied to exist.
+
+**Future work (explicitly out of scope for M9, tracked as backlog, not
+started here)**: a possible dedicated future milestone, "Native Helm
+Engine," could deliberately implement Helm-compatible release lifecycle
+behavior in Rust as its own substantial piece of engineering — release
+storage/history semantics, revision numbering, the full
+deployed/superseded/failed/pending-* status state machine, rollback and
+uninstall lifecycles, hooks and hook ordering, hook delete policies,
+`resource-policy: keep`, three-way-merge/SSA-equivalent apply behavior,
+deletion propagation, wait/timeout semantics, and failure/partial-
+operation behavior. The critical design rule for that future work, if
+undertaken: **`LOOKS EQUIVALENT != BEHAVES EQUIVALENT`** — producing the
+same apparent end state is not the bar; remaining compatible with
+Helm's own expectations (so the real `helm` CLI can keep operating on a
+release SAUR-ON has touched) is. The recommended acceptance strategy for
+that future milestone is a differential one, using the real `helm` CLI
+as a **test oracle only** (never as SAUR-ON's own runtime
+implementation): perform the same fixture operation via real `helm` and
+via SAUR-ON's native engine, then compare resulting resources, release
+revision, release status, release history, hooks, stored release
+metadata, failure behavior, and — critically — whether the real `helm`
+CLI can still successfully operate on the release afterward. That
+milestone does not begin as part of M9, and M9's own acceptance does not
+wait for it.
 
 ### M9.7 — Combined acceptance, full M1-M8B regression, soak
 
 Mirrors M8B.7's own structure. Required coverage: full M1-M8B regression
 (every existing `accept-*.py` script, unmodified); Flux read + guarded
-actions; Argo CD read + guarded actions; Helm read + guarded actions;
+actions; Argo CD read + guarded actions; Helm read-only inspection (M9.6
+guarded actions are explicitly DEFERRED per that section's own
+evidence-backed write-up — M9's acceptance does not wait for them);
 readonly zero-write checks per integration; replacement/TOCTOU rejection;
 controller-unavailable/CRD-absent handling; partial/malformed status
 handling; cancellation; 32x9; terminal restoration; M4 forward held
@@ -1239,10 +1301,55 @@ only then continue.
   question that must not be guessed at), so it is approached with the
   same care as the Helm read design above rather than assumed to follow
   the same shape.
+- 2026-09-20: M9.6 (Helm guarded actions) -- ran the required Open
+  question 4 investigation before writing any mutation code. Findings:
+  no maintained Rust crate implements Helm's client-side action logic
+  (`helm-api` is dead since 2019 and targets the pre-Helm-3 Tiller wire
+  format; no equivalent of Go's `helm.sh/helm/v3/pkg/action` exists in
+  the Rust ecosystem); Helm v3+ has no server/API component at all
+  (Tiller was permanently removed in Helm v3, confirmed still true
+  through Helm 4) so there is no RPC path to target either; and a
+  from-scratch reimplementation of rollback/uninstall directly against
+  the `kube` crate and the release Secret storage carries concrete,
+  specific hazards to Helm's *own* bookkeeping -- revision-number
+  sequencing, the deployed/superseded/failed status state machine, the
+  three-way-merge-vs-Server-Side-Apply strategy a release was previously
+  managed under (HIP-0023), hook lifecycle/ordering/delete-policies, and
+  `helm.sh/resource-policy: keep` filtering are all load-bearing and
+  easy to get subtly wrong, with the failure mode being that the real
+  `helm` CLI later misbehaves or refuses to operate on a release this
+  app touched. Presented these findings with three options (defer;
+  reimplement a reduced "simple releases only" subset; reimplement the
+  full lifecycle) and a recommendation to defer, per this document's
+  own "stop before a safety/architecture decision" governance.
+  **Decision: M9.6 is explicitly DEFERRED**, not attempted as a partial
+  approximation -- none of shelling out to `helm`, directly manipulating
+  Helm's storage records, or a reduced-scope native reimplementation
+  (still writes Helm's own bookkeeping by hand, still carries the same
+  hazards, would silently claim a form of Helm compatibility that was
+  never demonstrated) were judged acceptable inside M9's scope. M9.5
+  (read-only Helm inspection) stands as the final, complete Helm
+  deliverable for M9. A future "Native Helm Engine" milestone is noted
+  as backlog (not started, not scoped into M9) for anyone who later
+  wants to deliberately take on Helm-compatible lifecycle
+  reimplementation as its own substantial project, with the explicit
+  design rule `LOOKS EQUIVALENT != BEHAVES EQUIVALENT` and a
+  differential-testing acceptance strategy (real `helm` CLI as test
+  oracle only, never as SAUR-ON's runtime implementation) recorded in
+  M9.6's own write-up above for whenever that work is picked up.
+  Full write-up, including the rejected options and their specific
+  reasons, is in the M9.6 section above; the ledger and final acceptance
+  conditions have been updated to reflect M9.6 as a deferred, not
+  blocking, slice. Next: M9.7 (combined acceptance, full regression,
+  soak) -- proceeding automatically, since the deferral itself is the
+  accepted, evidence-backed outcome of this slice's own investigation,
+  not an open blocker.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 
-M9 is not ACCEPTED until, for every slice M9.0-M9.7:
+M9 is not ACCEPTED until, for every slice M9.0-M9.5 and M9.7 (M9.6 is
+explicitly DEFERRED, an accepted outcome of its own required
+investigation, not a blocker — see M9.6's own write-up):
 
 - Every supported action goes through the M7 gateway
   (`preflight`/`commit`/`verify`) — no direct UI mutation bypass, no CLI

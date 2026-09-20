@@ -1121,6 +1121,7 @@ impl Runtime {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Flux reconcile: {}", object.name), built)
             }
+            Command::ArgoCd => self.open_argocd_view(),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -1414,6 +1415,42 @@ impl Runtime {
                 );
                 (
                     "Flux".to_string(),
+                    crate::integrations::view::discovery_report(&discovery),
+                )
+            }
+        };
+        self.open_static(&title, text);
+        Ok(())
+    }
+    /// M9.3: read-only, no network beyond what discovery already fetched.
+    /// Mirrors `open_flux_view` exactly -- selected object's own status if
+    /// it is Argo CD's `Application` kind, otherwise the capability report.
+    fn open_argocd_view(&mut self) -> Result<()> {
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let selected = self
+            .state
+            .resource
+            .as_ref()
+            .filter(|r| crate::integrations::argocd::is_status_kind(&r.api.kind))
+            .and_then(|_| self.state.selected_object());
+        let (title, text) = match selected {
+            Some(object) => {
+                let resource = self.state.resource.as_ref().expect("filtered above");
+                let text = crate::integrations::argocd::status_report(
+                    &resource.api.kind,
+                    &object.name,
+                    &object.value,
+                );
+                (format!("Argo CD: {}", object.name), text)
+            }
+            None => {
+                let discovery = crate::integrations::discover(
+                    &connection.catalog,
+                    crate::integrations::Integration::ArgoCd,
+                    crate::integrations::argocd::KINDS,
+                );
+                (
+                    "Argo CD".to_string(),
                     crate::integrations::view::discovery_report(&discovery),
                 )
             }
@@ -3743,6 +3780,48 @@ mod tests {
         let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
         assert!(text.contains("FLUX STATUS: Kustomization/podinfo-kustomize"));
         assert!(text.contains("Ready = True (ReconciliationSucceeded)"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn argocd_view_shows_capability_report_when_argocd_is_not_installed() {
+        let mut rt = runtime();
+        let tasks_before = rt.tasks.len();
+        rt.command(":argocd").expect("argocd capability view");
+        assert_eq!(rt.tasks.len(), tasks_before);
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Argo CD");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Argo CD CAPABILITIES"));
+        assert!(text.contains("STATE: Unsupported"));
+        assert!(text.contains("[absent]  Application"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn argocd_view_shows_object_status_when_an_application_is_selected() {
+        let mut rt = runtime();
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.group = "argoproj.io".into();
+        resource.api.api_version = "argoproj.io/v1alpha1".into();
+        resource.api.kind = "Application".into();
+        resource.api.plural = "applications".into();
+        rt.state.resource = Some(resource);
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"argoproj.io/v1alpha1","kind":"Application",
+            "metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"},
+            "spec":{"project":"default","source":{"repoURL":"https://example.com/repo.git","path":"guestbook","targetRevision":"master"},"destination":{"server":"https://kubernetes.default.svc","namespace":"sauron-m9"}},
+            "status":{"sync":{"status":"Synced","revision":"abc123"},"health":{"status":"Healthy"}}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        let tasks_before = rt.tasks.len();
+        rt.command(":argocd").expect("argocd status view");
+        assert_eq!(rt.tasks.len(), tasks_before);
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Argo CD: guestbook");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("ARGO CD STATUS: Application/guestbook"));
+        assert!(text.contains("SYNC STATUS: Synced (revision: abc123)"));
+        assert!(text.contains("HEALTH STATUS: Healthy"));
         rt.shutdown().await;
     }
     #[tokio::test]

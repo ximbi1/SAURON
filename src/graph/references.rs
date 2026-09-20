@@ -149,6 +149,11 @@ pub fn extract(object: &Object) -> References {
             flux_depends_on(&mut out, object);
             return out;
         }
+        ("argoproj.io", "Application") => {
+            argocd_managed_resources(&mut out, object);
+            argocd_project_ref(&mut out, object);
+            return out;
+        }
         _ => {}
     }
     let base = match (object.api_version.as_str(), object.kind.as_str()) {
@@ -245,6 +250,82 @@ fn flux_depends_on(out: &mut References, object: &Object) {
             format!("/spec/dependsOn/{i}"),
         );
     }
+}
+
+// `status.resources[]` entries are Argo CD's own reconciled inventory --
+// each already carries an explicit `group`/`version` (unlike Flux's
+// sourceRef), so the target's `api_version` is real reported data, never
+// guessed. No `expected_uid`: Argo CD's own inventory does not carry
+// one, matching `Provenance::StatusReference`'s existing "kind/version
+// known, identity not UID-verified" contract.
+fn argocd_managed_resources(out: &mut References, object: &Object) {
+    let Some(resources) = object
+        .value
+        .pointer("/status/resources")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for (i, r) in resources.iter().enumerate() {
+        if !out.budget() {
+            return;
+        }
+        let (Some(kind), Some(version), Some(name)) = (
+            r.get("kind").and_then(Value::as_str),
+            r.get("version").and_then(Value::as_str),
+            r.get("name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty()),
+        ) else {
+            out.malformed = true;
+            continue;
+        };
+        let group = r.get("group").and_then(Value::as_str).unwrap_or("");
+        let api_version = if group.is_empty() {
+            version.to_string()
+        } else {
+            format!("{group}/{version}")
+        };
+        let namespace = r
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or(&object.namespace);
+        out.add(
+            Target {
+                api_version,
+                kind: kind.into(),
+                namespace: namespace.into(),
+                name: name.into(),
+                expected_uid: None,
+                provenance: Provenance::StatusReference,
+            },
+            format!("/status/resources/{i}"),
+        );
+    }
+}
+
+// `spec.project` names an `AppProject` -- schema-fixed to that one kind,
+// same "kind known, version not persisted" shape as Flux's sourceRef.
+fn argocd_project_ref(out: &mut References, object: &Object) {
+    let Some(project) = object
+        .value
+        .pointer("/spec/project")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    out.add(
+        Target {
+            api_version: String::new(),
+            kind: "AppProject".into(),
+            namespace: object.namespace.clone(),
+            name: project.into(),
+            expected_uid: None,
+            provenance: Provenance::StatusReference,
+        },
+        "/spec/project".into(),
+    );
 }
 
 fn pod_spec(out: &mut References, spec: &Value, base: &str, ns: &str) {
@@ -493,6 +574,73 @@ mod tests {
             "kind": "Kustomization",
             "metadata": {"namespace": "n"},
             "spec": {"sourceRef": {"kind": "GitRepository", "name": "x"}},
+        }));
+        assert!(extract(&o).targets.is_empty());
+    }
+
+    #[test]
+    fn argocd_application_managed_resources_carry_real_group_version_never_guessed() {
+        let o = Object::new(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {"namespace": "argocd", "name": "guestbook"},
+            "spec": {"project": "default"},
+            "status": {
+                "resources": [
+                    {"kind": "Service", "name": "guestbook-ui", "namespace": "sauron-m9", "version": "v1", "status": "Synced"},
+                    {"group": "apps", "kind": "Deployment", "name": "guestbook-ui", "namespace": "sauron-m9", "version": "v1", "status": "Synced"},
+                ],
+            },
+        }));
+        let refs = extract(&o);
+        assert!(!refs.malformed);
+        assert_eq!(
+            refs.targets.len(),
+            3,
+            "2 managed resources + 1 AppProject reference"
+        );
+        let service = refs
+            .targets
+            .keys()
+            .find(|t| t.kind == "Service")
+            .expect("Service target");
+        assert_eq!(service.api_version, "v1");
+        assert_eq!(service.namespace, "sauron-m9");
+        assert_eq!(service.provenance, Provenance::StatusReference);
+        let deployment = refs
+            .targets
+            .keys()
+            .find(|t| t.kind == "Deployment")
+            .expect("Deployment target");
+        assert_eq!(deployment.api_version, "apps/v1");
+    }
+
+    #[test]
+    fn argocd_application_project_reference_defaults_to_the_applications_own_namespace() {
+        let o = Object::new(json!({
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {"namespace": "argocd", "name": "guestbook"},
+            "spec": {"project": "default"},
+            "status": {},
+        }));
+        let refs = extract(&o);
+        assert_eq!(refs.targets.len(), 1);
+        let (target, _) = refs.targets.iter().next().unwrap();
+        assert_eq!(target.kind, "AppProject");
+        assert_eq!(target.name, "default");
+        assert_eq!(target.namespace, "argocd");
+        assert_eq!(target.api_version, "");
+        assert_eq!(target.provenance, Provenance::StatusReference);
+    }
+
+    #[test]
+    fn an_unrelated_crd_sharing_the_application_kind_name_never_matches_argocd_dispatch() {
+        let o = Object::new(json!({
+            "apiVersion": "other.example.com/v1",
+            "kind": "Application",
+            "metadata": {"namespace": "n"},
+            "spec": {"project": "default"},
         }));
         assert!(extract(&o).targets.is_empty());
     }

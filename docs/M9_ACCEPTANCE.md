@@ -149,7 +149,7 @@ context name. Never push/publish anything without explicit authorization.
 | M9.0 | Shared integration identity/capability-discovery model | ACCEPTED |
 | M9.1 | Flux read-only views (Kustomization, HelmRelease, GitRepository, OCIRepository, HelmRepository, Bucket, Image* if available) | ACCEPTED |
 | M9.2 | Flux guarded actions (reconcile, suspend, resume) | ACCEPTED |
-| M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | PLANNED |
+| M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | ACCEPTED |
 | M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | PLANNED |
 | M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | PLANNED |
 | M9.6 | Helm guarded actions (rollback, uninstall; upgrade only if a safe bounded input model is found) | PLANNED |
@@ -859,6 +859,110 @@ only then continue.
   dedicated cluster?) is exactly the kind of decision this milestone's
   own instructions require stopping for. Stopping here to ask before
   proceeding into M9.3.
+- 2026-09-20: Open question 1a resolved by explicit user decision:
+  Argo CD installed alongside Flux in `sauron-m9` (see Live-test
+  strategy and Open question 1a's own entries above for the full
+  rationale and live confirmation of zero interference). Real Argo CD
+  `v3.5.3` installed via the pinned official manifest with `--server-
+  side --force-conflicts` (required -- `ApplicationSet`'s CRD schema
+  exceeds client-side apply's 262144-byte annotation limit, a real Argo
+  CD installation quirk, not specific to this repo). All 7 components
+  (`argocd-server`, `argocd-repo-server`, `argocd-application-
+  controller`, `argocd-applicationset-controller`, `argocd-
+  notifications-controller`, `argocd-redis`, `argocd-dex-server`)
+  reached `Running`/`Ready` with zero restarts.
+  **Major finding while investigating placement, resolving Open
+  questions 2 and 3 ahead of M9.4**: `Application.operation` is a plain
+  top-level CRD field. A real sync was triggered purely via `kubectl
+  patch --type merge -p '{"operation":{"sync":{"revision":"master"}}}'`
+  -- zero Argo API server calls -- and produced real
+  `status.operationState` progress/result and real `Service`/
+  `Deployment` objects in `sauron-m9`. `refresh` is the documented
+  `argocd.argoproj.io/refresh` annotation (self-clearing, exactly like
+  Flux's own reconcile annotation). `rollback` is the same
+  `operation.sync` field with an explicit prior `revision` from
+  `status.history` -- no adapter needed for any of the three M9.4
+  actions.
+- 2026-09-20: M9.3 (Argo CD read-only views) implemented and ACCEPTED.
+  - **Listing/browsing needed zero new code**, exactly like M9.1's own
+    Flux precedent: `Application`/`ApplicationSet`/`AppProject` are just
+    catalogued resources once discovered; confirmed live -- the generic
+    table already showed real `Sync Status`/`Health Status` printer
+    columns for `applications.argoproj.io` with no new code.
+  - **`integrations::argocd`** added: `KINDS` (`Application`,
+    `ApplicationSet`, `AppProject`), `STATUS_KINDS` (`Application` only
+    -- `ApplicationSet`'s own shape, a template generating many
+    Applications, and `AppProject`'s own shape, an RBAC/source-
+    restriction policy, are different enough to warrant their own
+    dedicated renderers later; a bounded, documented limitation
+    matching M9.1's own treatment of Flux's Image* kinds), and
+    `status_report()` -- a pure renderer showing every source (single
+    `spec.source` or multi-source `spec.sources`, both real schema
+    shapes), destination, sync status + synced revision, health status,
+    operation state (or its explicit absence, "no sync attempted yet"),
+    every condition verbatim, automated sync policy presence, project,
+    and a bounded (20-row) managed-resource summary from
+    `status.resources`.
+  - **Adjacent/Xray integration** (`graph::references.rs`): a new
+    `(group, kind)` == `("argoproj.io", "Application")` dispatch branch
+    extracts every `status.resources[]` entry as a managed-resource
+    reference and `spec.project` as an `AppProject` reference.
+    **Difference from Flux worth recording**: Argo CD's own
+    `status.resources[]` entries *do* carry real, explicit `group`/
+    `version` fields (unlike Flux's `sourceRef`), so the extracted
+    `Target.api_version` here is real reported data, not the empty-
+    string `StatusReference` exemption Flux needed -- confirmed against
+    real live data before writing the extraction code, not assumed
+    symmetric with Flux's own shape. `spec.project` still uses the
+    empty-version exemption (`AppProject`'s own version is not reported
+    on the referencing object), matching Flux's `sourceRef` precedent
+    exactly for that one case.
+  - **`:argocd` command** added (palette-only), same shape as `:flux`:
+    selected object's own status if it is an `Application`, otherwise
+    the M9.0 capability report.
+  - **Live evidence**: real Argo CD `v3.5.3` on `sauron-m9`, two real
+    `Application` fixtures (`tests/fixtures/m9-argocd.yaml`) --
+    `guestbook` (synced against the real Argo CD example-apps repo,
+    real `Service`/`Deployment` created in `sauron-m9`) and
+    `guestbook-broken` (an intentionally nonexistent `targetRevision`,
+    producing a real `ComparisonError` condition and `Sync: Unknown`).
+    3 live tests in `tests/mutation_m9_argocd_live.rs`, run twice clean
+    via `scripts/test-cluster-m9.sh argocd-test`: discovery reports
+    every installed kind present; the synced Application's status,
+    managed-`Service`/managed-`Deployment` references (resolved against
+    the real discovery catalog, proving the real-group/version path
+    genuinely works live, distinct from Flux's empty-version path), and
+    `AppProject` reference all check out; the broken Application shows
+    `Sync: Unknown` and the real, live-reported `ComparisonError`
+    message verbatim. Flux's own 5 live tests reconfirmed passing
+    unaffected by Argo CD's presence. Full M1-M8B regression
+    reconfirmed green (one unrelated transient container-log-retrieval
+    flake on `kind-sauron-test`, confirmed non-reproducing on retry and
+    unrelated to any M9 change -- classified environment, not app,
+    per this document's own bug-discipline categories).
+  - **Interactive evidence**: manual tmux smoke check confirmed the
+    generic table's own Sync/Health printer columns and `:argocd`'s
+    status view render correctly against the real cluster. Full
+    `accept-m9.py` interactive coverage remains deferred to M9.7.
+  Evidence: 5 unit tests (`integrations::argocd::tests`: synced/healthy
+  Application; broken Application with a comparison-error condition;
+  multi-source Application lists every source; automated sync policy
+  presence shown distinctly; `is_status_kind` recognizes `Application`
+  only); 3 unit tests (`graph::references::tests`: managed resources
+  carry real group/version never guessed; the project reference defaults
+  to the Application's own namespace; an unrelated CRD sharing the
+  `Application` Kind name in a different group never matches); 2
+  app-level tests (capability report when absent; object status when an
+  Application is selected -- both zero network tasks); 1 grammar test; 3
+  live tests (above), run twice. No new fake-HTTP test, same rationale
+  as M9.1 (zero new network code -- discovery and status reads reuse
+  existing conventions). Full locked suite: 284 unit + 68 fake HTTP,
+  fmt/check/clippy (`-D warnings`) clean.
+  Next: M9.4 (Argo CD guarded actions), continuing automatically -- the
+  provider-action-adapter question is already resolved (none needed, see
+  above), so no new architectural blocker is expected, but M9.4's own
+  implementation may still surface one (e.g. exact rollback-history
+  bookkeeping) and will stop and ask if so.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

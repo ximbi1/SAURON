@@ -9,6 +9,7 @@
 //! the full rationale, including why bounded reads, namespace/context
 //! awareness, and journal correlation need zero new code here -- they
 //! already exist and are simply reused by later slices.
+pub mod argocd;
 pub mod flux;
 
 use crate::evidence::Unknown;

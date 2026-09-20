@@ -541,6 +541,7 @@ pub enum Command {
     FluxSuspend,
     FluxResume,
     FluxReconcile,
+    ArgoCd,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -840,6 +841,10 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :flux_reconcile");
             return Ok(Command::FluxReconcile);
         }
+        "argocd" => {
+            ensure!(tail.is_empty(), "Use :argocd");
+            return Ok(Command::ArgoCd);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -925,6 +930,7 @@ pub fn command_names() -> Vec<&'static str> {
         "flux_suspend",
         "flux_resume",
         "flux_reconcile",
+        "argocd",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1187,6 +1193,11 @@ fn flux_suspend_resume_reconcile_take_no_arguments_and_are_distinct_commands() {
     assert!(parse(":flux_suspend now").is_err());
     assert!(parse(":flux_resume now").is_err());
     assert!(parse(":flux_reconcile now").is_err());
+}
+#[test]
+fn argocd_takes_no_arguments() {
+    assert!(matches!(parse(":argocd"), Ok(Command::ArgoCd)));
+    assert!(parse(":argocd now").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

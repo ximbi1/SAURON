@@ -669,6 +669,15 @@ pub async fn verify(
             Some(p) => verify_set_image(connection, &intent.target, p, cancel).await,
             None => Verification::Unknown,
         },
+        MutationEffect::Modify
+            if intent.source_action == "argocd_sync"
+                || intent.source_action == "argocd_rollback" =>
+        {
+            match payload {
+                Some(p) => verify_argocd_operation(connection, &intent.target, p, cancel).await,
+                None => Verification::Unknown,
+            }
+        }
         MutationEffect::Modify => match payload.and_then(leaf_path_and_value) {
             Some((path, expected)) => {
                 verify_modify(connection, &intent.target, &path, &expected, cancel).await
@@ -800,6 +809,79 @@ async fn verify_set_image(
         }
     }
     Verification::Verified
+}
+
+/// M9.4: Argo CD sync/rollback share this verification -- both PATCH the
+/// same top-level `operation.sync` field (rollback just also names an
+/// explicit `revision`), so `leaf_path_and_value`'s single-scalar-leaf
+/// assumption does not apply (the payload's leaf is an object, `{}` or
+/// `{"revision": ...}`, not a scalar) -- the exact same reason
+/// `set_image` needed its own named comparison, applied here for the
+/// same underlying cause. `Verified` here means only "the request was
+/// accepted and is reflected in `status.operationState`" -- never
+/// "sync/rollback completed successfully"; that is a separate, later
+/// fact shown via `integrations::argocd::status_report` on the same
+/// fresh read, never folded into this `Verification`.
+async fn verify_argocd_operation(
+    connection: &Connection,
+    target: &MutationTarget,
+    payload: &Value,
+    cancel: &CancellationToken,
+) -> Verification {
+    let namespace = target
+        .resource
+        .namespaced
+        .then_some(target.scope.namespace.as_str());
+    let api = target.resource.api(connection.client.clone(), namespace);
+    let fetch = read_bounded(
+        connection,
+        api.resource_url(),
+        Some(&target.scope.name),
+        false,
+    );
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Verification::Unknown,
+        result = tokio::time::timeout(connection.timeout(), fetch) => result,
+    };
+    let value = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(crate::evidence::Unknown::NotFound)) => {
+            return Verification::ObservedDifferent("object no longer exists".into());
+        }
+        _ => return Verification::Unknown,
+    };
+    let uid = value.pointer("/metadata/uid").and_then(Value::as_str);
+    if uid != Some(target.scope.uid.as_str()) {
+        return Verification::TargetReplaced;
+    }
+    let requested_revision = payload
+        .pointer("/operation/sync/revision")
+        .and_then(Value::as_str);
+    match requested_revision {
+        // Rollback: an explicit revision was requested -- verified only
+        // once `status.operationState` echoes that exact revision back.
+        Some(expected) => {
+            let observed = value
+                .pointer("/status/operationState/operation/sync/revision")
+                .and_then(Value::as_str);
+            if observed == Some(expected) {
+                Verification::Verified
+            } else {
+                Verification::Pending
+            }
+        }
+        // Plain sync: no specific revision to compare -- verified once
+        // any operation state is recorded at all (the request was
+        // picked up), regardless of its eventual phase.
+        None => {
+            if value.pointer("/status/operationState").is_some() {
+                Verification::Verified
+            } else {
+                Verification::Pending
+            }
+        }
+    }
 }
 
 /// A `Phase::VerificationResult` record correlated by `request_id` to the

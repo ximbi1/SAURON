@@ -542,6 +542,13 @@ pub enum Command {
     FluxResume,
     FluxReconcile,
     ArgoCd,
+    ArgoCdSync,
+    ArgoCdRefresh {
+        hard: bool,
+    },
+    ArgoCdRollback {
+        revision: String,
+    },
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -845,6 +852,28 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :argocd");
             return Ok(Command::ArgoCd);
         }
+        "argocd_sync" => {
+            ensure!(tail.is_empty(), "Use :argocd_sync");
+            return Ok(Command::ArgoCdSync);
+        }
+        "argocd_refresh" => {
+            ensure!(
+                tail.is_empty() || (tail.len() == 1 && tail[0] == "hard"),
+                "Use :argocd_refresh [hard]"
+            );
+            return Ok(Command::ArgoCdRefresh {
+                hard: tail.first().map(String::as_str) == Some("hard"),
+            });
+        }
+        "argocd_rollback" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :argocd_rollback REVISION"
+            );
+            return Ok(Command::ArgoCdRollback {
+                revision: tail[0].clone(),
+            });
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -931,6 +960,9 @@ pub fn command_names() -> Vec<&'static str> {
         "flux_resume",
         "flux_reconcile",
         "argocd",
+        "argocd_sync",
+        "argocd_refresh",
+        "argocd_rollback",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1198,6 +1230,26 @@ fn flux_suspend_resume_reconcile_take_no_arguments_and_are_distinct_commands() {
 fn argocd_takes_no_arguments() {
     assert!(matches!(parse(":argocd"), Ok(Command::ArgoCd)));
     assert!(parse(":argocd now").is_err());
+}
+#[test]
+fn argocd_sync_refresh_rollback_grammar() {
+    assert!(matches!(parse(":argocd_sync"), Ok(Command::ArgoCdSync)));
+    assert!(parse(":argocd_sync now").is_err());
+    assert!(matches!(
+        parse(":argocd_refresh"),
+        Ok(Command::ArgoCdRefresh { hard: false })
+    ));
+    assert!(matches!(
+        parse(":argocd_refresh hard"),
+        Ok(Command::ArgoCdRefresh { hard: true })
+    ));
+    assert!(parse(":argocd_refresh soft").is_err());
+    assert!(matches!(
+        parse(":argocd_rollback abc123"),
+        Ok(Command::ArgoCdRollback { revision }) if revision == "abc123"
+    ));
+    assert!(parse(":argocd_rollback").is_err());
+    assert!(parse(":argocd_rollback abc123 def456").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

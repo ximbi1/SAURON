@@ -150,7 +150,7 @@ context name. Never push/publish anything without explicit authorization.
 | M9.1 | Flux read-only views (Kustomization, HelmRelease, GitRepository, OCIRepository, HelmRepository, Bucket, Image* if available) | ACCEPTED |
 | M9.2 | Flux guarded actions (reconcile, suspend, resume) | ACCEPTED |
 | M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | ACCEPTED |
-| M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | PLANNED |
+| M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | ACCEPTED |
 | M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | PLANNED |
 | M9.6 | Helm guarded actions (rollback, uninstall; upgrade only if a safe bounded input model is found) | PLANNED |
 | M9.7 | Combined acceptance, full M1-M8B regression, soak | PLANNED |
@@ -963,6 +963,87 @@ only then continue.
   above), so no new architectural blocker is expected, but M9.4's own
   implementation may still surface one (e.g. exact rollback-history
   bookkeeping) and will stop and ask if so.
+- 2026-09-20: M9.4 (Argo CD guarded actions: sync, refresh, rollback)
+  implemented and ACCEPTED. No new architectural blocker surfaced --
+  confirmed the design test: zero new `commit`/`preflight` dispatch code
+  (both already PATCH generically for any `Modify` payload regardless of
+  shape); exactly one new named `verify()` branch was needed, for the
+  same underlying reason `set_image` needed one in M8B.2.
+  - **`mutation::workflow`**: `argocd_sync` (`operation.sync: {}`, no
+    explicit revision -- Argo CD syncs to `spec.source`'s own
+    `targetRevision`), `argocd_refresh` (the documented `argocd.
+    argoproj.io/refresh: normal|hard` annotation, mirroring Flux's own
+    reconcile annotation), `argocd_rollback` (the SAME `operation.sync`
+    field with an explicit `revision`). All three `MutationEffect::
+    Modify`, `MutationRisk::Routine` for sync/refresh, `Destructive` for
+    rollback (transparency in the POLICY block only -- per this
+    document's own resolved Open question 5 precedent, no risk tier
+    changes confirmation strength here; all three stay Standard,
+    consistent with M9.2's own Flux suspend/resume/reconcile). Distinct
+    `source_action` per action despite sync/rollback sharing one field,
+    matching M8B.6 Force delete's own "same shape, distinct
+    source_action" precedent for journal/policy auditability.
+  - **One new `kube::mutation::verify()` branch, `verify_argocd_
+    operation`**: sync/rollback's payload leaf is an object (`{}` or
+    `{"revision": ...}`), not a scalar, so the generic `leaf_path_and_
+    value` path does not apply -- confirmed by checking the actual
+    payload shape against `leaf_path_and_value`'s own single-scalar-leaf
+    walk before writing new code, not assumed. `Verified` means only
+    "the request is reflected in `status.operationState`" (any phase for
+    plain sync; the exact requested `revision` echoed back for
+    rollback) -- never "sync/rollback completed successfully". A
+    mismatched/not-yet-present `operationState` is `Pending`, never a
+    false `Verified` and never `ObservedDifferent` (an eventual-
+    consistency window, not a confirmed different fact) -- proved by a
+    dedicated fake-HTTP test asserting exactly this for a wrong-revision
+    echo. Zero new `MutationOutcome`/`Verification`/`MutationEffect`
+    variant, per this document's own resolved Open question 5.
+  - **`:argocd_sync`/`:argocd_refresh [hard]`/`:argocd_rollback
+    REVISION`** commands added (palette-only). `argocd_rollback`'s
+    app-layer handler enforces workflow::argocd_rollback's own
+    documented contract before ever building an intent: the given
+    revision must already appear in the selected Application's own
+    `status.history[].revision` -- an unknown revision is rejected with
+    a clear error, zero intent built, zero request sent. This is
+    deliberately enforced at the UI boundary (closest to free-form user
+    input), not left to the workflow builder alone to trust its caller.
+  - **Live evidence**: real Argo CD `v3.5.3` on `sauron-m9` -- sync
+    (real `status.operationState` recorded), refresh (annotation
+    committed and verified), and rollback (to the same revision
+    `guestbook` was already synced to -- a mechanism proof, matching
+    M8B.6 Force delete's own precedent for "proves the mechanism, not a
+    materially-different real-world scenario", since a genuinely
+    different-revision rollback would need fabricating a second real
+    Git revision, out of proportion here) all committed and verified via
+    the full gateway. `tests/mutation_m9_argocd_live.rs` now has 4 live
+    tests, run twice clean via `scripts/test-cluster-m9.sh argocd-test`.
+    Flux's own 5 live tests reconfirmed passing unaffected. Full M1-M8B
+    regression reconfirmed green.
+  - **Interactive evidence**: manual tmux smoke check confirmed
+    `:argocd_refresh`'s preview (`POLICY: RequireConfirmation`,
+    `CONFIRMATION: required (press confirm once)` -- Standard, exactly
+    as designed) renders correctly against the real cluster. Full
+    `accept-m9.py` interactive coverage remains deferred to M9.7.
+  Evidence: 4 unit tests (`mutation::workflow::tests`: unsupported-kind
+  rejection for all three actions; sync's exact empty-operation payload;
+  refresh's normal-vs-hard annotation distinction; rollback's exact
+  revision payload and distinct `source_action`); 2 app-level tests
+  (readonly denies sync/refresh and sends zero requests; rollback
+  rejects an unknown revision before building an intent, and accepts a
+  known one); 1 grammar test; 2 fake-HTTP tests (commit sends the exact
+  `operation` field for both sync and rollback; verify's dedicated
+  comparison covers all four cases -- plain sync verified once any
+  operationState appears, sync pending when none has appeared yet,
+  rollback verified only on an exact revision echo, rollback pending on
+  a mismatched echo, never a false positive); 4 live tests (above), run
+  twice. Full locked suite: 292 unit + 70 fake HTTP, fmt/check/clippy
+  (`-D warnings`) clean.
+  **M9.0-M9.4 are now ACCEPTED. Flux support (read + guarded actions) is
+  complete.** Next: M9.5 (Helm read-only inspection) -- a materially
+  different domain (client-side release records in Secrets/ConfigMaps,
+  not a reconciling controller) with its own load-bearing requirement
+  (secret-safe redaction) that deserves its own careful design pass
+  before writing code, per this document's own M9.5 contract.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

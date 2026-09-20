@@ -710,6 +710,117 @@ pub fn flux_reconcile(
     })
 }
 
+/// M9.4: the only Argo CD kind confirmed to support `operation.sync` and
+/// the `argocd.argoproj.io/refresh` annotation via a real installed CRD
+/// (`kubectl explain applications.argoproj.io.operation`) -- resolved
+/// live, not assumed (see docs/M9_ACCEPTANCE.md's Open questions 2/3).
+pub const ARGOCD_OPERATION_KINDS: &[&str] = &["Application"];
+
+/// M9.4: a plain sync -- `operation.sync` with no explicit `revision`,
+/// so Argo CD syncs to `spec.source(s)`'s own `targetRevision`. Same
+/// `MutationEffect::Modify` gateway as everything else; verified via
+/// `kube::mutation`'s own dedicated `verify_argocd_operation` (the
+/// payload's leaf is an object, not a scalar, so the generic
+/// `leaf_path_and_value` path does not apply -- the same reason
+/// `set_image` needed its own comparison).
+pub fn argocd_sync(scope: Scope, resource: Resource, request_id: u64) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !ARGOCD_OPERATION_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("argocd_sync", &kind));
+    }
+    let payload = Some(serde_json::json!({"operation": {"sync": {}}}));
+    let change = "operation.sync: requested (to spec.source's own targetRevision)".to_string();
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::Routine,
+            "operation.sync".into(),
+            &payload,
+            "argocd_sync",
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
+/// M9.4: Argo CD's own documented refresh control surface -- an
+/// annotation the controller consumes and clears itself, structurally
+/// identical to Flux's own reconcile annotation (M9.2).
+pub const ARGOCD_REFRESH_ANNOTATION: &str = "argocd.argoproj.io/refresh";
+
+pub fn argocd_refresh(
+    scope: Scope,
+    resource: Resource,
+    hard: bool,
+    request_id: u64,
+) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !ARGOCD_OPERATION_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("argocd_refresh", &kind));
+    }
+    let level = if hard { "hard" } else { "normal" };
+    let payload = Some(serde_json::json!({
+        "metadata": {"annotations": {ARGOCD_REFRESH_ANNOTATION: level}}
+    }));
+    let change = format!("{ARGOCD_REFRESH_ANNOTATION}: {level}");
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::Routine,
+            format!("metadata.annotations[\"{ARGOCD_REFRESH_ANNOTATION}\"]"),
+            &payload,
+            "argocd_refresh",
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
+/// M9.4: rollback is the SAME `operation.sync` field as a plain sync,
+/// with an explicit `revision` -- Argo CD's own underlying rollback
+/// primitive (`argocd app rollback` is a thin wrapper over exactly this,
+/// picking a revision from `status.history`). `revision` must be an
+/// already-recorded entry from the target's own `status.history` --
+/// callers must never pass an unverified/free-form revision string (see
+/// the app-layer caller's own contract). Kept as a genuinely distinct
+/// `source_action` from `argocd_sync`, even though the field is
+/// identical, so the journal/policy stay auditable about which was
+/// requested -- matching M8B.6's own Force delete precedent for "same
+/// shape, distinct source_action".
+pub fn argocd_rollback(
+    scope: Scope,
+    resource: Resource,
+    revision: &str,
+    request_id: u64,
+) -> Result<Built, String> {
+    let kind = resource.api.kind.clone();
+    if !ARGOCD_OPERATION_KINDS.contains(&kind.as_str()) {
+        return Err(unsupported("argocd_rollback", &kind));
+    }
+    let payload = Some(serde_json::json!({"operation": {"sync": {"revision": revision}}}));
+    let change = format!("operation.sync.revision: rollback to {revision}");
+    Ok(Built {
+        intent: intent(
+            scope,
+            resource,
+            MutationEffect::Modify,
+            MutationRisk::Destructive,
+            "operation.sync.revision".into(),
+            &payload,
+            "argocd_rollback",
+            request_id,
+        ),
+        payload,
+        change,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1313,5 +1424,72 @@ mod tests {
         assert_eq!(built.intent.source_action, "flux_reconcile");
         assert_eq!(built.intent.effect, MutationEffect::Modify);
         assert!(built.change.contains("2026-09-19T00:00:00Z"));
+    }
+
+    fn argocd_scope() -> Scope {
+        Scope {
+            epoch: 1,
+            request: 1,
+            context: "kind-sauron-m9".into(),
+            cluster: "kind-sauron-m9".into(),
+            resource: "argoproj.io/v1alpha1/applications".into(),
+            namespace: "argocd".into(),
+            name: "guestbook".into(),
+            uid: "uid-1".into(),
+        }
+    }
+    fn argocd_resource() -> Resource {
+        resource("Application")
+    }
+
+    #[test]
+    fn argocd_sync_refresh_rollback_unsupported_kind_is_rejected_before_building_an_intent() {
+        assert!(argocd_sync(argocd_scope(), resource("Deployment"), 1).is_err());
+        assert!(argocd_refresh(argocd_scope(), resource("Deployment"), false, 1).is_err());
+        assert!(argocd_rollback(argocd_scope(), resource("Deployment"), "abc123", 1).is_err());
+    }
+
+    #[test]
+    fn argocd_sync_requests_an_empty_operation_with_no_revision() {
+        let built = argocd_sync(argocd_scope(), argocd_resource(), 1).unwrap();
+        assert_eq!(
+            built.payload,
+            Some(serde_json::json!({"operation": {"sync": {}}}))
+        );
+        assert_eq!(built.intent.source_action, "argocd_sync");
+        assert_eq!(built.intent.effect, MutationEffect::Modify);
+        assert_eq!(built.intent.risk, MutationRisk::Routine);
+    }
+
+    #[test]
+    fn argocd_refresh_sets_normal_or_hard_annotation_distinctly() {
+        let normal = argocd_refresh(argocd_scope(), argocd_resource(), false, 1).unwrap();
+        assert_eq!(
+            normal.payload,
+            Some(
+                serde_json::json!({"metadata": {"annotations": {"argocd.argoproj.io/refresh": "normal"}}})
+            )
+        );
+        let hard = argocd_refresh(argocd_scope(), argocd_resource(), true, 2).unwrap();
+        assert_eq!(
+            hard.payload,
+            Some(
+                serde_json::json!({"metadata": {"annotations": {"argocd.argoproj.io/refresh": "hard"}}})
+            )
+        );
+        assert_eq!(normal.intent.source_action, "argocd_refresh");
+    }
+
+    #[test]
+    fn argocd_rollback_sets_the_exact_requested_revision_and_has_a_distinct_source_action() {
+        let built = argocd_rollback(argocd_scope(), argocd_resource(), "abc123def", 1).unwrap();
+        assert_eq!(
+            built.payload,
+            Some(serde_json::json!({"operation": {"sync": {"revision": "abc123def"}}}))
+        );
+        assert_eq!(built.intent.source_action, "argocd_rollback");
+        assert_ne!(built.intent.source_action, "argocd_sync");
+        assert_eq!(built.intent.risk, MutationRisk::Destructive);
+        assert!(built.change.contains("abc123def"));
     }
 }

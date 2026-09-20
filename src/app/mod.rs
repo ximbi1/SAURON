@@ -1122,6 +1122,68 @@ impl Runtime {
                 self.open_workflow_document(format!("Flux reconcile: {}", object.name), built)
             }
             Command::ArgoCd => self.open_argocd_view(),
+            Command::ArgoCdSync => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::argocd_sync(scope, resource, request_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Argo CD sync: {}", object.name), built)
+            }
+            Command::ArgoCdRefresh { hard } => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built =
+                    crate::mutation::workflow::argocd_refresh(scope, resource, hard, request_id)
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Argo CD refresh: {}", object.name), built)
+            }
+            Command::ArgoCdRollback { revision } => {
+                let object = self.state.selected_object().context("Select a row first")?;
+                let resource = self
+                    .state
+                    .resource
+                    .clone()
+                    .context("No resource selected")?;
+                // The revision must already be one Argo CD itself recorded
+                // for this exact Application -- never a free-form/
+                // unverified string (see `workflow::argocd_rollback`'s own
+                // doc comment for why: this is what keeps rollback from
+                // becoming "sync to anything the user happens to type").
+                let known = object
+                    .value
+                    .pointer("/status/history")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|history| {
+                        history.iter().any(|entry| {
+                            entry.get("revision").and_then(serde_json::Value::as_str)
+                                == Some(revision.as_str())
+                        })
+                    });
+                anyhow::ensure!(
+                    known,
+                    "{revision:?} is not in this Application's own status.history; rollback only \
+                     accepts an already-recorded revision"
+                );
+                let scope = self.mutation_scope(&object, &resource)?;
+                let request_id = scope.request;
+                let built = crate::mutation::workflow::argocd_rollback(
+                    scope, resource, &revision, request_id,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                self.open_workflow_document(format!("Argo CD rollback: {}", object.name), built)
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -3824,6 +3886,92 @@ mod tests {
         assert!(text.contains("HEALTH STATUS: Healthy"));
         rt.shutdown().await;
     }
+    fn argocd_application_object(history_revision: Option<&str>) -> crate::resources::Object {
+        let history = history_revision
+            .map(|rev| serde_json::json!([{"revision": rev}]))
+            .unwrap_or_else(|| serde_json::json!([]));
+        crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"argoproj.io/v1alpha1","kind":"Application",
+            "metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"},
+            "spec":{"project":"default","source":{"repoURL":"https://example.com/repo.git","path":"guestbook","targetRevision":"master"},"destination":{"server":"https://kubernetes.default.svc","namespace":"sauron-m9"}},
+            "status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"},"history":history}
+        }))
+    }
+    fn open_argocd_application(rt: &mut Runtime, history_revision: Option<&str>) {
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.group = "argoproj.io".into();
+        resource.api.api_version = "argoproj.io/v1alpha1".into();
+        resource.api.kind = "Application".into();
+        resource.api.plural = "applications".into();
+        rt.state.resource = Some(resource);
+        rt.state.rows = vec![std::sync::Arc::new(argocd_application_object(
+            history_revision,
+        ))];
+        rt.state.selected = Some("uid-1".into());
+    }
+
+    #[tokio::test]
+    async fn mutation_argocd_sync_and_refresh_under_readonly_deny_and_send_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        open_argocd_application(&mut rt, None);
+        rt.command(":argocd_sync")
+            .expect("argocd_sync preview opens even when denied");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(
+            workflow.evaluation.decision,
+            crate::mutation::PolicyDecision::Deny
+        );
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "denied argocd_sync confirm must error, never silently no-op"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
+
+        open_argocd_application(&mut rt, None);
+        rt.command(":argocd_refresh")
+            .expect("argocd_refresh preview opens even when denied");
+        assert!(rt.action(Action::MutationConfirm).is_err());
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn argocd_rollback_rejects_a_revision_not_in_status_history() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_argocd_application(&mut rt, Some("known-revision"));
+        assert!(
+            rt.command(":argocd_rollback unknown-revision").is_err(),
+            "rollback must refuse a revision absent from status.history"
+        );
+        assert!(!matches!(rt.state.mode, Mode::Document(_)));
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn argocd_rollback_accepts_a_revision_present_in_status_history() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        open_argocd_application(&mut rt, Some("known-revision"));
+        rt.command(":argocd_rollback known-revision")
+            .expect("rollback preview opens for a known history revision");
+        let workflow = rt
+            .active_document_mut()
+            .and_then(|d| d.workflow.as_ref())
+            .expect("workflow set");
+        assert_eq!(workflow.intent.source_action, "argocd_rollback");
+        assert!(workflow.change.contains("known-revision"));
+        rt.shutdown().await;
+    }
+
     #[tokio::test]
     async fn adjacent_follow_navigates_by_canonical_identity_and_history_returns() {
         let mut rt = runtime();

@@ -5,12 +5,17 @@
 //! `SAURON_TEST_M9_KUBECONFIG` -- the same dedicated M9 kubeconfig
 //! `mutation_m9_live.rs` (Flux) already uses.
 use sauron::{
+    app::session::Scope,
     config::Config,
     graph::{Provenance, references},
     integrations::{self, argocd},
-    kube::{self, ConnectOptions, relationships::resolve_target},
+    kube::{self, ConnectOptions, mutation as executor, relationships::resolve_target},
+    mutation::{
+        Confirmation, ConfirmationRequirement, MutationOutcome, Verification, policy, workflow,
+    },
     resources::Object,
 };
+use tokio_util::sync::CancellationToken;
 
 async fn connect() -> kube::Connection {
     let path = std::env::var_os("SAURON_TEST_M9_KUBECONFIG").expect("explicit M9 test kubeconfig");
@@ -25,6 +30,42 @@ async fn connect() -> kube::Connection {
     )
     .await
     .expect("connect to sauron-m9")
+}
+
+async fn connect_mutating() -> kube::Connection {
+    let path = std::env::var_os("SAURON_TEST_M9_KUBECONFIG").expect("explicit M9 test kubeconfig");
+    kube::connect(
+        ConnectOptions {
+            kubeconfig: Some(path.into()),
+            context: Some("kind-sauron-m9".into()),
+            force_readonly: false,
+            mutation_test_cluster_verified: false,
+        },
+        Config::default(),
+    )
+    .await
+    .expect("connect to sauron-m9")
+}
+
+fn verified_policy() -> policy::PolicyContext {
+    policy::PolicyContext {
+        readonly: false,
+        readonly_forced: false,
+        cluster_verified_for_mutation: true,
+        ..policy::PolicyContext::default()
+    }
+}
+
+fn new_journal(label: &str) -> (sauron::mutation::journal::Journal, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "sauron-m9-argocd-live-{label}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("journal dir");
+    (
+        sauron::mutation::journal::Journal::new(dir.join("mutations.jsonl")),
+        dir,
+    )
 }
 
 #[tokio::test]
@@ -123,4 +164,147 @@ async fn live_broken_application_shows_unknown_sync_and_a_real_comparison_error(
         report.contains("unable to resolve"),
         "the exact controller-reported message must be shown verbatim: {report}"
     );
+}
+
+/// M9.4: exercises the full guarded-action gateway against a real
+/// Application. Rollback targets the same revision `guestbook` is
+/// already synced to (a mechanism proof, matching M8B.6 Force delete's
+/// own precedent -- a genuinely different-revision rollback scenario
+/// would need a second real Git revision to be meaningful, which is out
+/// of proportion to fabricate here) -- what this test proves is that
+/// `argocd_rollback`'s exact CRD-level mechanism (an explicit `revision`
+/// echoed back in `status.operationState`) works against a real
+/// controller, not that the app picked a materially different target.
+#[tokio::test]
+#[ignore = "explicit isolated kind-sauron-m9 config and m9-argocd.yaml fixtures required; syncs and rolls back a real Application"]
+async fn live_argocd_sync_refresh_and_rollback_round_trip_on_a_real_application() {
+    let c = connect_mutating().await;
+    let resource = c
+        .catalog
+        .group_kind("argoproj.io", "Application")
+        .cloned()
+        .expect("Application discovered");
+    let api = resource.api(c.client.clone(), Some("argocd"));
+    let before =
+        Object::new(serde_json::to_value(api.get("guestbook").await.expect("get")).unwrap());
+    let known_revision = before
+        .value
+        .pointer("/status/history/0/revision")
+        .and_then(serde_json::Value::as_str)
+        .expect("guestbook already has a recorded sync in status.history")
+        .to_string();
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: c.context.clone(),
+        cluster: c.cluster.clone(),
+        resource: resource.id(),
+        namespace: before.namespace.clone(),
+        name: before.name.clone(),
+        uid: before.uid.clone(),
+    };
+    let cancel = CancellationToken::new();
+
+    // --- Sync ---
+    let built = workflow::argocd_sync(scope.clone(), resource.clone(), 1)
+        .expect("argocd_sync supported for Application");
+    let evaluation = policy::evaluate(&verified_policy(), &built.intent);
+    assert_eq!(
+        evaluation.decision,
+        sauron::mutation::PolicyDecision::RequireConfirmation
+    );
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let (journal, dir) = new_journal("sync");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    let verification = executor::verify(&c, &built.intent, built.payload.as_ref(), &cancel).await;
+    assert!(
+        matches!(verification, Verification::Verified | Verification::Pending),
+        "sync verification only confirms operationState was recorded, never final success: {verification:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // --- Refresh ---
+    let built = workflow::argocd_refresh(scope.clone(), resource.clone(), false, 2)
+        .expect("argocd_refresh supported for Application");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let (journal, dir) = new_journal("refresh");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    let verification = executor::verify(&c, &built.intent, built.payload.as_ref(), &cancel).await;
+    assert_eq!(
+        verification,
+        Verification::Verified,
+        "the annotation itself must be committed and observed -- Argo CD's own consumption/clearing of it is a separate, later fact"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // --- Rollback ---
+    let built = workflow::argocd_rollback(scope, resource.clone(), &known_revision, 3)
+        .expect("argocd_rollback supported for Application");
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let (journal, dir) = new_journal("rollback");
+    let outcome = executor::commit(
+        &c,
+        &verified_policy(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    let verification = executor::verify(&c, &built.intent, built.payload.as_ref(), &cancel).await;
+    assert!(
+        matches!(verification, Verification::Verified | Verification::Pending),
+        "rollback verification only confirms the exact requested revision was echoed back, never final success: {verification:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Third, separate fact: a fresh read of Argo CD's OWN sync/health,
+    // never claimed by the commit/verification facts above.
+    let after =
+        Object::new(serde_json::to_value(api.get("guestbook").await.expect("get")).unwrap());
+    let report = argocd::status_report("Application", &after.name, &after.value);
+    assert!(report.contains("OPERATION STATE:"), "{report}");
 }

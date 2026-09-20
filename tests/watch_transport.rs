@@ -1368,6 +1368,225 @@ async fn verify_flux_suspend_and_reconcile_confirm_via_the_generic_modify_path_z
     assert_eq!(outcome, sauron::mutation::Verification::Verified);
 }
 
+#[tokio::test]
+async fn mutation_argocd_sync_and_rollback_commit_the_exact_operation_field() {
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::commit};
+    use sauron::mutation::{
+        Confirmation, ConfirmationRequirement, MutationOutcome, PolicyDecision, policy, workflow,
+    };
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "argoproj.io/v1alpha1/applications".into(),
+        namespace: "argocd".into(),
+        name: "guestbook".into(),
+        uid: "uid-1".into(),
+    };
+    let argocd_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = "argoproj.io".into();
+            a.api_version = "argoproj.io/v1alpha1".into();
+            a.kind = "Application".into();
+            a.plural = "applications".into();
+            a
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+
+    // --- Sync: no explicit revision.
+    let built = workflow::argocd_sync(scope.clone(), argocd_resource.clone(), 1)
+        .expect("argocd_sync supported for Application");
+    let evaluation = policy::evaluate(&verified_policy_context(), &built.intent);
+    assert_eq!(evaluation.decision, PolicyDecision::RequireConfirmation);
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1","resourceVersion":"5"}}).to_string())
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(request.contains("\"operation\":{\"sync\":{}}"), "the exact sync payload must be sent: {request}");
+            (200, json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &fake_connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+
+    // --- Rollback: explicit prior revision.
+    let built = workflow::argocd_rollback(
+        scope,
+        argocd_resource,
+        "8088f4c0d970abb09e250248cc97e35623447cb5",
+        2,
+    )
+    .expect("argocd_rollback supported for Application");
+    let server = Server::with_request(|request| {
+        if request.starts_with("GET") {
+            (200, json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1","resourceVersion":"5"}}).to_string())
+        } else {
+            assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+            assert!(request.contains("8088f4c0d970abb09e250248cc97e35623447cb5"), "the exact rollback revision must be sent: {request}");
+            (200, json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"}}).to_string())
+        }
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let confirmation = Confirmation {
+        request_id: built.intent.request_id,
+        scope: built.intent.target.scope.clone(),
+        effect: built.intent.effect,
+        payload_sha256: built.intent.payload_sha256.clone(),
+        requirement: ConfirmationRequirement::Standard,
+    };
+    let outcome = commit(
+        &fake_connection,
+        &verified_policy_context(),
+        1,
+        &built.intent,
+        Some(&confirmation),
+        built.payload.clone(),
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn verify_argocd_sync_and_rollback_via_the_dedicated_operation_comparison() {
+    use sauron::app::session::Scope;
+    use sauron::kube::{discovery::Resource, mutation::verify};
+    use sauron::mutation::{Verification, workflow};
+    let scope = Scope {
+        epoch: 1,
+        request: 1,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "argoproj.io/v1alpha1/applications".into(),
+        namespace: "argocd".into(),
+        name: "guestbook".into(),
+        uid: "uid-1".into(),
+    };
+    let argocd_resource = Resource {
+        api: {
+            let mut a = resource().api;
+            a.group = "argoproj.io".into();
+            a.api_version = "argoproj.io/v1alpha1".into();
+            a.kind = "Application".into();
+            a.plural = "applications".into();
+            a
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["patch".into()],
+    };
+
+    // Plain sync: verified once ANY operationState is recorded.
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"},"status":{"operationState":{"phase":"Running"}}}).to_string(),
+        )
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let built = workflow::argocd_sync(scope.clone(), argocd_resource.clone(), 1)
+        .expect("argocd_sync supported for Application");
+    let outcome = verify(
+        &fake_connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, Verification::Verified);
+
+    // Sync with no operationState recorded yet: Pending, not a failure.
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"}}).to_string(),
+        )
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let outcome = verify(
+        &fake_connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, Verification::Pending);
+
+    // Rollback: verified only once the exact requested revision is echoed
+    // back in status.operationState.operation.sync.revision.
+    let built = workflow::argocd_rollback(scope, argocd_resource, "abc123", 2)
+        .expect("argocd_rollback supported for Application");
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"},"status":{"operationState":{"phase":"Running","operation":{"sync":{"revision":"abc123"}}}}}).to_string(),
+        )
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let outcome = verify(
+        &fake_connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, Verification::Verified);
+
+    // Rollback with the WRONG revision echoed back: Pending, never a
+    // false Verified.
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"namespace":"argocd","name":"guestbook","uid":"uid-1"},"status":{"operationState":{"phase":"Running","operation":{"sync":{"revision":"different"}}}}}).to_string(),
+        )
+    })
+    .await;
+    let fake_connection = connection(server.client());
+    let outcome = verify(
+        &fake_connection,
+        &built.intent,
+        built.payload.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(outcome, Verification::Pending);
+}
+
 fn modify_intent_with_payload(
     uid: &str,
     payload: serde_json::Value,

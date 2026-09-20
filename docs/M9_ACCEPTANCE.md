@@ -151,7 +151,7 @@ context name. Never push/publish anything without explicit authorization.
 | M9.2 | Flux guarded actions (reconcile, suspend, resume) | ACCEPTED |
 | M9.3 | Argo CD read-only views (Application, opportunistic ApplicationSet) | ACCEPTED |
 | M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | ACCEPTED |
-| M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | PLANNED |
+| M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | ACCEPTED |
 | M9.6 | Helm guarded actions (rollback, uninstall; upgrade only if a safe bounded input model is found) | PLANNED |
 | M9.7 | Combined acceptance, full M1-M8B regression, soak | PLANNED |
 
@@ -365,6 +365,156 @@ Integrate Helm-owned resources into Adjacent/Xray only via evidence/
 provenance (the `app.kubernetes.io/managed-by: Helm` + release name/
 namespace labels Helm itself sets, or owner references where Helm sets
 them) — never a heuristic name-prefix guess.
+
+#### M9.5 security design decision: a narrow, explicit exception, not a relaxation
+
+Implementation surfaced a genuine architectural conflict: `resources::
+Object::new()` unconditionally calls `safety::redact()`, which blanks
+every Secret's `data`/`stringData` to `<redacted>` at construction —
+meaning the generic watch/Store/Object pipeline can *never* carry a Helm
+release Secret's real body (a Helm release lives entirely inside one
+such Secret's `data.release` field). This is deliberate, pre-existing,
+load-bearing behavior (reinforced independently by
+`kube::relationships::fetch_target`'s own metadata-only Secret fetch) —
+not a bug to route around. Per this document's own "stop before an
+architectural/safety decision" governance, this was raised and decided
+explicitly rather than guessed at.
+
+**Decision (verbatim, as directed): treat this as a narrowly-scoped
+security capability, not as a relaxation of the generic Secret
+invariant.** The old absolute statement "SAUR-ON never reads a Secret
+body" becomes:
+
+> SAUR-ON's generic object model never reads or retains Secret bodies;
+> the explicit Helm-release inspection capability may transiently read
+> one exact verified Helm release Secret under a bounded, non-
+> persistent, sanitizing path.
+
+Restated as the load-bearing contract (also carried verbatim as this
+crate's own doc comments on `integrations::helm` and `kube::helm`):
+
+> SAUR-ON's generic object/evidence pipeline never reads, stores,
+> propagates, or renders Secret bodies. A single explicit, bounded
+> Helm-release reader may transiently fetch one exact Secret body only
+> when the user explicitly requests Helm inspection of a previously
+> identified Helm release.
+
+What stays unchanged, with zero exception: `Object::new()` continues to
+redact Secret `data`/`stringData` unconditionally; `Store`/watch/list/
+`fetch_target` gain no Helm-specific carve-out; there is no generic
+"fetch a raw Secret" helper any other caller could reach for.
+
+What the one narrow exception looks like, as implemented:
+
+- **Dedicated module/path** — `kube::helm::read_release` is the *only*
+  function in the crate that ever calls
+  `integrations::helm::decode_release` (kept `pub(crate)`, never `pub`,
+  so nothing else can reach it). It never routes the raw Secret through
+  `Object::new`, `Store`, `Timeline`, the graph, the mutation journal, or
+  any generic evidence structure.
+- **Explicit user request only** — invoked only from
+  `app::open_helm_view`'s own `:helm` command handler, spawned as its
+  own one-shot task exactly like `start_adjacent`'s established
+  convention (reusing the existing `Payload::Document`/
+  `Payload::DocumentError` events — no new plumbing). Never triggered by
+  selection, watch, or any background path.
+- **Exact identity / TOCTOU** — `open_helm_view` uses the already-
+  selected (already-redacted) object only to know it is a `Secret` and
+  to identify *which* one (namespace/name/UID) to fetch — its own
+  `type` field is presentational only and is deliberately **not**
+  trusted as authorization (a plain `Opaque` Secret is still allowed to
+  reach the fetch; proven by
+  `helm_view_does_not_trust_the_cached_type_field_the_fresh_fetch_re_
+  verifies_it`). `read_release` performs one bounded GET and
+  independently re-verifies, against that *fresh* response: UID must
+  still equal the expected UID (else `TargetReplaced`, fail closed —
+  proven live by `live_stale_uid_against_a_real_secret_fails_closed`
+  and via fake-HTTP by
+  `helm_read_release_fails_closed_on_uid_mismatch_never_decoding_a_
+  replaced_object`), and `type` must still be `helm.sh/release.v1`
+  (else `WrongType` — proven via fake-HTTP by
+  `helm_read_release_rejects_a_secret_that_is_not_a_helm_release_
+  fresh_check_not_cached`). Only then is `data.release` decoded.
+- **Bounded raw handling** — the HTTP response itself is bounded by the
+  existing `read_bounded` 2MB single-object cap (reused unchanged, zero
+  new HTTP code); the base64-decoded bytes and the gunzipped bytes each
+  have their own independent bound
+  (`integrations::helm::MAX_DECOMPRESSED_BYTES` = 8MB, matching
+  `read_bounded`'s own list-cap convention), since gzip can expand a
+  small compressed payload far past the HTTP cap — proven by
+  `decode_release_refuses_a_decompression_bomb_beyond_the_bounded_cap`.
+  No automatic retry. Every distinct failure (missing field, bad
+  encoding, oversized/corrupt compression, non-JSON-object content) is
+  its own explicit `DecodeError`/`HelmReadError` variant — never
+  collapsed into a false "empty release".
+- **Raw material lifetime** — the raw fetched Secret JSON, `data.release`,
+  the decoded/decompressed bytes, and the unredacted release record are
+  all local to `read_release`'s own async block and are dropped when it
+  returns. No persistent cache, no `Store` insertion, no journal entry,
+  no tracing/debug formatting of raw content anywhere in the path.
+  Every `HelmReadError` variant's `Display` is a fixed, enum-tag-derived
+  message with no field that could ever carry payload bytes — proven
+  structurally (no such field exists) and at runtime by
+  `error_display_never_embeds_raw_payload_content`.
+- **Sanitization boundary** — the only thing that crosses the module
+  boundary outward is `integrations::helm::HelmReleaseView`, produced by
+  `sanitize()` immediately after decode. There is no
+  `DecodedHelmRelease`-shaped type exposed anywhere else in the crate.
+- **Values** — `sanitize()`'s internal `redacted_values` masks
+  recursively at any JSON depth via case-insensitive substring matching
+  (`password`, `token`, `secret`, `credential`, `private-key`,
+  `apikey`, `passphrase`, and the deliberately broad `key`, per the
+  explicit instruction to cover "password/token/secret/key/credential
+  and reasonable variants") — proven by
+  `sanitize_masks_sensitive_keys_at_any_depth_never_the_rest`. This
+  masking happens inside the module, before the view is returned; no
+  renderer downstream is trusted to redact later.
+- **Manifest** — `manifest_resources` extracts only
+  `apiVersion`/`kind`/`metadata.{name,namespace}` per rendered document
+  (bounded to 200 documents); a `Secret`-kind manifest entry contributes
+  only that identity, never its `data`/`stringData` (those fields are
+  never even parsed) — proven by
+  `sanitize_extracts_manifest_identity_only_never_secret_data`.
+- **Notes are deliberately never shown** — `info.notes` is investigated
+  and rejected as unsafe to surface: it is freeform chart-author prose
+  (NOTES.txt) that real-world charts commonly interpolate generated
+  credentials into (e.g. an auto-created database password echoed back
+  to the installer), and unlike `values`/`manifest` there is no
+  structured key to redact by — there is no reliable, general
+  sanitization contract for arbitrary text. `HelmReleaseView` has no
+  `notes` field at all (a compile-time guarantee, restated at runtime by
+  `sanitize_never_carries_notes_into_the_view` and
+  `status_report_never_contains_the_raw_secret_value_or_notes`).
+
+Evidence: 9 unit tests in `integrations::helm` (decode round-trip;
+every distinct decode failure mode; decompression-bomb refusal; values
+masked at any depth; manifest identity-only extraction; notes never
+carried into the view; `status_report` never contains a raw secret
+value or notes; explicit "none reported" state when values are absent)
+plus 1 in `kube::helm` (error `Display` never embeds raw payload); 3
+app-level tests (`:helm` requires selecting a *Secret* first — a
+presentational, pre-fetch check only; the cached `type` field is never
+trusted as authorization, only the fresh fetch's own re-verified type
+is; `:helm` on a plausible release Secret spawns exactly one bounded
+fetch task and never attempts to decode the already-redacted cached
+copy); 4 fake-HTTP tests in `tests/watch_transport.rs` against a real
+HTTP endpoint (real decode+sanitize round trip against a live-shaped
+response; UID-mismatch fails closed; wrong-type fails closed even with
+a release-shaped name; malformed encoding is an explicit error, never
+an empty view); 4 live tests in `tests/mutation_m9_helm_live.rs` against
+two real, independently-created Helm releases on `sauron-m9`
+(`demo-release`, installed via the real `helm` CLI as pure test-harness
+tooling — see this document's own established convention for that
+distinction — and `podinfo-helm`, created by Flux's own `HelmRelease`
+from `tests/fixtures/m9-flux.yaml`): both real releases decode and
+sanitize correctly, a real-but-wrong UID fails closed, and a
+nonexistent release name is an explicit error, never a fabricated view.
+Full locked suite green (305 unit + 74 fake-HTTP), `cargo fmt --check`
+and `cargo clippy --all-targets -D warnings` clean, full M1-M8B
+interactive regression (`accept-m8b.py`) reconfirmed green on the
+untouched `kind-sauron-test` cluster, and Flux/Argo CD's own live test
+suites (9 tests) reconfirmed green on `sauron-m9` — zero drift from
+touching `src/app/mod.rs`.
 
 ### M9.6 — Helm guarded actions
 
@@ -1044,6 +1194,51 @@ only then continue.
   not a reconciling controller) with its own load-bearing requirement
   (secret-safe redaction) that deserves its own careful design pass
   before writing code, per this document's own M9.5 contract.
+- 2026-09-20: M9.5 (Helm read-only inspection) -- implementation hit a
+  genuine architectural conflict immediately: `resources::Object::new()`
+  unconditionally redacts every Secret's `data`/`stringData`, so the
+  generic object pipeline can never carry a Helm release's real body (a
+  release lives entirely inside one Secret's `data.release` field).
+  Stopped before implementing past this per this document's own "stop
+  at safety-defining decisions" governance, presented the finding with
+  options and a recommendation, and received back a precise, fully
+  itemized decision: implement a single, narrowly-scoped, explicit,
+  bounded, TOCTOU-safe, sanitizing Helm-release reader as the one
+  permitted exception to the generic "never read a Secret body"
+  invariant -- documented in full, verbatim, under this section's own
+  "M9.5 security design decision" write-up above. Implemented exactly
+  as specified: `integrations::helm` (pure decode/sanitize logic --
+  `decode_release` now `pub(crate)`, `HelmReleaseView`/`sanitize()` as
+  the only public boundary crossing outward, notes permanently excluded)
+  and the new `kube::helm::read_release` (the one function in the crate
+  allowed to fetch a release Secret's body -- fresh bounded GET,
+  independent UID+type re-verification against that fresh response,
+  fail-closed on either mismatch). `app::open_helm_view` rebuilt as an
+  async spawn reusing the existing `Payload::Document`/
+  `Payload::DocumentError` plumbing (`start_adjacent`'s own convention)
+  instead of the original broken synchronous design that tried to
+  decode the already-redacted cached object. Evidence: 9 unit tests in
+  `integrations::helm`, 1 in `kube::helm`, 3 app-level tests, 4 fake-HTTP
+  tests (`tests/watch_transport.rs`, against a real HTTP endpoint -- the
+  UID/type re-verification is a real security property, not just pure
+  logic, so it is tested against a real fetch, not just
+  decode/sanitize in isolation), and 4 live tests
+  (`tests/mutation_m9_helm_live.rs`) against two independently-created
+  real Helm releases on `sauron-m9` (`demo-release` via the real `helm`
+  CLI as test-harness tooling; `podinfo-helm` via Flux's own
+  `HelmRelease`), run via the new `scripts/test-cluster-m9.sh helm-test`
+  case. Full locked suite green (305 unit + 74 fake-HTTP), fmt/clippy
+  (`-D warnings`) clean, `accept-m8b.py` full interactive regression
+  reconfirmed green on the untouched `kind-sauron-test` cluster, and
+  Flux's (5) + Argo CD's (4) own live test suites reconfirmed green on
+  `sauron-m9` -- zero drift from touching the shared `src/app/mod.rs`.
+  **M9.0-M9.5 are now ACCEPTED.** Next: M9.6 (Helm guarded actions --
+  rollback, uninstall) -- expected to itself raise a "must-stop"
+  decision (Open question 4: whether a safe native Helm execution
+  library/path exists, per this document's own explicit example of a
+  question that must not be guessed at), so it is approached with the
+  same care as the Helm read design above rather than assumed to follow
+  the same shape.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

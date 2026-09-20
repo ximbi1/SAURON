@@ -83,5 +83,14 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_M9_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_m9_argocd_live -- --ignored --nocapture
     ;;
-  *) echo 'Usage: bash scripts/test-cluster-m9.sh [check|flux-install|flux-fixtures|flux-reset|flux-test|argocd-install|argocd-fixtures|argocd-reset|argocd-test]' >&2; exit 2 ;;
+  helm-test)
+    # No install/fixtures case needed: Helm has no controller/CRD (see
+    # integrations::helm's own module doc comment) -- this test relies
+    # on `demo-release` (installed once via the real `helm` CLI as pure
+    # test-harness tooling) and `podinfo-helm` (already created by
+    # Flux's own HelmRelease from tests/fixtures/m9-flux.yaml).
+    cd "$repo_dir"
+    SAURON_TEST_M9_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_m9_helm_live -- --ignored --nocapture
+    ;;
+  *) echo 'Usage: bash scripts/test-cluster-m9.sh [check|flux-install|flux-fixtures|flux-reset|flux-test|argocd-install|argocd-fixtures|argocd-reset|argocd-test|helm-test]' >&2; exit 2 ;;
 esac

@@ -1184,6 +1184,7 @@ impl Runtime {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Argo CD rollback: {}", object.name), built)
             }
+            Command::Helm => self.open_helm_view(),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -1518,6 +1519,72 @@ impl Runtime {
             }
         };
         self.open_static(&title, text);
+        Ok(())
+    }
+    /// M9.5: the ONLY path in this app that ever reads a Helm release
+    /// Secret's body. Unlike `:flux`/`:argocd`, there is no "capability
+    /// report" fallback: Helm has no CRD/schema presence to discover
+    /// (see `integrations::helm`'s own module doc comment), so the only
+    /// meaningful state is "a release record is selected" or not.
+    ///
+    /// The already-cached, already-redacted `object` here is used only
+    /// to decide whether this looks like a Helm release Secret and to
+    /// identify WHICH object to fetch (namespace/name/uid) -- it is never
+    /// itself the source of the release body (its `data` is already
+    /// `<redacted>` by `Object::new`'s own unconditional Secret
+    /// redaction) and it is never treated as authorization to skip
+    /// re-verification. `kube::helm::read_release` performs a fresh,
+    /// bounded GET and independently re-checks UID and `type` before
+    /// ever decoding -- see that module's own doc comment.
+    fn open_helm_view(&mut self) -> Result<()> {
+        let object = self
+            .state
+            .selected_object()
+            .context("Select a Helm release Secret first (type=helm.sh/release.v1)")?;
+        anyhow::ensure!(
+            object.kind == "Secret",
+            "Selected object is not a Secret (Helm releases are stored as Secrets)"
+        );
+        let connection = self.connection.clone().context("Not connected")?;
+        let scope = session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: "v1/secrets".to_string(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let name = object.name.clone();
+        self.open_static(&format!("Helm: {name}"), "Loading Helm release...".into());
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        self.tasks.spawn(async move {
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                result = crate::kube::helm::read_release(&connection, &scope, &cancel) => result,
+            };
+            let payload = match result {
+                Ok(view) => Payload::Document {
+                    request,
+                    title: format!("Helm: {name}"),
+                    text: crate::integrations::helm::status_report(&view),
+                    adjacent: vec![],
+                },
+                Err(e) => Payload::DocumentError {
+                    request,
+                    error: e.to_string(),
+                },
+            };
+            tokio::select! { _ = cancel.cancelled() => {}, _ = tx.send(Event { epoch, payload }) => {} }
+        });
         Ok(())
     }
     /// M8.0: the single place that builds a `PolicyContext` from live runtime
@@ -3969,6 +4036,86 @@ mod tests {
             .expect("workflow set");
         assert_eq!(workflow.intent.source_action, "argocd_rollback");
         assert!(workflow.change.contains("known-revision"));
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn helm_view_requires_selecting_a_secret_first() {
+        let mut rt = runtime();
+        assert!(
+            rt.command(":helm").is_err(),
+            "with nothing selected, :helm must error, never silently no-op"
+        );
+        let non_secret = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"ConfigMap",
+            "metadata":{"namespace":"sauron-m9","name":"unrelated","uid":"uid-1"},
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(non_secret)];
+        rt.state.selected = Some("uid-1".into());
+        assert!(
+            rt.command(":helm").is_err(),
+            "a non-Secret object must be rejected without any fetch attempt"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn helm_view_does_not_trust_the_cached_type_field_the_fresh_fetch_re_verifies_it() {
+        // Per the M9.5 security design, the cached (already-redacted)
+        // object's own `type` field is presentational only -- it may
+        // support the UI's decision to *attempt* a fetch, but it must
+        // never be treated as authorization. Whether this Secret is
+        // actually a Helm release is decided solely by
+        // `kube::helm::read_release`'s own fresh, re-verified GET. So
+        // even a plain `Opaque` Secret is allowed to proceed to the
+        // bounded fetch here -- it will fail closed downstream (proven
+        // by `helm_read_release_rejects_a_secret_that_is_not_a_helm_
+        // release_fresh_check_not_cached` in tests/watch_transport.rs),
+        // not be silently rejected by trusting a stale local guess.
+        let mut rt = runtime();
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Secret","type":"Opaque",
+            "metadata":{"namespace":"sauron-m9","name":"unrelated","uid":"uid-1"},
+            "data":{"foo":"<redacted>"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        let tasks_before = rt.tasks.len();
+        rt.command(":helm")
+            .expect("any Secret may be attempted -- real enforcement is in the fresh fetch");
+        assert_eq!(rt.tasks.len(), tasks_before + 1);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn helm_view_spawns_a_bounded_fetch_never_decodes_the_cached_redacted_object() {
+        // `Object::new` has already redacted this Secret's `data` to
+        // `<redacted>` by the time it reaches `state.rows` -- exactly
+        // like every other Secret in this app (see
+        // `kube::helm::read_release`'s own doc comment). `:helm` must
+        // therefore never try to decode it locally; it must spawn the
+        // dedicated fetch-and-reverify task instead. The real decode/
+        // sanitize round trip against a live-shaped Secret is covered by
+        // `helm_read_release_decodes_a_real_secret_and_sanitizes_the_view`
+        // in tests/watch_transport.rs, against a real HTTP endpoint.
+        let mut rt = runtime();
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Secret","type":"helm.sh/release.v1",
+            "metadata":{"namespace":"sauron-m9","name":"sh.helm.release.v1.demo.v2","uid":"uid-1"},
+            "data":{"release": "irrelevant -- already redacted before this test ever sees it"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(object)];
+        rt.state.selected = Some("uid-1".into());
+        let tasks_before = rt.tasks.len();
+        rt.command(":helm")
+            .expect("helm view opens a placeholder and spawns the bounded fetch");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before + 1,
+            "reading a Helm release body always requires a fresh, bounded, re-verified fetch"
+        );
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Helm: sh.helm.release.v1.demo.v2");
         rt.shutdown().await;
     }
 

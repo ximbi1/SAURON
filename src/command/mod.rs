@@ -549,6 +549,7 @@ pub enum Command {
     ArgoCdRollback {
         revision: String,
     },
+    Helm,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -874,6 +875,10 @@ pub fn parse(s: &str) -> Result<Command> {
                 revision: tail[0].clone(),
             });
         }
+        "helm" => {
+            ensure!(tail.is_empty(), "Use :helm");
+            return Ok(Command::Helm);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -963,6 +968,7 @@ pub fn command_names() -> Vec<&'static str> {
         "argocd_sync",
         "argocd_refresh",
         "argocd_rollback",
+        "helm",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1250,6 +1256,11 @@ fn argocd_sync_refresh_rollback_grammar() {
     ));
     assert!(parse(":argocd_rollback").is_err());
     assert!(parse(":argocd_rollback abc123 def456").is_err());
+}
+#[test]
+fn helm_takes_no_arguments() {
+    assert!(matches!(parse(":helm"), Ok(Command::Helm)));
+    assert!(parse(":helm now").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

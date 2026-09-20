@@ -3,6 +3,7 @@ pub mod drain;
 pub mod evidence;
 pub mod exec;
 pub mod forward;
+pub mod helm;
 pub mod logs;
 pub mod metrics;
 pub mod mutation;

@@ -3571,3 +3571,158 @@ async fn printer_columns_skip_the_network_entirely_for_core_resources() {
         .expect("fetch");
     assert!(columns.is_empty());
 }
+
+// M9.5: the dedicated, bounded, TOCTOU-safe Helm release reader
+// (`kube::helm::read_release`) is the only place in the app allowed to
+// fetch a Helm release Secret's body -- see that module's own doc
+// comment. These tests exercise it against a real HTTP endpoint, never
+// against `integrations::helm`'s pure decode/sanitize logic alone,
+// because the re-verification (UID + type against a *fresh* GET) is the
+// actual security property under test here.
+fn secret_resource() -> Resource {
+    Resource {
+        api: ApiResource {
+            group: "".into(),
+            version: "v1".into(),
+            api_version: "v1".into(),
+            kind: "Secret".into(),
+            plural: "secrets".into(),
+        },
+        namespaced: true,
+        short_names: vec![],
+        verbs: vec!["get".into()],
+    }
+}
+
+fn encode_helm_release(release_json: &Value) -> String {
+    use base64::Engine;
+    use std::io::Write;
+    let json_bytes = serde_json::to_vec(release_json).unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&json_bytes).unwrap();
+    let gzip_bytes = encoder.finish().unwrap();
+    let engine = base64::engine::general_purpose::STANDARD;
+    let inner_b64 = engine.encode(&gzip_bytes);
+    engine.encode(inner_b64.as_bytes())
+}
+
+fn helm_scope(uid: &str) -> sauron::app::session::Scope {
+    sauron::app::session::Scope {
+        epoch: 0,
+        request: 0,
+        context: "fake".into(),
+        cluster: "fake".into(),
+        resource: "v1/secrets".into(),
+        namespace: "sauron-m9".into(),
+        name: "sh.helm.release.v1.demo.v1".into(),
+        uid: uid.into(),
+    }
+}
+
+#[tokio::test]
+async fn helm_read_release_decodes_a_real_secret_and_sanitizes_the_view() {
+    let release = json!({
+        "name": "demo",
+        "namespace": "sauron-m9",
+        "version": 1,
+        "info": {"status": "deployed", "notes": "your password is hunter2-notes"},
+        "chart": {"metadata": {"name": "nginx", "version": "1.2.3"}},
+        "config": {"auth": {"password": "hunter2"}, "replicaCount": 1},
+        "manifest": "apiVersion: v1\nkind: Service\nmetadata:\n  name: demo-svc\n  namespace: sauron-m9\n",
+    });
+    let release_b64 = encode_helm_release(&release);
+    let server = Server::new(move |_| {
+        (
+            200,
+            json!({
+                "apiVersion": "v1", "kind": "Secret", "type": "helm.sh/release.v1",
+                "metadata": {"namespace": "sauron-m9", "name": "sh.helm.release.v1.demo.v1", "uid": "uid-1"},
+                "data": {"release": release_b64},
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection_with(server.client(), vec![secret_resource()]);
+    let cancel = CancellationToken::new();
+    let view = sauron::kube::helm::read_release(&connection, &helm_scope("uid-1"), &cancel)
+        .await
+        .expect("decodes");
+    assert_eq!(view.name, "demo");
+    assert_eq!(view.revision, Some(1));
+    assert_eq!(view.status, "deployed");
+    assert_eq!(view.values["auth"]["password"], "<redacted>");
+    assert_eq!(view.values["replicaCount"], 1);
+    let debug = format!("{view:?}");
+    assert!(!debug.contains("hunter2"));
+}
+
+#[tokio::test]
+async fn helm_read_release_fails_closed_on_uid_mismatch_never_decoding_a_replaced_object() {
+    let release_b64 = encode_helm_release(&json!({"name": "demo", "config": {}}));
+    let server = Server::new(move |_| {
+        (
+            200,
+            json!({
+                "apiVersion": "v1", "kind": "Secret", "type": "helm.sh/release.v1",
+                "metadata": {"namespace": "sauron-m9", "name": "sh.helm.release.v1.demo.v1", "uid": "new-uid"},
+                "data": {"release": release_b64},
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection_with(server.client(), vec![secret_resource()]);
+    let cancel = CancellationToken::new();
+    let error = sauron::kube::helm::read_release(&connection, &helm_scope("old-uid"), &cancel)
+        .await
+        .expect_err("UID mismatch must fail closed");
+    assert_eq!(error, sauron::kube::helm::HelmReadError::TargetReplaced);
+}
+
+#[tokio::test]
+async fn helm_read_release_rejects_a_secret_that_is_not_a_helm_release_fresh_check_not_cached() {
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({
+                "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                "metadata": {"namespace": "sauron-m9", "name": "sh.helm.release.v1.demo.v1", "uid": "uid-1"},
+                "data": {"foo": "YmFy"},
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection_with(server.client(), vec![secret_resource()]);
+    let cancel = CancellationToken::new();
+    let error = sauron::kube::helm::read_release(&connection, &helm_scope("uid-1"), &cancel)
+        .await
+        .expect_err("non-release type must be rejected even if the name looks right");
+    assert_eq!(error, sauron::kube::helm::HelmReadError::WrongType);
+}
+
+#[tokio::test]
+async fn helm_read_release_reports_malformed_release_explicitly_never_an_empty_view() {
+    let server = Server::new(|_| {
+        (
+            200,
+            json!({
+                "apiVersion": "v1", "kind": "Secret", "type": "helm.sh/release.v1",
+                "metadata": {"namespace": "sauron-m9", "name": "sh.helm.release.v1.demo.v1", "uid": "uid-1"},
+                "data": {"release": "not-valid-base64!!!"},
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let connection = connection_with(server.client(), vec![secret_resource()]);
+    let cancel = CancellationToken::new();
+    let error = sauron::kube::helm::read_release(&connection, &helm_scope("uid-1"), &cancel)
+        .await
+        .expect_err("malformed encoding must be an explicit error");
+    assert!(matches!(
+        error,
+        sauron::kube::helm::HelmReadError::Decode(_)
+    ));
+}

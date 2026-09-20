@@ -11,6 +11,7 @@
 //! already exist and are simply reused by later slices.
 pub mod argocd;
 pub mod flux;
+pub mod helm;
 
 use crate::evidence::Unknown;
 use crate::kube::discovery::{Catalog, Resource};

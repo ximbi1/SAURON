@@ -12,6 +12,7 @@ test_kubeconfig="$repo_dir/.test-cluster-m9/config"
 test_context=kind-sauron-m9
 test_node=sauron-m9-control-plane
 flux_version=v2.9.5
+argocd_version=v3.5.3
 
 test -f "$test_kubeconfig" || { echo 'Dedicated M9 kubeconfig missing; refusing default context.' >&2; exit 1; }
 test_label="$(docker inspect --format '{{ index .Config.Labels "io.x-k8s.kind.cluster" }}' "$test_node")"
@@ -49,5 +50,38 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_M9_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_m9_live -- --ignored --nocapture
     ;;
-  *) echo 'Usage: bash scripts/test-cluster-m9.sh [check|flux-install|flux-fixtures|flux-reset|flux-test]' >&2; exit 2 ;;
+  argocd-install)
+    # Pinned version, fetched once and applied via plain kubectl -- no
+    # `argocd` CLI involved, matching flux-install's own precedent.
+    # --server-side is required: the ApplicationSet CRD's schema exceeds
+    # kubectl client-side apply's 262144-byte last-applied-configuration
+    # annotation limit (a real, documented Argo CD installation quirk,
+    # not specific to this script).
+    manifest="$repo_dir/.test-cluster-m9/argocd-install-$argocd_version.yaml"
+    if [ ! -f "$manifest" ]; then
+      curl -sL "https://raw.githubusercontent.com/argoproj/argo-cd/$argocd_version/manifests/install.yaml" -o "$manifest"
+    fi
+    kube_m9 get namespace argocd >/dev/null 2>&1 || kube_m9 create namespace argocd
+    kube_m9 apply -n argocd --server-side --force-conflicts -f "$manifest"
+    for deployment in argocd-repo-server argocd-server argocd-applicationset-controller; do
+      kube_m9 rollout status "deployment/$deployment" -n argocd --timeout=120s
+    done
+    kube_m9 rollout status statefulset/argocd-application-controller -n argocd --timeout=120s
+    ;;
+  argocd-fixtures)
+    kube_m9 apply -f "$repo_dir/tests/fixtures/m9-argocd.yaml"
+    ;;
+  argocd-reset)
+    # guestbook is genuinely synced by the live test (real Service+
+    # Deployment in sauron-m9); re-apply then re-sync so repeated runs
+    # stay deterministic, matching every other *-reset case's own
+    # self-restoring convention.
+    kube_m9 apply -f "$repo_dir/tests/fixtures/m9-argocd.yaml"
+    kube_m9 patch application guestbook -n argocd --type merge -p '{"operation":{"sync":{"revision":"master"}}}'
+    ;;
+  argocd-test)
+    cd "$repo_dir"
+    SAURON_TEST_M9_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_m9_argocd_live -- --ignored --nocapture
+    ;;
+  *) echo 'Usage: bash scripts/test-cluster-m9.sh [check|flux-install|flux-fixtures|flux-reset|flux-test|argocd-install|argocd-fixtures|argocd-reset|argocd-test]' >&2; exit 2 ;;
 esac

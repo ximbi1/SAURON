@@ -294,34 +294,41 @@ claims from topology alone. No `argocd` CLI shell-out.
 
 ### M9.4 — Argo CD guarded actions
 
-Candidates: `sync`, `refresh`, `rollback` (rollback only if a safe,
-well-defined, auditable API path exists — see Open questions; do not fake
-parity with sync/refresh if it does not).
+Candidates: `sync`, `refresh`, `rollback`.
+
+**RESOLVED 2026-09-20 (Open questions 2/3): no provider-action execution
+adapter is needed.** All three actions are plain CRD-level operations,
+confirmed live against a real Argo CD `v3.5.3` install:
+- **sync**: a `MutationEffect::Modify` PATCH setting `Application.
+  operation.sync` (top-level field, sibling to `spec`/`status`) — the
+  application controller performs the sync and reports progress/result
+  in `status.operationState`. No Argo API server call.
+- **refresh**: a `MutationEffect::Modify` PATCH setting the documented
+  `argocd.argoproj.io/refresh: normal|hard` annotation — structurally
+  identical to Flux's own reconcile annotation (M9.2); the controller
+  consumes and clears it itself.
+- **rollback**: the exact same `operation.sync` field, with an explicit
+  `revision` naming an already-recorded entry from `status.history`
+  (never a hand-reconstructed prior spec, never a free-form/unverified
+  revision string) — this is Argo CD's own underlying rollback
+  primitive, not a SAURON-invented shortcut. **Rollback is not
+  deferred.**
 
 Every action still goes through the same policy/confirmation/identity/
-journal/verification gateway. Where the action requires a call Argo CD's
-own API server exposes (not a plain CRD PATCH — e.g. triggering an
-operation via `status.operationState` vs an actual sync request, which in
-some Argo CD versions is itself expressed as a CRD-level annotation/spec
-field and in others needs the Argo API service), M9.4 must implement an
-explicit **provider-action execution adapter**: still a `MutationIntent`-
-equivalent, still dispatched through `kube::mutation`'s executor (a new
-dispatch branch, exactly like M8B.4's eviction-subresource dispatch was),
-never a bolted-on direct HTTP call from the UI layer. If the CRD-only
-path is sufficient (recent Argo CD versions support a sync *request* via
-a CRD-level operation field), prefer it and document why the adapter was
-unnecessary.
+journal/verification gateway, exactly like every M7/M8/M8B/M9.2 action —
+no new dispatch branch in `kube::mutation`'s executor was needed either,
+by the same reasoning M9.2 already established for Flux (confirm or
+refute this explicitly once implemented, per this document's own design
+test discipline).
 
 **Critical semantic distinctions, restated from the kickoff prompt**:
 "sync requested" != "Application synced"; "refresh requested" != "desired/
 live converged"; "rollback requested" != "rollback completed
 successfully". Verification reports request acknowledgement separately
-from observed Application status, mirroring M9.2's own three-fact model.
-
-If this becomes too architectural for M9's timeline, this document is
-updated to record rollback as explicitly deferred (not implemented, not
-faked) — sync/refresh are scoped as the safer default guaranteed
-deliverable.
+from observed Application status, mirroring M9.2's own three-fact model
+(commit/verify facts stay in `MutationOutcome`/`Verification`; Argo CD's
+own `status.sync`/`status.health`/`status.operationState.phase`, read
+fresh via M9.3's own status renderer, are the separate later fact).
 
 ### M9.5 — Helm read-only
 
@@ -520,36 +527,58 @@ dedicated namespace on the existing `kind-sauron-test` cluster — far
 lower risk than a reconciling controller, and no reason to place it on
 `sauron-m9` instead.
 
-Argo CD's own cluster placement (same `sauron-m9`, alongside Flux, vs. a
-third dedicated cluster) is deliberately **not** decided here — see Open
-question 1a below, which must be resolved before M9.3 starts.
+Argo CD's own cluster placement — **RESOLVED 2026-09-20, user decision**:
+alongside Flux, in the same `sauron-m9` cluster. Installed via the
+official pinned `v3.5.3` install manifest (`kubectl apply -n argocd
+--server-side --force-conflicts` — server-side apply is required because
+the `ApplicationSet` CRD's schema exceeds client-side apply's
+262144-byte `last-applied-configuration` annotation limit, a real,
+documented Argo CD installation quirk unrelated to this repo). Confirmed
+live: all 7 Argo CD components (`argocd-server`, `argocd-repo-server`,
+`argocd-application-controller`, `argocd-applicationset-controller`,
+`argocd-notifications-controller`, `argocd-redis`, `argocd-dex-server`)
+reached `Running`/`Ready` with zero restarts, and Flux's own 7
+controllers remained untouched and healthy throughout (checked
+immediately after install and again after 22h of both running
+side-by-side) — no CRD/webhook/resource-pressure interference observed.
+If that ever changes, Argo CD moves to its own third dedicated cluster
+with a documented reason; nothing here prevents that later.
 
 ## Open architectural questions requiring resolution before implementation
 
 1. **Flux/Argo live evidence cluster** — **RESOLVED 2026-09-19**: a
    dedicated `sauron-m9` kind cluster (option (b), see Live-test strategy
    above), never `kind-sauron-test`. Flux is installed there now.
-   1a. **Argo CD's own cluster placement** — still open, resolve at the
-       start of M9.3: install Argo CD alongside Flux in the same
-       `sauron-m9` cluster, or provision a third dedicated cluster?
-       Considerations to weigh then (not pre-judged here): Argo CD's own
-       controller/repo-server/API-server/redis footprint is larger than
-       Flux's, so combined resource pressure on one kind node needs a
-       real check (not an assumption) before deciding; conversely a
-       third cluster multiplies the same inotify/host-limit exposure
-       this document's own environment finding just surfaced. This is
-       exactly the kind of decision this milestone's own instructions
-       require stopping and asking about before proceeding into M9.3.
-2. **Argo CD sync execution path** — does the installed Argo CD version's
-   CRD alone support requesting a sync (a spec-level operation field), or
-   does it require calling the Argo API service? Resolve at the start of
-   M9.4 by inspecting the actual installed CRD's schema, not assumed in
-   advance.
-3. **Argo CD rollback feasibility** — is there a clean, auditable,
-   API-only rollback path, or does it require reconstructing a prior
-   `Application` spec by hand (fragile, easy to get subtly wrong)?
-   Resolve at the start of M9.4; if the answer is "no clean path", defer
-   rollback explicitly rather than shipping a fragile implementation.
+   1a. **Argo CD's own cluster placement** — **RESOLVED 2026-09-20, user
+       decision**: alongside Flux in `sauron-m9` (see Live-test strategy
+       above for the live confirmation that this caused no interference).
+2. **Argo CD sync execution path** — **RESOLVED 2026-09-20**: the CRD
+   alone is fully sufficient, no Argo API service call needed. Confirmed
+   live: `Application`'s own top-level `operation` field (sibling to
+   `spec`/`status`, schema-documented via `kubectl explain applications.
+   argoproj.io.operation`) accepts a plain Kubernetes PATCH
+   (`{"operation":{"sync":{"revision":"..."}}}`) and the application
+   controller picks it up, runs the sync, and reports progress/result in
+   `status.operationState` (`phase`: `Running`/`Succeeded`/`Failed`/
+   `Error`, plus `syncResult.resources` per managed object) — proven by
+   actually triggering a real sync this way against the `guestbook`
+   fixture (created real `Service`/`Deployment` objects in `sauron-m9`).
+   `refresh` is the same shape: the documented `argocd.argoproj.io/
+   refresh: normal|hard` annotation, which the controller consumes and
+   clears itself (confirmed live) -- structurally identical to Flux's
+   own reconcile annotation. **This means M9.4 needs no provider-action
+   execution adapter for sync/refresh** -- both are plain
+   `MutationEffect::Modify` through the exact same gateway.
+3. **Argo CD rollback feasibility** — **RESOLVED 2026-09-20**: the same
+   `operation.sync` field accepts an explicit `revision` distinct from
+   `spec.source.targetRevision`, which is exactly Argo CD's own
+   underlying rollback primitive (`argocd app rollback` is a thin
+   convenience wrapper over this same field, picking a revision from
+   `status.history`) — no prior-spec reconstruction needed, no Argo API
+   service call needed. M9.4 implements rollback as "sync to a specific,
+   already-recorded prior revision from `status.history`", the same CRD
+   path as sync, never a hand-reconstructed spec. Rollback is **not**
+   deferred.
 4. **Helm execution library** — a Rust Helm SDK crate, vs. a smaller
    hand-rolled client against Helm's own documented storage-record
    format that still respects Helm's lifecycle semantics (locking,

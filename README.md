@@ -25,11 +25,12 @@ action without passing explicit safety and policy boundaries.
 
 SAURON is being built as a 12-milestone project.
 
-M1 through M8 are currently **ACCEPTED**, with local annotated milestone
-tags (`m1-accepted` through `m8-accepted`) and live verification against an
-isolated Kubernetes `kind` cluster.
+M1 through M9 are currently **ACCEPTED** (M9.6 explicitly deferred, see
+below), with local annotated milestone tags (`m1-accepted` through
+`m9-accepted`) and live verification against isolated Kubernetes `kind`
+clusters.
 
-M9 is the next milestone and has not started yet.
+M10 is the next milestone and has not started yet.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -41,7 +42,8 @@ M9 is the next milestone and has not started yet.
 | M6 | Relationship graph, adjacent resources, Xray | ACCEPTED |
 | M7 | Central mutation policy, guardrails and operation journal (infrastructure only — no mutation workflow yet) | ACCEPTED |
 | M8 | Guarded mutation workflows: Scale, Restart, Delete, Label, Annotate, with post-commit verification | ACCEPTED |
-| M9 | Flux, Argo CD and Helm integrations | NOT STARTED |
+| M8B | Advanced cluster operations: Cordon/Uncordon, Set image, CronJob trigger, Evict, Drain, Force delete | ACCEPTED |
+| M9 | Flux, Argo CD and Helm integrations | ACCEPTED (M9.6 Helm rollback/uninstall DEFERRED — see below) |
 | M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | NOT STARTED |
 | M11 | Eye, Pulse, evidence bundles, context diff and blast-radius analysis | NOT STARTED |
 | M12 | Plugins, providers, headless workflows, packaging and performance hardening | NOT STARTED |
@@ -517,11 +519,13 @@ network. On a fresh installation it is empty.
 See [`docs/M8_ACCEPTANCE.md`](docs/M8_ACCEPTANCE.md),
 [`docs/MUTATION_POLICY.md`](docs/MUTATION_POLICY.md) and
 [`docs/MUTATION_JOURNAL.md`](docs/MUTATION_JOURNAL.md) for the full
-contract. [`docs/M8B_ACCEPTANCE.md`](docs/M8B_ACCEPTANCE.md) and
-[`docs/FUTURE_MUTATIONS.md`](docs/FUTURE_MUTATIONS.md) capture planning
-for possible future extensions (cordon/drain/set-image/etc. and
-intentionally deferred families like Secret/RBAC mutation) — neither is
-started, and neither is a roadmap commitment.
+contract. [`docs/M8B_ACCEPTANCE.md`](docs/M8B_ACCEPTANCE.md) (Cordon/
+Uncordon, Set image, CronJob trigger, Evict, Drain, Force delete — now
+ACCEPTED end to end) and
+[`docs/FUTURE_MUTATIONS.md`](docs/FUTURE_MUTATIONS.md) (families
+intentionally deferred, e.g. Secret/RBAC mutation — not started, not a
+roadmap commitment) capture the extended mutation surface beyond M8's
+own first pass.
 
 ---
 
@@ -1045,34 +1049,68 @@ Local annotated tag:
 
 The tag has not been published.
 
-A possible future extension (cordon/uncordon, set image, CronJob trigger,
-evict, drain, force delete) is captured as planning-only in
-[`docs/M8B_ACCEPTANCE.md`](docs/M8B_ACCEPTANCE.md) — not started, not a
-roadmap commitment. Bulk actions remain scoped to M10; editor-based/
-arbitrary resource changes are catalogued as intentionally deferred in
+Cordon/uncordon, set image, CronJob trigger, evict, drain, and force
+delete were subsequently implemented and ACCEPTED end to end as M8B —
+see [`docs/M8B_ACCEPTANCE.md`](docs/M8B_ACCEPTANCE.md). Bulk actions
+remain scoped to M10; editor-based/arbitrary resource changes are
+catalogued as intentionally deferred in
 [`docs/FUTURE_MUTATIONS.md`](docs/FUTURE_MUTATIONS.md).
 
 ---
 
 ### M9 — GitOps and Helm
 
-Not started.
+ACCEPTED: M9.0-M9.5 and M9.7. M9.6 explicitly DEFERRED (not a blocker —
+see below). Full record in [`docs/M9_ACCEPTANCE.md`](docs/M9_ACCEPTANCE.md).
 
-Planned scope includes native inspection and guarded operations for:
+Read-only inspection, live-verified against a dedicated second `kind`
+cluster (`sauron-m9`, real Flux v2.9.5 and Argo CD v3.5.3 — `kind-sauron-test`
+stays untouched as the M1-M8B regression environment):
 
-- Flux
-- Kustomizations
-- HelmReleases
-- GitRepository
-- OCIRepository
-- Bucket
-- image automation
-- Argo CD Applications
-- ApplicationSets
-- Helm releases
-- revisions
-- reconciliation state
-- ownership/dependency relationships
+- Flux: Kustomization, HelmRelease, GitRepository, OCIRepository,
+  HelmRepository, Bucket — conditions rendered verbatim (never
+  collapsed to a single "Ready" flag), the `-1` "never reconciled"
+  sentinel shown distinctly from ordinary staleness, suspend state,
+  revisions, `dependsOn`, `sourceRef`.
+- Argo CD: Application (single/multi-source), ApplicationSet, AppProject
+  — sync/health/operation state, managed-resource summary.
+- Helm: release decode (chart, revision, status, values, manifest
+  identity) via a single explicit, bounded, TOCTOU-safe reader — see
+  below.
+
+Guarded mutation actions, through the same M7/M8 policy/preview/
+confirm/commit/verify gateway as every other mutation in SAURON:
+
+- Flux: `:flux_suspend`, `:flux_resume`, `:flux_reconcile`.
+- Argo CD: `:argocd_sync`, `:argocd_refresh`, `:argocd_rollback` —
+  discovered live to be plain Kubernetes API PATCH operations on
+  `Application.operation`, needing no separate Argo API server call.
+
+**A deliberate security exception for Helm.** Helm releases are stored
+entirely inside a Kubernetes `Secret`'s `data.release` field, but
+SAURON's generic object pipeline (`resources::Object::new`) always
+redacts Secret bodies — an absolute rule that stays unchanged. Reading
+a Helm release therefore needed one narrow, explicit exception: a
+single `kube::helm::read_release` function, invoked only on an explicit
+`:helm` request against an already-identified release, that performs
+one bounded fetch, re-verifies the object's UID and type against that
+*fresh* response (never trusting a cached selection), and returns only
+a fully sanitized view — no raw Secret body, decoded bytes, or chart
+notes ever leave that one function. See M9_ACCEPTANCE.md's own M9.5
+write-up for the full contract.
+
+**M9.6 (Helm rollback/uninstall) is explicitly DEFERRED**, not
+approximated. Investigation found no maintained Rust crate implements
+Helm's own client-side rollback/uninstall logic, Helm v3+ has no
+server/API component to target instead (Tiller was removed in Helm v3),
+and hand-reimplementing that logic directly against the release
+Secret's storage record risks corrupting Helm's own bookkeeping in ways
+that could break the real `helm` CLI's ability to operate on a release
+afterward. None of shelling out to `helm`, direct storage manipulation,
+or a reduced-scope reimplementation were judged acceptable inside M9's
+scope. A future "Native Helm Engine" milestone is noted as backlog —
+not started, not a roadmap commitment — should anyone later want to
+take on Helm-compatible lifecycle reimplementation as its own project.
 
 ---
 

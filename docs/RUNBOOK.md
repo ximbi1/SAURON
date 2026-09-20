@@ -127,7 +127,53 @@ and fixed a real bug in the soak harness itself (a single wide
 recoverable failure; fixed with per-section isolation and a self-healing
 fixture-recreation check) -- zero SAURON app bugs found. **All of M8
 (M8.0-M8.6) ACCEPTED.** Local tag `m8-accepted`, never pushed without
-explicit authorization. M9 has not started.
+explicit authorization.
+
+M8B (Advanced Cluster Operations: Cordon/Uncordon, Set image, CronJob
+trigger, Evict, Drain, Force delete) ACCEPTED end to end
+(M8B.0-M8B.7) -- see [M8B_ACCEPTANCE.md](M8B_ACCEPTANCE.md). Combined
+acceptance (`accept-m8b.py`, 19 scenarios) run twice clean, full M1-M8
+regression green, 75-minute soak (488 cycles, one recoverable transient
+hiccup, zero unrecovered errors). Two real live-cluster bugs found and
+fixed (Drain preview cancellation-token staleness; a missing keymap
+mode-availability rule for Drain's confirm key). Local tag
+`m8b-accepted`, never pushed.
+
+M9 (Flux, Argo CD, Helm integrations) started from accepted M8B -- see
+[M9_ACCEPTANCE.md](M9_ACCEPTANCE.md) for the full slice-by-slice record.
+M9.0 (shared capability model), M9.1-M9.2 (Flux read + guarded actions:
+reconcile/suspend/resume), M9.3-M9.4 (Argo CD read + guarded actions:
+sync/refresh/rollback) and M9.5 (Helm read-only inspection) all
+ACCEPTED, each live-verified against a dedicated second kind cluster
+(`sauron-m9`, real Flux v2.9.5 and Argo CD v3.5.3 installed via pinned
+manifests, `kind-sauron-test` left untouched as the M1-M8B regression
+environment). M9.5 required its own explicit security design decision:
+`resources::Object::new()`'s unconditional Secret redaction means a
+Helm release body (stored in a `Secret`'s `data.release` field) can
+never flow through the generic object pipeline, so a single narrow,
+bounded, TOCTOU-safe `kube::helm::read_release` was added as the one
+permitted exception -- never a relaxation of the generic invariant (see
+M9_ACCEPTANCE.md's own M9.5 write-up for the full contract). M9.6 (Helm
+rollback/uninstall) is explicitly DEFERRED: investigation found no
+maintained Rust crate implements Helm's client-side action logic, Helm
+v3+ has no server/API component to target instead (Tiller was removed
+in v3), and reimplementing rollback/uninstall by hand against the
+release Secret storage risks corrupting Helm's own bookkeeping in ways
+that could break the real `helm` CLI's ability to operate on a release
+afterward -- none of shelling out, direct storage manipulation, or a
+reduced-scope reimplementation were judged acceptable inside M9. M9.7
+(combined acceptance) ACCEPTED: `accept-m9.py` (interactive, covering
+Flux/Argo CD/Helm live evidence, readonly zero-write checks,
+CRD-absence handling, cancellation, 32x9, terminal restoration, M4
+forward held throughout) run twice clean against `sauron-m9`, plus the
+full unmodified M1-M8B regression suite green each time, plus a
+4-minute bounded soak (`soak-m9.py`, scoped down from M8B.7's own
+75-minute run since that soak already proved the shared mutation
+gateway's stability -- this one's own job is narrower, proving M9's
+additions don't regress it) with zero reconnects and zero transient
+errors across 53-54 cycles. **All of M9 (M9.0-M9.5, M9.7) ACCEPTED;
+M9.6 explicitly DEFERRED, not a blocker.** Local tag `m9-accepted`,
+never pushed without explicit authorization.
 
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial

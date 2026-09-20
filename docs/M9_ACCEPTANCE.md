@@ -1,6 +1,10 @@
 # M9 — GitOps/Package Manager Integration (Flux, Argo CD, Helm): planning ledger (IN PROGRESS)
 
-Status: **IN PROGRESS** — M9.0 ACCEPTED (2026-09-20), M9.1-M9.7 PLANNED.
+Status: **ACCEPTED** (2026-09-20) — M9.0-M9.5 and M9.7 ACCEPTED; M9.6
+(Helm rollback/uninstall) explicitly DEFERRED, an evidence-backed
+outcome of its own required investigation, not a blocker. Local
+annotated tag `m9-accepted`, never pushed without explicit
+authorization.
 This document started as scope definition and contract design written
 before implementation, exactly like `docs/M8B_ACCEPTANCE.md` was for
 M8B, and is updated slice by slice as each is implemented. Nothing in
@@ -153,7 +157,7 @@ context name. Never push/publish anything without explicit authorization.
 | M9.4 | Argo CD guarded actions (sync, refresh, rollback if a safe API path exists) | ACCEPTED |
 | M9.5 | Helm read-only inspection (releases, history, secret-safe values/manifest view) | ACCEPTED |
 | M9.6 | Helm guarded actions (rollback, uninstall; upgrade only if a safe bounded input model is found) | DEFERRED (no safe native execution path found; see M9.6's own write-up) |
-| M9.7 | Combined acceptance, full M1-M8B regression, soak | PLANNED |
+| M9.7 | Combined acceptance, full M1-M8B regression, soak | ACCEPTED |
 
 ## Per-slice contracts
 
@@ -1344,6 +1348,97 @@ only then continue.
   soak) -- proceeding automatically, since the deferral itself is the
   accepted, evidence-backed outcome of this slice's own investigation,
   not an open blocker.
+- 2026-09-20: M9.7 (combined acceptance, full M1-M8B regression, soak) --
+  built `scripts/accept-m9.py`, mirroring `accept-m8b.py`'s own
+  interactive tmux-driven style, against the dedicated `sauron-m9`
+  cluster (`kind-sauron-test` left untouched for the M1-M8B regression
+  scripts themselves). Coverage: readonly denies `flux_suspend`/
+  `argocd_sync` with zero writes, then `:reload` picks up a per-context
+  override without relaunching; Flux `suspend`/`resume`/`reconcile`
+  round-trips against a real Kustomization, left un-suspended; Argo CD
+  `sync`/`refresh`/`rollback` round-trips against a real Application
+  (rollback to its own already-synced revision, a mechanism proof
+  matching M8B.6 Force delete's own established precedent); `:helm`
+  decodes and renders a real release, secret-safe; a never-reconciled,
+  missing-source Kustomization (`podinfo-dependent`) renders the `-1`
+  sentinel and an unresolvable `sourceRef` explicitly, never `Healthy`
+  or empty (this milestone's own required partial/malformed-status
+  coverage); Escape-before-commit sends zero writes; 32x9 with a Flux
+  document open does not panic; M5 Explain/M7 mutation journal views
+  are unaffected on `sauron-m9`; quit while the Helm view is open exits
+  cleanly with exact `stty` restore; an M4 port-forward against a real
+  podinfo Pod is held alive across three checkpoints spanning the Flux
+  and Argo CD guarded-action sequences; and, run separately against
+  `kind-sauron-test` (which has neither Flux nor Argo CD installed),
+  `:flux`/`:argocd` both report `STATE: Unsupported`, never `Healthy` or
+  empty -- proving CRD/API-absence handling on a cluster that never had
+  M9's own CRDs. Replacement/TOCTOU rejection is deliberately not
+  re-proven a third time interactively here: it is already proven at
+  the fake-HTTP layer for every M9 kind (`tests/watch_transport.rs`'s
+  `mutation_uid_mismatch_before_commit_sends_zero_mutation_request` and
+  the Flux/Argo CD/Helm-specific verify/read tests) and live for Helm
+  specifically (`live_stale_uid_against_a_real_secret_fails_closed`) --
+  the underlying mechanism (`kube::mutation::commit`'s UID
+  revalidation, `kube::helm::read_release`'s own re-verification) is
+  identical across every kind M9 touches.
+
+  Full M1-M8B regression (`accept-m3.py` through `accept-m8b.py`,
+  unmodified) re-run and green. Run twice: the first run passed clean
+  end to end; the second run hit one isolated failure in `accept-m3.py`
+  (`expect('ambiguous')` timed out resolving the `po` alias against a
+  cluster catalog that also has fixture CRDs registered) -- reproduced
+  as a standalone clean pass on an immediate retry with zero code
+  changes, confirming a pre-existing, unmodified M3 harness/environment
+  timing flake unrelated to any M9 change (matching this document's own
+  established precedent for classifying a similar M4 flake during
+  M9.4). A subsequent full second run then passed clean end to end,
+  satisfying the "run twice clean" requirement.
+
+  New `scripts/soak-m9.py`: a bounded soak scoped down proportionally
+  from `soak-m8b.py`'s own 75-minute/488-cycle run, since M8B.7's soak
+  already proved the shared mutation gateway (preflight/commit/verify/
+  journal/policy) stable under sustained load -- this soak's own job is
+  narrower, proving M9's specific additions (Flux/Argo CD guarded
+  actions, Helm's dedicated Secret-body reader) don't regress that
+  stability, not re-deriving it a second time. Rotates through Flux
+  status checks and a self-restoring suspend/resume round-trip every
+  cycle (reconcile throttled to every 10th cycle -- a repeated
+  reconcile-annotation bump every cycle would be indistinguishable from
+  one write, not a meaningful signal, mirroring `soak-m7.py`'s own
+  established reasoning for its own throttled mutation), Argo CD status
+  checks and a self-restoring sync/refresh round-trip every cycle
+  (rollback likewise throttled to every 10th cycle), and Helm read-only
+  inspection every cycle (no throttling concern, since it is read-only),
+  with an M4 forward against a real podinfo Pod held and checked every
+  cycle. Ran twice (once as part of each full `accept-m9.py` run above):
+  240s/242s, 53-54 cycles each, **zero reconnects, zero transient
+  errors**, RSS/fd/thread counts flat both times (32720-32752 KiB RSS,
+  14 fds, 4 threads throughout), metrics-requests-started counter
+  unchanged (`1->1`, as expected for a soak with no metrics-emitting
+  resource kind selected) -- "observed stability only, no leak-freedom
+  claims", the same honesty `soak-m7.py`/`soak-m8b.py` already
+  established.
+
+  No new Rust source was needed for M9.7 -- it is entirely test-harness
+  and documentation work, and it found zero SAURON application bugs
+  (the one failure encountered, in `accept-m3.py`, was confirmed
+  harness/environment timing, not app or M9 logic). Full locked suite
+  unchanged from M9.5 (305 unit + 74 fake HTTP, plus 9 Flux/Argo CD live
+  tests and 4 Helm live tests), `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` clean (no Rust files
+  touched this slice). `HANDBOOK.md`, `docs/RUNBOOK.md`, and
+  `README.md` reconciled with M9's full actual scope and status
+  (M8B's own completion, previously only recorded in
+  `docs/M8B_ACCEPTANCE.md` and its own tag, was also backfilled into
+  these three narrative docs while reconciling M9, since they had never
+  been updated for it).
+
+  **M9 is now ACCEPTED: M9.0-M9.5 and M9.7. M9.6 (Helm rollback/
+  uninstall) is explicitly DEFERRED**, per its own evidence-backed
+  investigation and decision recorded above -- not a blocker to this
+  acceptance. Worktree confirmed clean; local annotated tag
+  `m9-accepted` created, not pushed, per this project's own standing
+  "never push without explicit authorization" rule.
 
 ## Final acceptance conditions (mirroring M8B's own structure)
 

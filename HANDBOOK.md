@@ -294,6 +294,68 @@ clients need separately owned forwarding connections. No new dependency chosen y
 
 ## Journal
 
+### 2026-09-20 — M9.7 ACCEPTED, M9 combined acceptance closed (M9.0-M9.5, M9.7 ACCEPTED; M9.6 DEFERRED)
+
+`scripts/accept-m9.py` (interactive, tmux-driven, mirroring
+`accept-m8b.py`'s own style) covers: readonly denial of `flux_suspend`/
+`argocd_sync` with zero writes; Flux `suspend`/`resume`/`reconcile`
+round-trip against a real Kustomization; Argo CD `sync`/`refresh`/
+`rollback` round-trip against a real Application; `:helm` decoding a
+real release Secret-safe; a never-reconciled, missing-source
+Kustomization rendering the `-1` sentinel and an unresolvable
+`sourceRef` explicitly (never `Healthy`, never empty); Escape-before-
+commit zero-write; 32x9 with a Flux document open; M5/M7 regression
+touchpoints on `sauron-m9`; quit-while-Helm-view-open exact `stty`
+restore; M4 forward held across three checkpoints; and, on
+`kind-sauron-test` (no Flux/Argo CD installed there), `:flux`/`:argocd`
+both reporting `STATE: Unsupported`, never `Healthy` or empty. Full
+M1-M8B regression (`accept-m3.py` through `accept-m8b.py`, unmodified)
+re-run and green. Run twice: the second run hit one isolated flake in
+`accept-m3.py` (an unmodified, pre-existing M3 script unrelated to any
+M9 change) which reproduced clean on an immediate standalone retry --
+classified environment/timing, not an app or M9 regression, per this
+project's own established flake-classification precedent -- and a
+subsequent full second run then passed clean end to end.
+
+`scripts/soak-m9.py`, a new bounded soak scoped down proportionally
+from `soak-m8b.py`'s own 75-minute run (that soak already proved the
+shared mutation gateway's stability under sustained load; this one's
+job is narrower -- proving M9's own additions, Flux/Argo CD guarded
+actions and Helm's dedicated Secret-body reader, don't regress it, not
+re-deriving the gateway's stability a second time), ran 240s/~54 cycles
+rotating through Flux status/suspend-resume/throttled-reconcile, Argo
+CD status/sync-refresh/throttled-rollback, and Helm inspection, with an
+M4 forward held throughout: zero reconnects, zero transient errors, RSS/
+fd/thread counts flat across both runs.
+
+Full locked suite unchanged from M9.5 (305 unit + 74 fake HTTP, plus 9
+Flux/Argo CD/Helm live tests), fmt/clippy (`-D warnings`) clean. No new
+Rust code was needed for M9.7 -- it is entirely test-harness and
+documentation work, and it found zero SAURON app bugs. **All of M9 is
+now ACCEPTED: M9.0-M9.5 and M9.7. M9.6 (Helm rollback/uninstall) is
+explicitly DEFERRED** -- see `docs/M9_ACCEPTANCE.md`'s own M9.6 write-up
+for the full investigation (no maintained Rust Helm action-logic crate
+exists; Helm v3+ has no server/API component since Tiller's removal;
+a hand-rolled reimplementation against the release Secret storage risks
+corrupting Helm's own bookkeeping) and decision (a future "Native Helm
+Engine" milestone is noted as backlog, not started, with a mandatory
+differential-testing-against-the-real-CLI acceptance bar if ever
+undertaken). Local tag `m9-accepted`, never pushed without explicit
+authorization.
+
+### 2026-09-19 — M8B ACCEPTED end to end (Advanced Cluster Operations)
+
+M8B (Cordon/Uncordon, Set image, CronJob trigger, Evict, Drain, Force
+delete) ACCEPTED end to end, M8B.0-M8B.7 -- see
+`docs/M8B_ACCEPTANCE.md` for the full slice-by-slice record.
+`scripts/accept-m8b.py` (19 scenarios) run twice clean; full M1-M8
+regression green; `scripts/soak-m8b.py` ran 488 cycles over 4508s with
+one recoverable transient-cluster hiccup and zero unrecovered errors,
+RSS plateaued. Two real live-cluster bugs found and fixed during
+M8B.7's own combined acceptance (Drain's preview cancellation-token
+staleness, and a missing keymap mode-availability rule for Drain's
+confirm key). Local tag `m8b-accepted`, never pushed.
+
 ### 2026-09-18 — M8.6 ACCEPTED, M8 fully closed
 
 `scripts/accept-m8.py` (14 scenarios: readonly-then-`:reload`-enabled

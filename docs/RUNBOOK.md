@@ -1,6 +1,6 @@
 # SAURON development runbook
 
-Updated 2026-09-16. Canonical architecture/status: [HANDBOOK](../HANDBOOK.md).
+Updated 2026-09-21. Canonical architecture/status: [HANDBOOK](../HANDBOOK.md).
 
 ## Production protection
 
@@ -25,7 +25,77 @@ Fixture cluster is independently hosted by Docker:
 published loopback port before any fixture writes. A context name alone is not enough.
 It never falls back to the default kubeconfig and has no production cleanup path.
 
-## Current checkpoint
+M9 uses a separate Docker kind cluster `sauron-m9`, node
+`sauron-m9-control-plane`, context `kind-sauron-m9`, ignored kubeconfig
+`.test-cluster-m9/config`. Its sibling `scripts/test-cluster-m9.sh` verifies
+the Docker label and loopback API endpoint before fixture operations. Keep
+the two clusters and guards separate; production remains excluded.
+
+## Current checkpoint — reconciled 2026-09-21
+
+M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
+(Helm rollback/uninstall) is explicitly DEFERRED, not implemented.
+M10.0–M10.9 are ACCEPTED. Local annotated `m10-accepted` points to
+the tip of this milestone's work; never pushed.
+
+Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
+tests; locked fmt/check/clippy/test green in the acceptance record. Combined
+acceptance and M1–M8B regressions passed twice (one prior M3 timing flake is
+documented, not erased). M9's bounded soak was **240 seconds per run**,
+53–54 cycles, flat RSS/fds/threads, zero reported reconnects/transient errors.
+Earlier 75-minute soaks belong to their own milestones, not M9.
+
+Recorded M10 checks: 390 unit + 76 fake HTTP; locked fmt/check/clippy/test
+green. `scripts/accept-m10.py` (bulk multi-select mutations, workspace/
+bookmark round trips, config persistence across a real process restart,
+malformed keymap/theme fail-safe, 32x9, terminal restoration) passed twice
+clean. Full M1–M9 regression (every existing `accept-m*.py`, unmodified)
+reconfirmed green — including a rebuild of both isolated kind clusters
+(`sauron-test`, `sauron-m9`) after both drifted into a kubelet/API x509
+trust failure from long uptime, an environment issue unrelated to any
+SAUR-ON code. M10's bounded soak was **300 seconds**, 178 cycles
+(selection/workspace/bookmark every cycle, `bulk_label` throttled to every
+10th, matching M9's own throttling precedent), flat RSS/fds/threads, zero
+reconnects/transient errors. See `docs/M10_ACCEPTANCE.md`'s M10.9 journal
+entry for two real bugs found and fixed during this milestone's own
+acceptance work and one suspected regression root-caused to a stale test
+binary, not a defect.
+These are recorded results, not tests rerun during this documentation update.
+
+Current architecture: M6 bounded Adjacent/Xray; M7 policy/confirmation/
+TOCTOU/journal; M8 shared mutation UI and post-commit verification; M8B
+advanced operations including bounded drain; M9 Flux/Argo inspection and
+guarded actions through that same gateway; M10 bounded multi-select driving
+bulk mutations that reuse the unmodified M7/M8/M8B gateway per target, plus
+workspaces/bookmarks and their persistence in `Config` (the first write
+path `Config` has ever had: atomic, `0600`, temp-file-then-rename),
+configurable keymaps and themes (both fail safe on malformed config).
+Helm is inspection-only, with an
+explicit user-triggered, bounded, UID/type-checked Secret-body reader.
+Values masking is heuristic, manifest output is identities only, NOTES are
+omitted. No general Secret-reveal permission is implied.
+
+Production remains read-only. Regression fixtures use `sauron-test`,
+`.test-cluster/config`, `kind-sauron-test`, and `scripts/test-cluster.sh`.
+M9 fixtures use separate `sauron-m9`, `.test-cluster-m9/config`,
+`kind-sauron-m9`, and `scripts/test-cluster-m9.sh`. Both require
+Docker-label/API-endpoint verification; never default kubeconfig. Both are
+local, self-contained Docker containers with no production data, and may
+need to be recreated (`kind delete cluster` + the matching
+`scripts/bootstrap-test-cluster{,-m9}.sh`) if their kubelet drifts into a
+kubelet/API x509 trust failure after long uptime.
+The explicit mutation-test flag is a harness assertion, not automatic proof
+of cluster identity or permission to operate on production.
+
+M11 is next and has not started. Read the relevant acceptance ledger before
+continuing; preserve accepted behavior and the unresolved bounded terminal
+stdin limitation in `docs/EXEC.md`. No implementation is authorized merely
+by this status update.
+
+## Historical milestone checkpoints
+
+The entries below preserve milestone-time instructions and test counts. Statements
+such as “in progress” or “not started” apply to their recorded stage, not current HEAD.
 
 M6 started 2026-09-18 from accepted M5 (`1a45dbd`; HEAD also includes README).
 M6.0 graph metadata foundation and ledger implemented in the working tree;
@@ -173,6 +243,32 @@ gateway's stability -- this one's own job is narrower, proving M9's
 additions don't regress it) with zero reconnects and zero transient
 errors across 53-54 cycles. **All of M9 (M9.0-M9.5, M9.7) ACCEPTED;
 M9.6 explicitly DEFERRED, not a blocker.** Local tag `m9-accepted`,
+never pushed without explicit authorization.
+
+M10 (Bulk/workspaces/bookmarks/themes/keymaps) started from accepted M9 --
+see [M10_ACCEPTANCE.md](M10_ACCEPTANCE.md) for the full slice-by-slice
+record. M10.1-M10.3 (bounded `Selection`, bulk read-only ops, bulk guarded
+mutations reusing the unmodified M7/M8/M8B gateway per target), M10.4-M10.5
+(workspaces, bookmarks), M10.6-M10.7 (configurable keymaps, themes -- both
+fail safe on malformed config rather than crash startup), and M10.8
+(`Config` persistence: the first write path it has ever had, atomic,
+`0600`, temp-file-then-rename) all ACCEPTED individually with their own
+unit/fake-HTTP/live evidence. M10.9 (combined acceptance/full regression/
+soak) found and fixed two real bugs during its own acceptance work -- a
+`startup_warning` that `Payload::Ready` cleared before a user could see it,
+and an `accept-m3.py` cursor-detection break caused by M10's own new row
+markers -- and root-caused one suspected `accept-m3.py` descending-sort
+regression to a stale test binary, not a defect (two new regression tests
+added anyway, closing a real, previously-untested coverage gap). Full
+M1-M9 regression (every existing `accept-m*.py`, unmodified) reconfirmed
+green, including recreating both isolated kind clusters after an
+environment-only kubelet/x509 trust failure from long uptime. Combined M10
+acceptance (`accept-m10.py`) passed twice clean. A 300-second bounded soak
+(`soak-m9.py`'s own scoping precedent -- M8B.7's soak already proved the
+shared gateway's stability, this one's own job is narrower, proving M10's
+selection/bulk/workspace/bookmark additions don't regress it) ran 178
+cycles with zero reconnects and zero transient errors, flat RSS/fds/
+threads. **All of M10 (M10.0-M10.9) ACCEPTED.** Local tag `m10-accepted`,
 never pushed without explicit authorization.
 
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),

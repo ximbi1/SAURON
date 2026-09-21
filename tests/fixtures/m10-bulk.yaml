@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sauron-m10
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-bulk-a
+  namespace: sauron-m10
+data:
+  note: fixture-a
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-bulk-b
+  namespace: sauron-m10
+data:
+  note: fixture-b
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-bulk-c
+  namespace: sauron-m10
+data:
+  note: fixture-c
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-bulk-delete-1
+  namespace: sauron-m10
+data:
+  note: delete-target-1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: m10-bulk-delete-2
+  namespace: sauron-m10
+data:
+  note: delete-target-2

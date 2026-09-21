@@ -25,12 +25,12 @@ action without passing explicit safety and policy boundaries.
 
 SAURON is being built as a 12-milestone project.
 
-M1 through M9 are currently **ACCEPTED** (M9.6 explicitly deferred, see
+M1 through M10 are currently **ACCEPTED** (M9.6 explicitly deferred, see
 below), with local annotated milestone tags (`m1-accepted` through
-`m9-accepted`) and live verification against isolated Kubernetes `kind`
+`m10-accepted`) and live verification against isolated Kubernetes `kind`
 clusters.
 
-M10 is the next milestone and has not started yet.
+M11 is the next milestone and has not started yet.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ M10 is the next milestone and has not started yet.
 | M8 | Guarded mutation workflows: Scale, Restart, Delete, Label, Annotate, with post-commit verification | ACCEPTED |
 | M8B | Advanced cluster operations: Cordon/Uncordon, Set image, CronJob trigger, Evict, Drain, Force delete | ACCEPTED |
 | M9 | Flux, Argo CD and Helm integrations | ACCEPTED (M9.6 Helm rollback/uninstall DEFERRED — see below) |
-| M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | NOT STARTED |
+| M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | ACCEPTED |
 | M11 | Eye, Pulse, evidence bundles, context diff and blast-radius analysis | NOT STARTED |
 | M12 | Plugins, providers, headless workflows, packaging and performance hardening | NOT STARTED |
 
@@ -1114,24 +1114,54 @@ take on Helm-compatible lifecycle reimplementation as its own project.
 
 ---
 
-### M10 — Operator workflow layer
+### M10 — Bulk workflows, workspaces, bookmarks, keymaps, themes
 
-Not started.
+ACCEPTED: M10.0-M10.9. Full record in
+[`docs/M10_ACCEPTANCE.md`](docs/M10_ACCEPTANCE.md).
 
-Planned scope includes:
+- **Bounded multi-select** (`V` select-visible, `i` invert, `C` clear,
+  up to 500 targets) driving **bulk mutations** (`bulk_label`,
+  `bulk_annotate`, `bulk_scale`, `bulk_restart`, `bulk_delete`,
+  `bulk_evict`, `bulk_cordon`/`bulk_uncordon`, `bulk_set_image`,
+  `bulk_trigger`) — every target goes through the exact same unmodified
+  M7/M8/M8B policy/preview/confirm/commit/verify gateway individually,
+  one at a time; there is no bulk-only bypass path, and no target is
+  ever authorized merely because another target in the same operation
+  was authorized. A bulk preview shows each target's own eligibility
+  (`ELIGIBLE`/`EXCLUDED`) before any confirmation keypress.
+- **Workspaces** (`workspace_save`/`workspace_open`/`workspace_delete`/
+  `workspace_list`): saved navigation intent (context, namespace,
+  resource, filter, sort) — never live `Resource` data, never
+  mutation-authorization state (verified-cluster flag, confirmations,
+  in-flight workflows, credentials). Opening a workspace replays the
+  intent through the normal watch/rebuild pipeline; it never restores a
+  prior cursor selection.
+- **Bookmarks** (`bookmark_save`/`bookmark_open`/`bookmark_delete`/
+  `bookmark_list`): a saved reference to one specific object by UID,
+  with an explicit status (`Exact`/`Replaced`/`Missing`/
+  `NotCurrentlyViewed`) rather than a silent same-name reattachment.
+- **Configurable keymaps and themes**, both fail-safe: a malformed
+  keymap or theme in `config.toml` never crashes startup — it falls
+  back to defaults and shows a visible, actionable warning instead
+  (naming both colliding actions for a keymap conflict; the unknown
+  theme name for a theme). A non-color channel (a distinct glyph per
+  severity) means the `mono` theme still distinguishes every health/
+  safety state without relying on color at all.
+- **Config persistence**: `Config` gained its first real write path —
+  workspaces/bookmarks are saved atomically (temp file, `0600`
+  permissions, then `rename()`) to the same `config.toml` a pre-M10
+  file already used, with a `version` field for future migrations. A
+  pre-M10 config file with none of these fields loads unchanged.
 
-- bulk workflows
-- marks/selections
-- workspaces
-- bookmarks
-- saved views
-- remembered sorts
-- configurable keymaps
-- themes
-- favorites
-- richer navigation
-- global object finder
-- clipboard actions
+Live-verified against the M1-M8B regression cluster (`kind-sauron-test`)
+with a dedicated `sauron-m10` namespace and fixtures: bulk label/delete
+committed and individually verified via `kubectl`; workspace/bookmark
+round trips through the real TUI; config persistence proven across a
+real process restart against the same `--config` path; malformed
+keymap/theme configs proven not to crash a real startup; combined
+acceptance run twice clean; full M1-M9 regression reconfirmed green; a
+300-second bounded soak (178 cycles of selection/workspace/bookmark
+churn, zero reconnects, zero transient errors, flat RSS/fd/thread).
 
 ---
 

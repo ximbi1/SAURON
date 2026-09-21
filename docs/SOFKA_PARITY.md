@@ -62,15 +62,15 @@ above is unchanged.
 | Filtering | Faults-only pod toggle | Health predicate | P1 | RESEARCHED | Pending: AST/unknown/selector unit + integration | Not yet delivered |
 | Sorting | Column picker, ascending/descending, age shortcut | Stable typed cycle/explicit command | P0 | ACCEPTED | M3 item 2 unit + live accept-m3.py sorting | Unknown last; no picker/age shortcut, use :sort age; generic Table types item 5 |
 | Sorting | Configured defaults and remembered per-kind sort | Config/session persistence | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Metrics | Pod/node/container CPU and memory | Optional Metrics API collector | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Metrics | Requests/limits, percentages, allocatable, QoS | Quantity/accounting projection | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
+| Metrics | Pod/node/container CPU and memory | Optional Metrics API collector | P1 | ACCEPTED | M5.1/M5.6 unit, fake HTTP and real metrics-server | Optional sampled metrics; stale/absent remain UNKNOWN |
+| Metrics | Requests/limits, percentages, allocatable, QoS | Quantity/accounting projection | P1 | ACCEPTED | M5.2 accounting and live filter/sort/table acceptance | Static accounting and usage percentages; zero denominator remains unknown |
 | Metrics | Threshold colors by resource/context | Semantic threshold configuration | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Health | Pod phase/reason/init/sidecar/gate/failure precedence | Deterministic Pod state model | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Health | Workload rollout/observedGeneration/partition/OnDelete | Workload health rules | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Health | Jobs, storage deletion, Node condition polarity | GVK health rules | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Explain | Fresh selected object, UID checks, cancellable latest report | Evidence collection + pure rules | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Explain | Workload/Pod/container/event evidence, finding navigation | Evidence report and related targets | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Timeline | Bounded per-UID meaningful watch transitions | Session change ring | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Health | Pod phase/reason/init/sidecar/gate/failure precedence | Deterministic Pod state model | P0 | ACCEPTED (M5 scope) | M5.3 real failure fixtures and precedence tests | See HEALTH.md for supported per-kind semantics |
+| Health | Workload rollout/observedGeneration/partition/OnDelete | Workload health rules | P1 | ACCEPTED (M5 scope) | M5.3 real failure fixtures and precedence tests | See HEALTH.md for supported per-kind semantics |
+| Health | Jobs, storage deletion, Node condition polarity | GVK health rules | P1 | ACCEPTED (M5 scope) | M5.3 real failure fixtures and precedence tests | See HEALTH.md for supported per-kind semantics |
+| Explain | Fresh selected object, UID checks, cancellable latest report | Evidence collection + pure rules | P0 | ACCEPTED | M5.4/M5.6 UID, partial RBAC and context races | Bounded fresh-object evidence; no invented diagnosis |
+| Explain | Workload/Pod/container/event evidence, finding navigation | Evidence report and related targets | P1 | ACCEPTED (subset) | M5.4 bounded ownership/Event/metric evidence | Report accepted; full finding-target navigation not claimed |
+| Timeline | Bounded per-UID meaningful watch transitions | Session change ring | P1 | ACCEPTED | M5.5/M5.6 relist, UID and meaningful-change tests | Bounded, scope/session-local; not an audit log |
 | Events | UID-related events, Warning filtering, correct last-seen | Native Event view | P1 | ACCEPTED | M3 item 4 + combined live flows | 200-result cap, explicit partial/empty/error; related-object navigation deferred |
 | Logs | Follow/tail/timestamps/previous/container selection | Cancellable native log stream | P1 | ACCEPTED | M4.0/M4.1 live; LOGS.md | Fixed tail 300; regular/init/ephemeral selection |
 | Logs | Multi-container/workload/service/marked-pod combined logs | Bounded multiplexed log sources | P1 | ACCEPTED (subset) | M4.1 live, repeated twice | All containers / visible Pods; workload/Service/marked aggregation deferred |
@@ -81,41 +81,41 @@ above is unchanged.
 | Documents | Last-applied or session-baseline diff/reset baseline | Explicit comparison baseline | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Actions | Exec/shell/attach with terminal suspension | Native transport after readonly gate | P1 | ACCEPTED | M4.2/M4.2b live; EXEC.md | Ctrl-] detach; documented post-session stdin limitation; richer operation policy deferred |
 | Actions | EDITOR edit with pinned context | Temporary file + validated API update | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Actions | Delete/force/bulk/cascade options, confirmations | UID/RV preconditions and policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Actions | Scale including discovered scale subresource | Native scale API | P1 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Actions | Rollout restart / set image | Typed patch preview/service | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Actions | CronJob trigger/suspend/resume | Native Job creation / suspend patch | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
+| Actions | Delete/force/bulk/cascade options, confirmations | UID/RV preconditions and policy | P1 | ACCEPTED (subset) | M8 delete; M8B force delete; live combined flows | Single-object guarded actions; bulk/cascade-option parity not claimed |
+| Actions | Scale including discovered scale subresource | Native scale API | P1 | ACCEPTED (subset) | M8 scale workflow and live verification | Supported workload scaling; arbitrary discovered scale-subresource parity not claimed |
+| Actions | Rollout restart / set image | Typed patch preview/service | P1 | ACCEPTED | M8 restart / M8B set-image live acceptance | Typed preview, policy, confirmation, commit and separate verification |
+| Actions | CronJob trigger/suspend/resume | Native Job creation / suspend patch | P2 | ACCEPTED (subset) | M8B trigger live acceptance | Trigger implemented; CronJob suspend/resume parity not claimed |
 | Actions | ExternalSecret/PushSecret refresh | Documented reconcile annotation | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Nodes | Cordon/uncordon | Native patch with preview | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
-| Nodes | Drain options, sequential nodes, PDB retry, progress/cancel | Dedicated eviction state machine | P1 | DESIGNED | Pending: unit + scoped acceptance | Upstream safety/features conflict; follow current API semantics |
+| Nodes | Cordon/uncordon | Native patch with preview | P1 | ACCEPTED | M8B guarded cordon/uncordon live acceptance | Isolated test cluster only during development |
+| Nodes | Drain options, sequential nodes, PDB retry, progress/cancel | Dedicated eviction state machine | P1 | ACCEPTED (subset) | M8B drain planner/orchestrator and live cancellation | Bounded sequential evictions through gateway; not full kubectl drain/options parity |
 | Forwarding | Pod/service declared port picker, custom/local port edits | Loopback native port-forward manager | P1 | ACCEPTED (subset) | M4.3 live TCP/picker/auto/explicit/conflict; PORT_FORWARD.md | Pod only; Service resolution and editing existing forwards deferred |
 | Forwarding | Background forwards, indicators, conflict/stop/saved/autostart | Owned forward tasks; explicit startup policy | P1 | ACCEPTED (subset) | M4.3 live context/navigation/UID/cleanup/cycles; M4.4 combined flows + continuously-held soak forward | 4 forwards × 8 clients; saved/autostart/reconnect deferred |
 | Files | Pod upload/download, progress | Bounded transfer with path checks and policy | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Files | PVC two-pane browser, mounted Pod/helper, cleanup, confined paths | Deferred until exec/transfer lifecycle proven | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
 | Debug | Ephemeral container, target container | Explicit irreversible debug action | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Debug | Privileged node debug pod and cleanup | High-risk preview and session ownership checks | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Flux | Kustomizations/HelmReleases/Git/Helm/OCI/Bucket resources | Native generic + curated GitOps views | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Flux | Image automation/notifications, suspend/resume/reconcile | Per-GVK native actions | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
+| Flux | Kustomizations/HelmReleases/Git/Helm/OCI/Bucket resources | Native generic + curated GitOps views | P2 | ACCEPTED (M9 scope) | M9.1 real Flux v2.9.5 | Capability discovery and curated supported status reports |
+| Flux | Image automation/notifications, suspend/resume/reconcile | Per-GVK native actions | P2 | ACCEPTED (subset) | M9.0 discovery / M9.2 guarded actions | Supported per-kind suspend/resume/reconcile; full optional-controller workflow parity not claimed |
 | Flux | HelmRelease force reconcile / release history navigation | Controller-specific annotations and release resolution | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Flux | Ownership/source/dependency chain, refresh and UID checks | GitOps evidence graph | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Argo | Applications status/sources/revisions/health/managed resources | Native CRD inspector | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Argo | Application sync, suspend/resume with exact original restoration | Explicit policy preview / not a native suspended field | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
+| Flux | Ownership/source/dependency chain, refresh and UID checks | GitOps evidence graph | P2 | ACCEPTED (subset) | M9.1 source/dependency status evidence | Read inspection only; full interactive GitOps graph parity not claimed |
+| Argo | Applications status/sources/revisions/health/managed resources | Native CRD inspector | P2 | ACCEPTED (M9 scope) | M9.3 real Argo CD v3.5.3 | Application status inspection; exact supported fields in M9_ACCEPTANCE.md |
+| Argo | Application sync, suspend/resume with exact original restoration | Explicit policy preview / not a native suspended field | P2 | ACCEPTED (subset) | M9.4 sync/refresh/rollback via shared gateway | Suspend/resume restoration semantics not implemented by these actions |
 | Argo | ApplicationSet generators/children and create-only suspend | Document limited suspension semantics | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Argo | Tracking metadata, multiple installations, remote destinations | Unambiguous context/ownership resolution | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Helm | Native release/revision/history/values/manifest/NOTES | Bounded Secret/ConfigMap decoder | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Helm | Rollback/uninstall (Sofka uses helm executable) | Native feasibility study, no fake patch-only rollback | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | Owners/children/Pod node/config/Secret/PVC/SA | Verified UID edges / explicit refs | P1 | TESTED | M6.0-M6.1/M6.4 unit+fake+live+interactive acceptance | Delivered (`:adjacent`/`a`) |
-| Relationships | PVC/PV/StorageClass/volume attributes class/reverse mounts | Storage relationship rules | P1 | TESTED | M6.3 unit+fake+live+interactive acceptance | Delivered; no VolumeAttributesClass (not requested live evidence) |
-| Relationships | Service selector/Endpoints/Ingress backends/TLS | Label-selection edges marked as inference | P1 | TESTED | M6.2 unit+fake+live+interactive acceptance | Delivered, selector matches always distinct from ownership |
+| Helm | Native release/revision/history/values/manifest/NOTES | Bounded Secret/ConfigMap decoder | P2 | ACCEPTED (subset) | M9.5 native Secret-backed release decoding, fake/live tests | Selected revision, masked values, manifest identities only; NOTES omitted; full history/ConfigMap-driver parity not claimed |
+| Helm | Rollback/uninstall (Sofka uses helm executable) | Native feasibility study, no fake patch-only rollback | P2 | DEFERRED | M9.6 native-action feasibility investigation | No safe supported execution path chosen; no rollback/uninstall implementation |
+| Relationships | Owners/children/Pod node/config/Secret/PVC/SA | Verified UID edges / explicit refs | P1 | ACCEPTED | M6 combined live acceptance and soak | Bounded Adjacent with provenance and UID-safe navigation |
+| Relationships | PVC/PV/StorageClass/volume attributes class/reverse mounts | Storage relationship rules | P1 | ACCEPTED (subset) | M6.3/M6.6 live acceptance | No VolumeAttributesClass parity claimed |
+| Relationships | Service selector/Endpoints/Ingress backends/TLS | Label-selection edges marked as inference | P1 | ACCEPTED | M6.2/M6.6 live acceptance | Selectors distinct from ownership; no IP-only inferred Pod |
 | Relationships | Configurable CRD children/refs/kind and namespace paths | Validated declarative graph rules | P2 | RESEARCHED | Pending: unit + scoped acceptance | Explicitly out of M6 core scope (optional P2, generic CRD ownerReferences already work) |
 | Relationships | On-demand generic CRD children search with budgets | Paged bounded owner-UID discovery | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Relationships | Xray ownership hierarchy | Graph traversal view | P1 | TESTED | M6.5 unit+fake+live+interactive acceptance | Delivered (`:xray`/`x`, bounded depth 1-3) |
+| Relationships | Xray ownership hierarchy | Graph traversal view | P1 | ACCEPTED | M6.5/M6.6 live acceptance | Bounded depth 1–3; not cluster-wide completeness |
 | Overview | Pulse refreshed health tiles | Bounded asynchronous overview | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Safety | Readonly global/context/cluster and flags | Layered config + hard CLI override at operation boundary | P0 | TESTED | M4 exec/attach/forward denial; M7 policy readonly/override gates; reload regression + live | Delivered; M7 adds the central policy layer, M8 still owns the actual mutation UX |
 | Safety | Guardrails deny/confirmation/type context/type name/bulk limits | Combine all restrictions deterministically | P0 | TESTED | M7.0-M7.3 unit+fake+live: `mutation::policy::evaluate` (deterministic, structured `PolicyReason`s, UNKNOWN never Allow) + `Confirmation` binding + `kube::mutation::commit`'s TOCTOU revalidation | Delivered as infrastructure (no user-facing mutation command yet — M8) |
 | Safety | Managed object warnings | Evidence of controlling manager in preview | P1 | RESEARCHED | Pending: deny/conflict/outcome regression | Not yet delivered |
 | Safety | can-i rules and action review; partial authorizers | SSAR + explicit incomplete reviews | P1 | RESEARCHED | Pending: deny/conflict/outcome regression | Not yet delivered |
-| Safety | Action journal and optional rotated export | Started + completed/failed/uncertain outcomes | P1 | DESIGNED | Pending: deny/conflict/outcome regression | Not yet delivered |
+| Safety | Action journal and optional rotated export | Started + completed/failed/uncertain outcomes | P1 | ACCEPTED (subset) | M7 journal; M8/M8B/M9 outcome/verification records | Redacted append-only local journal; rotated export parity not claimed |
 | Commands | Fuzzy palette/resources/bookmarks/workspaces/plugins | Central command registry | P0 | ACCEPTED (subset) | M2 item 5/6 live | Commands/resources only; bookmarks/workspaces/plugins deferred |
 | Commands | Scope/resource/filter syntax and @context completion | Structured query grammar | P1 | ACCEPTED (subset) | M2/M3 grammar + live | Scope/filter commands; @context completion deferred |
 | Commands | Per-mode rebindings, disable/conflicts/effective help | Central compiled keymap | P1 | ACCEPTED | M2 remap/help live + conflict regressions | M4 adds log and forward-manager modes |
@@ -145,7 +145,20 @@ above is unchanged.
 | SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 | SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
 
-## Current gap review — M7 accepted, 2026-09-18
+## Current gap review — M9 accepted, reconciled 2026-09-21
+
+M8 and M8B add accepted guarded user-facing mutations and advanced cluster
+operations on M7's gateway. M9.0–M9.5 and M9.7 add Flux/Argo inspection and
+supported guarded actions plus native Helm inspection. M9.6 Helm mutations
+remain explicitly deferred. Composite rows retain subset qualifications:
+accepted milestone scope is not full Sofka parity.
+
+Latest recorded suite: 305 unit + 74 fake HTTP, plus 9 integration live tests.
+M9 combined acceptance/regression ran twice; bounded M9 soak was 240 seconds
+per run (53–54 cycles), not 75 minutes. Local tag `m9-accepted`: `f2a18d0`;
+subsequent `75a3c63` fixes only the soak counter sentinel. M10 has not started.
+See [M9_ACCEPTANCE.md](M9_ACCEPTANCE.md) for limitations and the narrow Helm
+Secret-read exception; no generic Secret reveal, NOTES, or Helm actions added.
 
 M6 (M6.0-M6.6) fully ACCEPTED 2026-09-18: bounded relationship graph
 (ownerReferences, explicit typed references, Service/Pod selectors,
@@ -164,7 +177,7 @@ surfaces — all unit/fake/live-tested (including one narrowly-scoped
 internal proof mutation against the isolated `kind-sauron-test` fixture,
 never production) and interactively verified via `scripts/accept-m7.py`
 plus a 75-minute soak (zero reconnects). M7 deliberately ships **no
-user-facing mutation workflow** — that is M8, not started. Per-slice
+user-facing mutation workflow** at its own checkpoint; M8 subsequently added it. Per-slice
 evidence: [M7_ACCEPTANCE.md](M7_ACCEPTANCE.md).
 
 M1–M4 accepted checkpoints exist; core navigation is not a gap. Basic live watch/store,
@@ -198,6 +211,7 @@ Remaining operational gaps include Service/workload log resolution, Service forw
 saved/reconnecting/autostart forwards, IPv6/public binding and fully cancellation-safe
 terminal stdin. The bounded post-shell/attach input loss remains documented in
 [EXEC.md](EXEC.md); M4 acceptance does not claim it is fully fixed. The bounded relationship graph, `:adjacent` and `:xray` are now delivered as
-of M6 (see above); blast-radius prediction and the mutation/guardrail policy
-remain M7+ work. M5 explicitly stayed read-only and did not build toward the
+of M6 (see above); blast-radius prediction and broader configurable guardrails
+remain future work, while the central mutation policy is accepted through M7–M9.
+M5 explicitly stayed read-only and did not build toward the
 graph beyond Explain's own bounded, verified-ownership two-hop Pod correlation.

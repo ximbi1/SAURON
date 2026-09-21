@@ -2,7 +2,7 @@
 
 Canonical project memory. Read this before each major phase, inspect the code, reconcile
 claims with reality, and update this file after meaningful changes. README is for users.
-Last reconciled: 2026-09-16. Project began in an empty directory with no Git repository.
+Last reconciled: 2026-09-21, through accepted M10. Project began in an empty directory with no Git repository.
 
 ## Production boundary — explicit user instruction
 
@@ -13,8 +13,10 @@ upload, run helpers/debug containers, Helm/GitOps actions, or mutating plugins t
 Do not run fixture or cleanup commands using implicit/default kubeconfig context.
 Production activity so far: local kubeconfig context-name enumeration and one GET
 `/version`; no resource creation, modification or deletion. No test fixtures in production.
-All fixture writes so far went to a separate Docker kind cluster named `sauron-test`,
-context `kind-sauron-test`, explicit `.test-cluster/config`. Do not confuse these clusters.
+M1–M8B fixture writes use separate Docker kind `sauron-test`, context
+`kind-sauron-test`, explicit `.test-cluster/config`. M9 uses a second isolated
+`sauron-m9`, context `kind-sauron-m9`, explicit `.test-cluster-m9/config`, guarded
+by `scripts/test-cluster-m9.sh`. Neither is production.
 Operational instructions and the latest checkpoint: `docs/RUNBOOK.md`.
 
 ## Identity and mission
@@ -114,7 +116,11 @@ never receive kubeconfig credentials at arbitrary external URLs.
 | `src/ui/` | pure rendering, theme, document/table layout | Kubernetes clients |
 | `src/config.rs` | validated TOML and XDG paths | kubeconfig edits |
 | `src/explain.rs` | evidence-based findings | invented root causes |
-| `src/safety.rs` | redaction and eventual mutation gateway | bypasses for plugins |
+| `src/safety.rs` | generic redaction and safe error text | mutation execution |
+| `src/graph/`, `src/kube/relationships/` | bounded provenance-aware relationships and traversal | inferred causality or a global object database |
+| `src/mutation/`, `src/kube/mutation.rs` | intent/policy/workflow/journal and single execution/verification gateway | bypassing readonly or UID/RV checks |
+| `src/kube/drain.rs` | bounded sequencing through the same mutation gateway | a second policy or journal |
+| `src/integrations/`, `src/kube/helm.rs` | Flux/Argo inspection, Helm decoding and explicit bounded release reader | generic Secret reveal or Helm mutation |
 | `tests/` | fake API and controlled cluster/terminal acceptance | writes to default cluster |
 | `benches/` | reproducible measured hot paths | fake product data |
 | `docs/` | user references, contracts, parity and measurements | unsupported claims |
@@ -147,9 +153,18 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | M4.4 combined/regression/soak | ACCEPTED | 10 live combined sequences + full M1-M4 regression + 75-minute soak (912 cycles, flat RSS/fd/threads); docs/M4_ACCEPTANCE.md; local annotated m4-accepted |
 | Health/Explain/timeline | ACCEPTED (M5) | deterministic evidence, bounded ownership correlation, relist deltas; docs/M5_ACCEPTANCE.md |
 | Metrics | ACCEPTED (M5) | native optional collector, accounting and typed table/filter/sort; docs/METRICS.md |
-| Graph/relationships/Xray | IMPLEMENTING | M6.0 metadata model; no resolver/UI acceptance yet; docs/M6_ACCEPTANCE.md |
-| Policy/guardrails/journal/mutations | DESIGNED | read-only initial release |
-| GitOps/Helm | RESEARCHED | native inspection before actions |
+| Graph/relationships/Adjacent/Xray | ACCEPTED (M6) | bounded topology, canonical navigation, combined live acceptance and 75-minute soak |
+| Policy/confirmation/gateway/journal | ACCEPTED (M7) | centralized fail-closed execution; configured production guardrail system is not full parity |
+| Scale/restart/delete/label/annotate | ACCEPTED (M8) | shared preview/confirmation/commit/verification workflow |
+| Cordon/uncordon/image/trigger/evict/drain/force-delete | ACCEPTED (M8B) | bounded workflows; not full kubectl drain parity |
+| Flux / Argo CD | ACCEPTED (M9 scope) | read-only views and supported guarded actions; docs/M9_ACCEPTANCE.md |
+| Helm inspection | ACCEPTED (M9.5 scope) | explicit bounded Secret-backed release reader, masked values and manifest identities; NOTES omitted |
+| Helm rollback/uninstall | DEFERRED (M9.6) | native execution feasibility decision recorded; no implementation |
+| Bulk multi-select mutations | ACCEPTED (M10.1-M10.3) | bounded `Selection` (MAX_SELECTION=500); every target through the unmodified M7/M8/M8B gateway individually, no bulk-only bypass |
+| Workspaces / bookmarks | ACCEPTED (M10.4-M10.5) | saved navigation intent (never live Resource/mutation-auth state); UID-aware bookmark status |
+| Configurable keymaps / themes | ACCEPTED (M10.6-M10.7) | actionable per-mode conflict diagnostics; both fail safe (visible warning, never a crash) on malformed config |
+| Config persistence / migration | ACCEPTED (M10.8) | first write path `Config` has ever had; atomic (0600, temp-file-then-rename); pre-M10 files load unchanged |
+| M10.9 combined acceptance/soak | ACCEPTED | full M1-M9 regression + combined M10 acceptance run twice clean + 300s soak (178 cycles, flat RSS/fd/threads); docs/M10_ACCEPTANCE.md; local annotated m10-accepted |
 | Eye/Pulse/bundles/diff | RESEARCHED | bounded evidence collection |
 | Plugins/providers/fleet/packaging | DEFERRED | stable core first |
 
@@ -233,12 +248,78 @@ second only when the filter has an `age` comparison (see journal entry below —
 version included the clock unconditionally and resorted every tick regardless of scope).
 Shared document interactions and selection were accepted in M3. Watch list synchronization is
 labeled separately from an established watch; no header-level connection probe yet.
-No in-cluster config fallback, server Tables, graph UI or Kubernetes resource mutations yet.
+No in-cluster config fallback or server Tables. Graph UI and guarded mutation
+workflows are accepted through M6–M9; production use during development remains read-only.
 Metrics are accepted in M5. Multi-source logs and gated
 exec/shell/attach are accepted. Core Event reads cap at 200
 and report truncation. Describe is SAURON's contextual native report, not kubectl parity.
 
 ## Current milestone / continuation instructions
+
+M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
+(Helm rollback/uninstall) is explicitly DEFERRED, not implemented.
+M10.0–M10.9 are ACCEPTED. Local annotated `m10-accepted` points to the
+tip of this milestone's work; never pushed.
+
+Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
+tests; locked fmt/check/clippy/test green in the acceptance record. Combined
+acceptance and M1–M8B regressions passed twice (one prior M3 timing flake is
+documented, not erased). M9's bounded soak was **240 seconds per run**,
+53–54 cycles, flat RSS/fds/threads, zero reported reconnects/transient errors.
+Earlier 75-minute soaks belong to their own milestones, not M9.
+
+Recorded M10 checks: 390 unit + 76 fake HTTP; locked fmt/check/clippy/test
+green. `scripts/accept-m10.py` (bulk multi-select mutations, workspace/
+bookmark round trips, config persistence across a real process restart,
+malformed keymap/theme fail-safe, 32x9, terminal restoration) passed twice
+clean. Full M1–M9 regression (every existing `accept-m*.py`, unmodified)
+reconfirmed green. M10's bounded soak was **300 seconds**, 178 cycles
+(selection/workspace/bookmark every cycle, `bulk_label` throttled to every
+10th, matching M9's own throttling precedent for real-write cadence),
+flat RSS/fds/threads, zero reconnects/transient errors. See
+`docs/M10_ACCEPTANCE.md`'s M10.9 journal entry for two real bugs found and
+fixed during this milestone's own acceptance work (a `startup_warning`
+visibility bug, and an `accept-m3.py` cursor-detection break caused by
+M10's own new row markers) and one suspected regression that was
+root-caused to be a stale test binary, not a defect.
+These are recorded results, not tests rerun during this documentation update.
+
+Current architecture: M6 bounded Adjacent/Xray; M7 policy/confirmation/
+TOCTOU/journal; M8 shared mutation UI and post-commit verification; M8B
+advanced operations including bounded drain; M9 Flux/Argo inspection and
+guarded actions through that same gateway; M10 bounded multi-select
+(`app::selection::Selection`, `MAX_SELECTION=500`) driving bulk mutations
+(`mutation::bulk`) that reuse the unmodified M7/M8/M8B gateway per target,
+plus workspaces/bookmarks (`app::workspace`/`app::bookmark`) and their
+persistence in `Config` (the first write path `Config` has ever had:
+atomic, `0600`, temp-file-then-rename), configurable keymaps and themes
+(both fail safe on malformed config — a visible warning, never a crash).
+Helm is inspection-only, with an explicit user-triggered, bounded,
+UID/type-checked Secret-body reader. Values masking is heuristic, manifest
+output is identities only, NOTES are omitted. No general Secret-reveal
+permission is implied.
+
+Production remains read-only. Regression fixtures use `sauron-test`,
+`.test-cluster/config`, `kind-sauron-test`, and `scripts/test-cluster.sh`.
+M9 fixtures use separate `sauron-m9`, `.test-cluster-m9/config`,
+`kind-sauron-m9`, and `scripts/test-cluster-m9.sh`. Both require
+Docker-label/API-endpoint verification; never default kubeconfig. Both are
+local, self-contained Docker containers with no production data, and may
+need to be recreated (`kind delete cluster` + the matching
+`scripts/bootstrap-test-cluster{,-m9}.sh`) if their kubelet drifts into a
+kubelet/API x509 trust failure after long uptime — an environment issue
+seen and remediated during M10.9, unrelated to any SAUR-ON code.
+The explicit mutation-test flag is a harness assertion, not automatic proof
+of cluster identity or permission to operate on production.
+
+M11 is next and has not started. Read the relevant acceptance ledger before
+continuing; preserve accepted behavior and the unresolved bounded terminal
+stdin limitation in `docs/EXEC.md`. No implementation is authorized merely
+by this status update.
+
+### Historical continuation snapshot — before M6 completion
+
+The following snapshot is retained as history; it is superseded by the checkpoint above.
 
 M1, M2, and M3 are all ACCEPTED. Verified local annotated `m2-accepted` points to
 `675567d940d0cdb7ad8e5c7ae2e95d4d3de5e435`; local annotated `m3-accepted` created
@@ -293,6 +374,17 @@ portforward exposes one duplex stream per requested remote port; concurrent loca
 clients need separately owned forwarding connections. No new dependency chosen yet.
 
 ## Journal
+
+### 2026-09-21 — documentation reconciliation through M9
+
+Reconciled current checkpoint, feature matrix, module ownership, parity and
+mutation-policy text against code and accepted ledgers. Historical checkpoint
+entries remain explicitly historical. `m9-accepted` is `f2a18d0`, not HEAD
+`75a3c63` (subsequent soak-script sentinel fix). Recorded M9 soak is 240 seconds,
+not the earlier milestones' 75 minutes. Added the established M9 isolated-cluster
+guard to repository instructions; no new production authority. Preserved Helm's
+narrow read exception and M9.6 deferral. Documentation-only: no cluster calls,
+application tests, implementation, tag changes or publishing performed.
 
 ### 2026-09-20 — M9.7 ACCEPTED, M9 combined acceptance closed (M9.0-M9.5, M9.7 ACCEPTED; M9.6 DEFERRED)
 

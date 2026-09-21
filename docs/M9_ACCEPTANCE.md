@@ -1,10 +1,13 @@
-# M9 — GitOps/Package Manager Integration (Flux, Argo CD, Helm): planning ledger (IN PROGRESS)
+# M9 — GitOps/Package Manager Integration (Flux, Argo CD, Helm): acceptance ledger
 
 Status: **ACCEPTED** (2026-09-20) — M9.0-M9.5 and M9.7 ACCEPTED; M9.6
 (Helm rollback/uninstall) explicitly DEFERRED, an evidence-backed
 outcome of its own required investigation, not a blocker. Local
 annotated tag `m9-accepted`, never pushed without explicit
 authorization.
+Checkpoint clarification (2026-09-21): `m9-accepted` points to `f2a18d0`.
+Subsequent codebase HEAD `75a3c63` changes only `scripts/soak-m9.py` to
+represent an unparsed metrics counter explicitly. The tag has not been moved.
 This document started as scope definition and contract design written
 before implementation, exactly like `docs/M8B_ACCEPTANCE.md` was for
 M8B, and is updated slice by slice as each is implemented. Nothing in

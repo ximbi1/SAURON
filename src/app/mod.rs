@@ -4131,6 +4131,40 @@ mod tests {
         rt.shutdown().await;
     }
     #[tokio::test]
+    async fn startup_warning_survives_a_real_ready_event_end_to_end() {
+        // M10.9: the live finding this whole split exists for, proven at
+        // the actual Runtime::reduce dispatch level (not just State::new
+        // in isolation) -- a malformed theme's warning must still be
+        // visible after the exact Payload::Ready event a real successful
+        // watch sync sends.
+        let mut config = crate::config::Config::default();
+        config.base.theme = "not-a-real-theme".into();
+        let (mut rt, _) = Runtime::new(
+            ConnectOptions::default(),
+            config,
+            None,
+            Query {
+                resource: "pods".into(),
+                ..Default::default()
+            },
+        )
+        .expect("runtime");
+        assert!(rt.state.startup_warning.is_some());
+        rt.reduce(Event {
+            epoch: rt.state.epoch,
+            payload: Payload::Ready,
+        });
+        assert!(
+            rt.state.startup_warning.is_some(),
+            "Payload::Ready must never clear the startup warning"
+        );
+        assert!(
+            rt.state.error.is_none(),
+            "Payload::Ready still clears the unrelated transient error field, unchanged"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
     async fn sort_and_reverse_do_not_start_tasks_or_pollute_history() {
         let mut rt = runtime();
         let epoch = rt.state.epoch;

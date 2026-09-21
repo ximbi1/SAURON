@@ -304,7 +304,17 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Mode::Document(doc) | Mode::Search(doc, _) => Some(doc.status()),
         _ => None,
     };
-    let error = state.input_error.as_ref().or(state.error.as_ref());
+    // M10.9: `startup_warning` is the lowest priority -- a real-time
+    // input/watch error always takes the status line when present, but
+    // when nothing more urgent is happening, the config warning stays
+    // visible for the rest of the session instead of just disappearing
+    // the moment the list first syncs (see `State::new`'s own doc
+    // comment for the live finding that required this).
+    let error = state
+        .input_error
+        .as_ref()
+        .or(state.error.as_ref())
+        .or(state.startup_warning.as_ref());
     let status = error.or(document_status.as_ref()).unwrap_or(&query_status);
     frame.render_widget(
         Paragraph::new(crate::safety::text(status)).style(Style::default().fg(
@@ -539,6 +549,38 @@ mod tests {
                 .draw(|frame| render(frame, &mut state, &[]))
                 .expect("render");
         }
+    }
+
+    #[test]
+    fn startup_warning_actually_appears_in_the_rendered_status_line() {
+        let settings = crate::config::Settings {
+            theme: "not-a-real-theme".into(),
+            ..crate::config::Settings::default()
+        };
+        let mut state = State::new(
+            crate::kube::watch::Query {
+                resource: "pods".into(),
+                ..Default::default()
+            },
+            &settings,
+        );
+        assert!(state.startup_warning.is_some());
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &mut state, &[]))
+            .expect("render");
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(
+            content.contains("Unknown theme"),
+            "the startup warning must actually be visible in the rendered frame, not just set on state"
+        );
     }
 
     /// M8B.5: a real Drain preview/report is one of the longest documents

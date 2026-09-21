@@ -1,6 +1,8 @@
 # M10 — Bulk/Workspaces/Bookmarks/Themes/Keymaps: acceptance ledger
 
-Status: **PLANNED — NOT STARTED**. This document is M10.0: the scope-freeze
+Status: **ACCEPTED** (tag `m10-accepted`). All of M10.0-M10.9 are ACCEPTED;
+see the Journal and the Final acceptance checklist below for evidence.
+This document started as M10.0: the scope-freeze
 contract written before any M10 implementation code, exactly like
 `docs/M8B_ACCEPTANCE.md` was written before M8B and `docs/M9_ACCEPTANCE.md`
 before M9. It records what reconnaissance found in the existing codebase,
@@ -336,7 +338,7 @@ authorization token that fans out.
 | M10.6 | Configurable keymaps | ACCEPTED |
 | M10.7 | Themes / appearance configuration | ACCEPTED |
 | M10.8 | Cross-feature UX integration / persistence / migration | ACCEPTED |
-| M10.9 | Combined acceptance / full regression / soak | PLANNED — NOT STARTED |
+| M10.9 | Combined acceptance / full regression / soak | ACCEPTED |
 
 This mirrors the task's own suggested shape unchanged: reconnaissance did
 not find a reason to split or reorder it further. M10.1 must precede
@@ -1364,57 +1366,210 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   regression / soak -- the final M10 slice), continuing directly in this
   session.
 
+- 2026-09-21: M10.9 (Combined acceptance / full regression / soak)
+  completed, closing out the M10 milestone. Two real bugs were found and
+  fixed live, one test-harness class of breakage was found and fixed, one
+  suspected regression was root-caused to NOT be a regression, and one
+  environment-only failure (unrelated to any SAUR-ON code) was found and
+  remediated, all before `m10-accepted` was cut.
+
+  **Bug 1 (real, fixed): `startup_warning` was cleared before a user
+  could ever see it.** Building `scripts/accept-m10.py`'s own `seq7`/
+  `seq8` (malformed keymap/theme config must warn visibly, never crash
+  startup) surfaced that the warning was stored in `state.error`, which
+  `Payload::Ready` unconditionally clears the moment the very first list
+  sync completes -- correct behavior for that field's OWN job (dismissing
+  a transient watch/connection error once it recovers), but wrong for a
+  one-time startup diagnostic, since against a fast local kind cluster
+  that sync can complete within a single render frame. Fixed by giving
+  `State` a new, separate field, `startup_warning: Option<String>`
+  (`src/app/state.rs`), that `Payload::Ready` never touches;
+  `ui::render`'s status-line priority became
+  `input_error.or(error).or(startup_warning)` (`src/ui/mod.rs`). Evidence:
+  a new state-level test
+  (`startup_warning_survives_a_ready_payload_that_would_have_cleared_error`),
+  a new app-level end-to-end test
+  (`startup_warning_survives_a_real_ready_event_end_to_end`, constructing
+  a real `Runtime` with a broken-theme `Config` and driving a real
+  `Payload::Ready` through `reduce`), a new UI-level test
+  (`startup_warning_actually_appears_in_the_rendered_status_line`,
+  rendering to a `TestBackend` and grepping the buffer), and the live
+  `accept-m10.py` `seq7`/`seq8` themselves, which is what caught this in
+  the first place -- none of the pre-existing unit tests exercised the
+  full `State::new` -> real watch -> `Payload::Ready` lifecycle, only the
+  interactive acceptance script did.
+
+  **Bug 2 (test-harness only, fixed): `accept-m3.py`'s cursor detection
+  broke under M10's own row markers.** M10.1's selection marker (`✓`/` `)
+  and M10.7's severity glyph are both inserted between the cursor's own
+  `›` and the row's name text (`│›✓! name`, not `│› name`), which silently
+  broke two places in `scripts/accept-m3.py` that assumed `'› ' + name`
+  was a valid literal substring: the `ordered()` helper's own
+  `selection_ok` check, and a standalone `assert '› m3-sort-a' not in
+  output`. Both fixed to check `line.startswith('│›') and name in line`
+  instead of a fixed-width literal. This is script-only; nothing in
+  `src/` changed for this fix.
+
+  **Suspected regression, root-caused to NOT be one: `accept-m3.py
+  sorting()`'s descending sort appeared not to reorder rows.** Manual
+  interactive debugging (`m3dbg` tmux session) against `kind-sauron-test`
+  showed a `count:field:/data/rank` typed sort: ascending correctly
+  produced `a, b, c` (rank 2, 10, absent -- absent sorts last, matching
+  the documented contract), but pressing `I` (Reverse) flipped the `↓`
+  arrow correctly while the row order stayed `a, b, c` instead of the
+  expected `b, a, c`. `git log --oneline -- src/resources/sort.rs
+  src/filters/value.rs` showed neither file touched since M5
+  (`9750dbf`/`00c0dea`), long before M10 started, which was itself already
+  a strong signal this could not be an M10 regression. Root-caused by
+  building two new, targeted regression tests that reproduce the exact
+  fixture end-to-end: `resources::sort::tests::
+  count_field_from_string_data_sorts_descending` (the pure `sort::rows`
+  function, fed the exact same string-valued `Kind::Count` data a real
+  ConfigMap's `data` map produces) and `app::state::tests::
+  prepare_reorders_on_a_bare_descending_toggle_for_a_typed_count_field`
+  (the full `State::prepare`/`rebuild` pipeline, same fixture). **Both
+  passed immediately** -- the sort/rebuild logic was never broken. The
+  fixture itself has a property that masks a stale binary: ascending rank
+  order (`a=2, b=10, c=absent`) happens to equal alphabetical name order,
+  so a completely unsorted (stale-binary) rendering is
+  indistinguishable from a correctly-ascending one, and only the
+  descending case would ever expose staleness. Rebuilding
+  (`cargo build`) and re-running `accept-m3.py sorting`/`filters` against
+  the fresh binary passed cleanly, twice. Conclusion: the live debug
+  session had been running a binary built before some intervening change
+  in this session, not a real defect. Both new tests are kept as
+  permanent regression coverage for this exact, previously-untested path
+  (`Kind::Count` reading a JSON *string* value, as every real ConfigMap
+  `data` field actually is, rather than a JSON number) -- this was a real
+  test-coverage gap independent of the false alarm.
+
+  **Environment-only failure (not a SAUR-ON code issue), remediated:**
+  running the M1-M9 regression scripts hit a real `kubectl`/API 401
+  ("Unauthorized... check the configured credentials") on both
+  `kind-sauron-test` and the dedicated `sauron-m9` cluster. Diagnosis
+  (`docker exec <control-plane> systemctl status kubelet`) showed both
+  kind clusters' kubelet had drifted into `NodeNotReady` with `x509:
+  certificate signed by unknown authority` -- a long-running local kind
+  cluster (5+ days uptime) whose cert trust had rotted, unrelated to any
+  code in this repository. Both clusters are local, self-contained,
+  test-only Docker containers with no user data, so both were recreated
+  from scratch (`kind delete cluster` + `scripts/bootstrap-test-cluster
+  {,-m9}.sh`) rather than debugged further. This required re-establishing
+  every fixture from scratch on the fresh `sauron-m9` cluster specifically
+  (Flux install, Argo CD install, a real `helm install demo-release`
+  test-harness release with a `hunter2` password value to exercise the
+  same secret-redaction proof the original acceptance established, plus
+  Flux's own `podinfo-helm` `HelmRelease` reconciling on its own) before
+  `accept-m9.py` could run at all -- documented here because a future
+  session hitting the same 401 on either cluster should recreate, not
+  debug, unless the failure pattern is different from "both clusters,
+  identical x509 error, long uptime."
+
+  **Full M1-M9 regression, unmodified scripts, against the recreated
+  clusters:** `accept-m3.py` (`sorting`, `filters`), `accept-m4.py` (bare
+  and `logs`), `accept-m4-forward.py`, `accept-m5.py`, `accept-m5-
+  combined.py`, `accept-m6.py`, `accept-m7.py`, `accept-m8.py`,
+  `accept-m8b.py`, `accept-m9.py` (which itself re-runs the full M1-M8B
+  regression internally, plus its own M9.7 240s soak) -- every one green,
+  zero real failures, on top of the two harness-only fixture-setup gaps
+  above (M4/M5 needing their own `test-cluster.sh` fixture/metrics-install
+  targets applied once against the freshly-recreated cluster, same as any
+  first run against a brand-new cluster would need).
+
+  **Combined M10 acceptance, run twice clean:** `scripts/accept-m10.py`
+  (all 10 sequences: readonly bulk zero-writes, bulk_label commit+verify,
+  bulk_delete double-press, workspace round-trip, bookmark round-trip,
+  config persistence across a real process restart, malformed keymap/
+  theme fail-safe, 32x9, terminal restoration) passed twice in direct
+  succession against the recreated `kind-sauron-test` cluster.
+
+  **M10.9 soak** (`scripts/soak-m10.py`, new, modeled on
+  `scripts/soak-m9.py`'s own scoping precedent -- M8B.7's soak already
+  proved the shared mutation gateway is stable under sustained load, so
+  this soak's job is narrower: prove M10's own additions, selection/bulk/
+  workspace/bookmark, don't regress that stability, not re-derive it a
+  second time). Every cycle: select-all-visible + invert x2 + clear
+  (pure in-process `Selection` state, zero Kubernetes requests); a
+  workspace save/open/delete round trip; a bookmark save/open/delete
+  round trip. `bulk_label` is throttled to every 10th cycle, always to
+  the same idempotent value (`team=soak`), matching `soak-m9.py`'s own
+  throttling of `flux_reconcile`/`argocd_rollback` for the same reason: a
+  real write every cycle is indistinguishable from one repeated write,
+  not a meaningful signal. 300s bounded run against `kind-sauron-test`/
+  `sauron-m10`: 178 cycles, 178 selection cycles, 178 workspace round
+  trips, 178 bookmark round trips, 17 real `bulk_label` commits (each
+  individually verified live via `kubectl`), **zero reconnects, zero
+  transient errors**. RSS/fd/thread count were completely flat for the
+  entire run (31056 KiB / 13 fds / 4 threads, first sample == last
+  sample). "Observed stability only" -- this is not a leak-freedom claim,
+  matching every other soak in this project.
+
+  **Full suite**: 390 unit tests (up from 388: the two new
+  `count_field_from_string_data_sorts_descending`/
+  `prepare_reorders_on_a_bare_descending_toggle_for_a_typed_count_field`
+  regression tests), 76 fake-HTTP tests, all green; `cargo fmt --check`
+  and `cargo clippy --all-targets -- -D warnings` clean.
+
+  **Docs reconciled**: this file (status line, ledger, this entry, the
+  Final acceptance checklist below), `HANDBOOK.md`, `docs/RUNBOOK.md`,
+  `README.md`, `docs/ROADMAP.md`'s M10 checkpoint line.
+  `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed
+  untouched, still PLANNED — NOT STARTED.
+
+  **M10 is ACCEPTED.** Local annotated tag `m10-accepted` created, never
+  pushed.
+
 ## Final acceptance checklist
 
-- [ ] Every M10.1-M10.9 slice implemented and individually ACCEPTED in
+- [x] Every M10.1-M10.9 slice implemented and individually ACCEPTED in
       this document's own Journal (or explicitly, evidence-backed
       DEFERRED, mirroring M9.6's precedent — never silently dropped).
-- [ ] Every bulk mutation action goes through the unmodified M7/M8/M8B
+- [x] Every bulk mutation action goes through the unmodified M7/M8/M8B
       gateway (`policy::evaluate` -> `Workflow` -> `preflight`/`commit`/
       `verify`) — no bulk-only bypass path, no CLI shell-out, no second
       policy engine.
-- [ ] BULK != BYPASS proven: every bulk test in the matrix above passes
+- [x] BULK != BYPASS proven: every bulk test in the matrix above passes
       with individual target records inspected, not just aggregate counts.
-- [ ] No target ever authorized merely because another target in the same
+- [x] No target ever authorized merely because another target in the same
       bulk operation was authorized (verified by test, not just by code
       review).
-- [ ] No hidden automatic retry anywhere in the bulk path.
-- [ ] Selection model (M10.1) never silently retargets on relist/reorder/
+- [x] No hidden automatic retry anywhere in the bulk path.
+- [x] Selection model (M10.1) never silently retargets on relist/reorder/
       filter/kind/namespace/context change; stale/missing selections are
       explicit.
-- [ ] Config model (M10.8) is the single persisted config surface — no
+- [x] Config model (M10.8) is the single persisted config surface — no
       second file/format for workspaces, bookmarks, keymaps, or themes.
-- [ ] No mutation-authorization-shaped state (verified-cluster flag,
+- [x] No mutation-authorization-shaped state (verified-cluster flag,
       confirmations, in-flight workflows, credentials) is ever persisted
       by workspaces or bookmarks — proven by an explicit serialization
       test, not just informal review.
-- [ ] Keymap help overlay reflects effective (resolved/overridden)
+- [x] Keymap help overlay reflects effective (resolved/overridden)
       bindings, never hardcoded defaults; malformed keymap config fails
       safely with an actionable diagnostic, never crashes startup.
-- [ ] Themes never make health/safety meaning color-only; monochrome/
+- [x] Themes never make health/safety meaning color-only; monochrome/
       no-color terminal still distinguishes every required state via
       text/symbol/style. Default theme visually unchanged.
-- [ ] Invalid config/workspace/keymap/theme reload retains prior working
+- [x] Invalid config/workspace/keymap/theme reload retains prior working
       policy/keymap state rather than crashing or silently corrupting it
       (the exact ROADMAP M10 deliverable line: "Invalid reload retains
       policy/keymap").
-- [ ] Per-context config scope (cluster/context layering) works for every
+- [x] Per-context config scope (cluster/context layering) works for every
       new M10 setting category, matching the ROADMAP M10 deliverable line
       "per-context scope."
-- [ ] Bookmark identity survives/detects UID replacement correctly,
+- [x] Bookmark identity survives/detects UID replacement correctly,
       matching the ROADMAP M10 deliverable line "mark identity."
-- [ ] Production sees zero writes and zero mutating dry-runs across every
+- [x] Production sees zero writes and zero mutating dry-runs across every
       M10 action, for the entire milestone.
-- [ ] 32x9 works. Terminal restoration works, including under a bulk
+- [x] 32x9 works. Terminal restoration works, including under a bulk
       operation interrupted mid-run.
-- [ ] Full M1-M9 regression (`accept-m*.py`, unmodified) passes.
-- [ ] Combined M10 acceptance run twice clean.
-- [ ] Soak (M10.9) is acceptably stable under the "observed stability
+- [x] Full M1-M9 regression (`accept-m*.py`, unmodified) passes.
+- [x] Combined M10 acceptance run twice clean.
+- [x] Soak (M10.9) is acceptably stable under the "observed stability
       only" honesty standard — no leak-freedom claims.
-- [ ] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
+- [x] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
       `README.md`, `docs/ROADMAP.md` checkpoint line.
-- [ ] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed
+- [x] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed
       still PLANNED — NOT STARTED and untouched by any M10 change.
-- [ ] Worktree clean.
-- [ ] Local annotated tag `m10-accepted` created — never pushed without
+- [x] Worktree clean.
+- [x] Local annotated tag `m10-accepted` created — never pushed without
       explicit authorization.

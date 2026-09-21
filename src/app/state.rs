@@ -76,6 +76,12 @@ pub struct State {
     pub mode: Mode,
     pub status: String,
     pub error: Option<String>,
+    /// M10.6/M10.9: a one-time, session-persistent config warning
+    /// (malformed keymap/theme) -- deliberately separate from `error`,
+    /// which `Payload::Ready` clears on every successful list sync. See
+    /// `State::new`'s own doc comment for the live finding that required
+    /// this split.
+    pub startup_warning: Option<String>,
     pub input_error: Option<String>,
     pub synced: bool,
     pub dirty: bool,
@@ -93,13 +99,18 @@ pub struct State {
     prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
 impl State {
-    /// M10.6: a malformed user keymap config must never crash startup --
-    /// `Keymap::compile`'s own default-only call (`Keymap::compile(&
-    /// BTreeMap::new())`) is proven elsewhere to never fail (the built-in
-    /// registry has no self-conflicts), so falling back to it is always
-    /// available. The failure is surfaced as a visible, dismissible
-    /// `state.error` (exactly like every other "denied, not hidden"
-    /// surface in this app), never silently swallowed and never fatal.
+    /// M10.6/M10.9: a malformed user keymap/theme config must never crash
+    /// startup, AND the resulting warning must actually be seen -- found
+    /// live in M10.9's own interactive acceptance script: an earlier
+    /// version of this fix stored the warning in `state.error`, which
+    /// `Payload::Ready` unconditionally clears the moment the initial
+    /// list sync completes (its own, correct, unrelated job: dismissing
+    /// a *transient* watch/connection error once things recover). Against
+    /// a fast local cluster that sync can complete within a single
+    /// render frame, so the warning was cleared before a real user could
+    /// ever see it -- "visible, dismissible" was not actually true.
+    /// `startup_warning` is a SEPARATE field `Payload::Ready` never
+    /// touches, so it stays visible for the rest of the session instead.
     pub fn new(query: Query, settings: &Settings) -> Self {
         let (keymap, keymap_error) = match Keymap::compile(&settings.keys) {
             Ok(k) => (k, None),
@@ -121,7 +132,7 @@ impl State {
                 settings.theme
             )
         });
-        let error = match (keymap_error, theme_error) {
+        let startup_warning = match (keymap_error, theme_error) {
             (Some(a), Some(b)) => Some(format!("{a}; {b}")),
             (Some(a), None) | (None, Some(a)) => Some(a),
             (None, None) => None,
@@ -146,7 +157,8 @@ impl State {
             wide: false,
             mode: Mode::Table,
             status: "Starting".into(),
-            error,
+            error: None,
+            startup_warning,
             input_error: None,
             synced: false,
             dirty: true,
@@ -398,11 +410,11 @@ mod tests {
         );
         let s = State::new(Query::default(), &settings);
         assert!(
-            s.error
+            s.startup_warning
                 .as_deref()
                 .is_some_and(|e| e.contains("Invalid key configuration")),
-            "a malformed keymap must be surfaced as a visible, dismissible error: {:?}",
-            s.error
+            "a malformed keymap must be surfaced as a visible, session-persistent warning: {:?}",
+            s.startup_warning
         );
         // The default keymap is in effect -- "j" still resolves to Down,
         // never to the user's broken "yaml" override.
@@ -420,6 +432,7 @@ mod tests {
     #[test]
     fn valid_keymap_config_produces_no_startup_error() {
         let s = State::new(Query::default(), &Settings::default());
+        assert!(s.startup_warning.is_none());
         assert!(s.error.is_none());
     }
     #[test]
@@ -430,11 +443,11 @@ mod tests {
         };
         let s = State::new(Query::default(), &settings);
         assert!(
-            s.error
+            s.startup_warning
                 .as_deref()
                 .is_some_and(|e| e.contains("Unknown theme") && e.contains("ember")),
-            "an invalid theme must be surfaced as a visible, dismissible warning: {:?}",
-            s.error
+            "an invalid theme must be surfaced as a visible, session-persistent warning: {:?}",
+            s.startup_warning
         );
         // The settings string itself is left as-is (Theme::named() is
         // what actually falls back at render time) -- State::new only
@@ -452,9 +465,28 @@ mod tests {
             BTreeMap::from([("yaml".into(), vec!["j".into()])]),
         );
         let s = State::new(Query::default(), &settings);
-        let error = s.error.expect("both must be reported");
-        assert!(error.contains("key configuration"), "{error}");
-        assert!(error.contains("theme"), "{error}");
+        let warning = s.startup_warning.expect("both must be reported");
+        assert!(warning.contains("key configuration"), "{warning}");
+        assert!(warning.contains("theme"), "{warning}");
+    }
+    #[test]
+    fn startup_warning_survives_a_ready_payload_that_would_have_cleared_error() {
+        // The live finding this whole split exists for: Payload::Ready
+        // clears state.error unconditionally on every successful list
+        // sync (its own correct job for transient watch errors) --
+        // startup_warning must NOT be affected by that at all.
+        let settings = Settings {
+            theme: "bogus".into(),
+            ..Settings::default()
+        };
+        let mut s = State::new(Query::default(), &settings);
+        assert!(s.startup_warning.is_some());
+        s.error = Some("unrelated transient watch error".into());
+        s.error = None; // exactly what Payload::Ready does
+        assert!(
+            s.startup_warning.is_some(),
+            "a config startup warning must survive Payload::Ready's own state.error clear"
+        );
     }
     #[test]
     fn sorting_preserves_uid_and_does_not_reselect_after_delete_recreate() {
@@ -612,6 +644,35 @@ mod tests {
             "a new watch generation must always rebuild, even if revision aliases the last one"
         );
         assert_eq!(s.rows[0].uid, "2");
+    }
+    #[test]
+    fn prepare_reorders_on_a_bare_descending_toggle_for_a_typed_count_field() {
+        let mut s = State::new(Query::default(), &Settings::default());
+        s.sort = "count:field:/data/rank".into();
+        for (name, rank) in [("a", Some("2")), ("b", Some("10")), ("c", None)] {
+            let value = match rank {
+                Some(r) => {
+                    serde_json::json!({"metadata":{"name":name,"uid":name,"resourceVersion":"1"},"data":{"rank":r}})
+                }
+                None => {
+                    serde_json::json!({"metadata":{"name":name,"uid":name,"resourceVersion":"1"},"data":{}})
+                }
+            };
+            s.store.apply(crate::resources::Object::new(value), false);
+        }
+        s.prepare();
+        assert_eq!(
+            s.rows.iter().map(|o| o.uid.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "ascending"
+        );
+        s.descending = true;
+        s.prepare();
+        assert_eq!(
+            s.rows.iter().map(|o| o.uid.as_str()).collect::<Vec<_>>(),
+            vec!["b", "a", "c"],
+            "descending toggle must reorder rows, not just flip the arrow"
+        );
     }
     #[test]
     fn prepare_with_age_filter_rechecks_membership_across_a_clock_tick() {

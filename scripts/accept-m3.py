@@ -130,7 +130,14 @@ def sorting():
         while True:
             rows = [line for line in output.splitlines() if any(name in line for name in names) and line.startswith('│')]
             positions = [next(i for i, row in enumerate(rows) if name in row) for name in names]
-            selection_ok = selected is None or any('› ' + selected in row for row in rows)
+            # M10.1/M10.7 inserted a selection/severity marker between the
+            # cursor '›' and the row's own text (e.g. '│›  ? name'), so
+            # the cursor is no longer directly adjacent to the name --
+            # check cursor-presence-on-the-matching-row instead of a
+            # fixed-width literal substring.
+            selection_ok = selected is None or any(
+                row.startswith('│›') and selected in row for row in rows
+            )
             if positions == sorted(positions) and selection_ok:
                 return output
             if time.monotonic() > deadline:
@@ -163,7 +170,9 @@ def sorting():
     expect('configmaps [2 / 2;', absent=('m3-sort-a',))
     run('bash', 'scripts/test-cluster.sh', 'm3-sort-fixtures')
     output = ordered(['m3-sort-a', 'm3-sort-b', 'm3-sort-c'])
-    assert '› m3-sort-a' not in output, output
+    assert not any(
+        line.startswith('│›') and 'm3-sort-a' in line for line in output.splitlines()
+    ), output
     command('v1/pods -n sauron-fixtures / restarts>=0')
     expect('crashloop')
     command('sort restarts:desc')

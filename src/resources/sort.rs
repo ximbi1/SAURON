@@ -91,6 +91,35 @@ mod tests {
         }
     }
     #[test]
+    fn count_field_from_string_data_sorts_descending() {
+        let original: Vec<_> = [("a", json!("2")), ("b", json!("10")), ("c", Value::Null)]
+            .into_iter()
+            .map(|(name, rank)| {
+                let value = if rank.is_null() {
+                    json!({"metadata":{"name":name,"uid":name},"data":{}})
+                } else {
+                    json!({"metadata":{"name":name,"uid":name},"data":{"rank":rank}})
+                };
+                Arc::new(Object::new(value))
+            })
+            .collect();
+        for (desc, expected) in [(false, vec!["a", "b", "c"]), (true, vec!["b", "a", "c"])] {
+            let mut input = original.clone();
+            rows(
+                &mut input,
+                &Field::parse("count:field:/data/rank").expect("field"),
+                desc,
+                Utc::now(),
+                None,
+            );
+            assert_eq!(
+                input.iter().map(|o| o.uid.as_str()).collect::<Vec<_>>(),
+                expected,
+                "descending={desc}"
+            );
+        }
+    }
+    #[test]
     fn mixed_numeric_order_is_exact_and_transitive() {
         use crate::filters::value::Scalar::*;
         let scalars = [

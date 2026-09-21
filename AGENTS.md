@@ -13,6 +13,12 @@ sauron-test with `.test-cluster/config` and `--context kind-sauron-test`. Use
 `bash scripts/test-cluster.sh` to verify the Docker label and loopback API endpoint
 before applying fixtures. Never print/commit raw kubeconfig or Secret values.
 
+M9 integration fixtures use the separately established Docker kind cluster
+`sauron-m9`, `.test-cluster-m9/config`, context `kind-sauron-m9`, and the sibling
+`scripts/test-cluster-m9.sh` Docker-label/loopback-endpoint identity guard.
+Keep this separate from the M1–M8B regression cluster; neither exception permits
+production writes or default-kubeconfig fixture operations.
+
 Keep buildable slices, implement real behavior, record actual test results and failures.
 User permits installing needed development tools. No deployment or publishing authorized.
 

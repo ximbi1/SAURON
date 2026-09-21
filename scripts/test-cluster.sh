@@ -136,6 +136,23 @@ case "${1:-check}" in
     cd "$repo_dir"
     SAURON_TEST_KUBECONFIG="$test_kubeconfig" cargo test --locked --test mutation_m8b_live -- --ignored --nocapture
     ;;
+  m10-fixtures)
+    # M10.3 (bulk guarded mutations): inert ConfigMaps -- no PDB/rollout
+    # concerns, safe to bulk-label/bulk-delete repeatedly.
+    kube_test apply -f "$repo_dir/tests/fixtures/m10-bulk.yaml"
+    ;;
+  m10-reset)
+    kube_test apply -f "$repo_dir/tests/fixtures/m10-bulk.yaml"
+    # bulk_label may have added a label; re-apply doesn't strip labels
+    # added out-of-band, so explicitly clear it on every fixture name for
+    # a deterministic re-run, even one interrupted mid-way.
+    # kube-root-ca.crt is cluster-injected, not one of this file's own
+    # fixtures, but a bulk "select all visible" test legitimately selects
+    # it too -- included here so a real select-all-visible demonstration
+    # doesn't leave a stray label on it between runs.
+    kube_test label configmap m10-bulk-a m10-bulk-b m10-bulk-c m10-bulk-delete-1 m10-bulk-delete-2 \
+      kube-root-ca.crt -n sauron-m10 --overwrite team- 2>/dev/null || true
+    ;;
   m4-recreate)
     kube_test delete pod m4-sessions -n sauron-fixtures --wait=true --timeout=45s
     kube_test apply -f "$repo_dir/tests/fixtures/m4-sessions.yaml"

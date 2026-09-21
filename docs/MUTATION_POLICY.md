@@ -1,7 +1,7 @@
-# Mutation policy — M6 relationships are read evidence; M7 is the doorway
+# Mutation policy — current gateway contract through M9
 
-M7 is infrastructure, not a mutation feature. It builds the mandatory
-pipeline every future mutation (M8) must pass through:
+M7 introduced the infrastructure; accepted M8/M8B/M9 workflows use the same
+mandatory pipeline:
 
     selected object
         -> canonical target identity (MutationTarget)
@@ -13,11 +13,12 @@ pipeline every future mutation (M8) must pass through:
         -> server result
         -> durable, redacted journal (mutation::journal)
 
-M7 ships **no user-facing mutation workflow**. There is no keybinding that
-dry-runs, confirms, or commits a real mutation. `:policy` is read-only. The
-only mutation this milestone actually performs is the one narrowly-scoped
-internal proof action (`tests/mutation_live.rs`), exclusively against the
-isolated `kind-sauron-test` fixture, never against production.
+M7 itself shipped no user-facing mutation workflow. M8 added scale/restart/
+delete/label/annotate; M8B added advanced cluster operations; M9 added supported
+Flux/Argo actions. These expose preview, dry-run where supported, confirmation,
+commit and separate verification. `:policy` and `:mutations` remain read-only.
+Production is forbidden for all development mutation tests; see RUNBOOK for the
+two explicit isolated-cluster guards.
 
 ## Identity: name is never authorization
 
@@ -49,12 +50,12 @@ picture:
    heuristic anywhere in this codebase.** A context literally named
    `kind-sauron-test` does not verify itself; nothing about the intent or
    the connection can set this flag from inside the running application.
-   Only `scripts/test-cluster.sh`'s Docker/API loopback identity guard, an
-   external harness, ever sets it true, and only for live test/acceptance
-   code. **In the shipped application, this flag is never true anywhere,**
-   which is why `:policy` denies every hypothetical mutation on every
-   cluster, including the isolated test cluster, when reached through the
-   actual running binary.
+   Since M8, the running binary accepts the explicit
+   `--mutation-test-cluster-verified` option; Runtime passes that assertion
+   into policy. It defaults false and is independent of readonly. The flag
+   does not perform Docker verification itself: guarded harnesses must verify
+   the endpoint/cluster before supplying it. M9 has its separate sibling
+   guard. A context name or `readonly = false` alone grants no mutation access.
 3. Target identity completeness (UID required).
 4. Namespace protection: `kube-system`, `kube-public`, `kube-node-lease` by
    default (`PolicyContext::default()`), always deny.
@@ -76,9 +77,9 @@ This repository's development/acceptance safety contract is deliberately
 **stricter** than the generic policy architecture SAURON exposes: a real
 product might one day let an operator explicitly, deliberately mark a
 cluster as eligible for mutation (with its own strong confirmation UX). This
-codebase, as it stands for M7 acceptance, never does — `cluster_verified_for_mutation`
-is set to `true` only inside guarded test code that has independently proven
-cluster identity via Docker/API introspection, never inside the app itself.
+codebase uses an explicit development/test assertion rather than a general
+production enrollment workflow. It can be supplied to the binary, but must only
+be supplied after the appropriate isolated-cluster guard has succeeded.
 
 ## Confirmation: binds to the exact intent, never reusable
 
@@ -110,14 +111,18 @@ that promotes a successful preflight into an automatic commit.
    metadata-only GET (TOCTOU: preview-time identity ≠ commit-time identity).
 5. Journals the attempt **before** the real request. If this write fails,
    the mutation is never sent — fail closed.
-6. Issues exactly one bounded, cancellable PATCH/DELETE.
+6. Dispatches the supported intent through the bounded, cancellable executor
+   (PATCH/DELETE or the supported create/eviction API path). Drain sequences
+   individual intents through this gateway, not a parallel executor.
 7. Classifies the result and journals it. A journal-write failure *after* a
    real server success is reported as `CommittedButJournalIncomplete`,
    never silently dropped and never reported as if nothing happened.
 
-`Create` intentionally returns `Unsupported` — it needs a full object body
-and different identity semantics than Modify/Delete, and building that out
-is explicitly M8 scope, not a half-finished M7 feature.
+M7 originally left Create unsupported. M8B now supports the constrained CronJob
+trigger workflow; this is not a generic arbitrary-object creation console.
+Verification is a separate post-commit observation and cannot turn an uncertain
+commit result into a fabricated success. See M8/M8B/M9 acceptance ledgers for
+operation-specific semantics and limitations.
 
 ### Outcome semantics
 

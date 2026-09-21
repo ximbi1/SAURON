@@ -620,6 +620,13 @@ pub enum Command {
         revision: String,
     },
     Helm,
+    // M10.4: workspaces are navigation/state restoration only -- see
+    // `app::workspace`'s own doc comment for the exact "never carries
+    // mutation authorization" contract.
+    WorkspaceSave(String),
+    WorkspaceOpen(String),
+    WorkspaceDelete(String),
+    WorkspaceList,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -1008,6 +1015,31 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :helm");
             return Ok(Command::Helm);
         }
+        "workspace_save" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :workspace_save NAME"
+            );
+            return Ok(Command::WorkspaceSave(tail[0].clone()));
+        }
+        "workspace_open" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :workspace_open NAME"
+            );
+            return Ok(Command::WorkspaceOpen(tail[0].clone()));
+        }
+        "workspace_delete" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :workspace_delete NAME"
+            );
+            return Ok(Command::WorkspaceDelete(tail[0].clone()));
+        }
+        "workspace_list" => {
+            ensure!(tail.is_empty(), "Use :workspace_list");
+            return Ok(Command::WorkspaceList);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -1108,6 +1140,10 @@ pub fn command_names() -> Vec<&'static str> {
         "argocd_refresh",
         "argocd_rollback",
         "helm",
+        "workspace_save",
+        "workspace_open",
+        "workspace_delete",
+        "workspace_list",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1456,6 +1492,30 @@ fn argocd_sync_refresh_rollback_grammar() {
 fn helm_takes_no_arguments() {
     assert!(matches!(parse(":helm"), Ok(Command::Helm)));
     assert!(parse(":helm now").is_err());
+}
+#[test]
+fn workspace_commands_require_a_name_except_list() {
+    assert!(matches!(
+        parse(":workspace_save prod-pods"),
+        Ok(Command::WorkspaceSave(n)) if n == "prod-pods"
+    ));
+    assert!(matches!(
+        parse(":workspace_open prod-pods"),
+        Ok(Command::WorkspaceOpen(n)) if n == "prod-pods"
+    ));
+    assert!(matches!(
+        parse(":workspace_delete prod-pods"),
+        Ok(Command::WorkspaceDelete(n)) if n == "prod-pods"
+    ));
+    assert!(matches!(
+        parse(":workspace_list"),
+        Ok(Command::WorkspaceList)
+    ));
+    assert!(parse(":workspace_save").is_err());
+    assert!(parse(":workspace_open").is_err());
+    assert!(parse(":workspace_delete").is_err());
+    assert!(parse(":workspace_list now").is_err());
+    assert!(parse(":workspace_save a b").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

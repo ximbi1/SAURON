@@ -6,6 +6,7 @@ pub mod selection;
 pub mod session;
 pub mod state;
 pub mod terminal;
+pub mod workspace;
 
 use crate::{
     command::{Action, Command, Keymap, ResourceCommand},
@@ -41,6 +42,11 @@ pub struct Runtime {
     document: CancellationToken,
     pending: Option<ResourceCommand>,
     pending_history: Option<state::HistoryEntry>,
+    /// M10.4: session-local for now -- M10.8 wires disk persistence
+    /// through the config model (see `workspace`'s own doc comment on
+    /// why it must never carry mutation authorization).
+    workspaces: std::collections::BTreeMap<String, workspace::Workspace>,
+    pending_workspace: Option<workspace::Workspace>,
     /// Set by `open_shell()`/`open_attach()`, consumed by `run()` right after each
     /// key/event dispatch. Both are foreground and blocking -- unlike logs/exec
     /// output, nothing else in the app runs concurrently with either -- so neither
@@ -93,6 +99,8 @@ impl Runtime {
                 document: CancellationToken::new(),
                 pending: None,
                 pending_history: None,
+                workspaces: std::collections::BTreeMap::new(),
+                pending_workspace: None,
                 pending_interactive: None,
                 palette_document: None,
                 namespace_by_context: std::collections::HashMap::new(),
@@ -109,6 +117,7 @@ impl Runtime {
     fn switch_context(&mut self, context: String) {
         self.pending = None;
         self.pending_history = None;
+        self.pending_workspace = None;
         self.push_history();
         if let Some(current) = self.connection.as_ref().map(|c| c.context.clone()) {
             self.namespace_by_context
@@ -174,6 +183,7 @@ impl Runtime {
     fn apply_history(&mut self, entry: state::HistoryEntry) {
         self.pending = None;
         self.pending_history = None;
+        self.pending_workspace = None;
         if self
             .connection
             .as_ref()
@@ -220,6 +230,125 @@ impl Runtime {
         if let Err(e) = result {
             self.state.error = Some(format!("Could not restore history entry: {e}"));
         }
+    }
+    /// M10.4: capture the current view as a named workspace. Deliberately
+    /// mirrors `current_history_entry()` but stores the resource as its
+    /// qualified id string (`Resource::id()`), never the live `Resource`
+    /// -- a workspace is meant to survive well past the incarnation it
+    /// was captured in. Never captures `selected` (session-local cursor
+    /// UID) or anything mutation-authorization-shaped; `Workspace` has no
+    /// field that could even hold either.
+    fn save_workspace(&mut self, name: String) -> Result<()> {
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let resource = self
+            .state
+            .resource
+            .as_ref()
+            .context("No resource selected")?;
+        let workspace = workspace::Workspace {
+            schema_version: workspace::WORKSPACE_SCHEMA_VERSION,
+            name: name.clone(),
+            context: connection.context.clone(),
+            namespace: self.state.query.namespace.clone(),
+            resource: resource.id(),
+            labels: self.state.query.labels.clone(),
+            fields: self.state.query.fields.clone(),
+            filter_text: self.state.filter_text.clone(),
+            sort: self.state.sort.clone(),
+            descending: self.state.descending,
+        };
+        workspace::save(&mut self.workspaces, workspace)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        self.state.status = format!(
+            "Workspace \"{name}\" saved ({} total)",
+            self.workspaces.len()
+        );
+        Ok(())
+    }
+    /// M10.4: reconnect only if the workspace's own context differs from
+    /// the current one (mirrors `apply_history`'s exact shape), then
+    /// always re-resolve the resource fresh from its stored qualified id
+    /// -- never assumes a workspace's saved identity is still valid,
+    /// including when the context is unchanged (a CRD could have been
+    /// added/removed since the workspace was saved).
+    fn open_workspace(&mut self, name: &str) -> Result<()> {
+        let workspace = self
+            .workspaces
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(workspace::WorkspaceError::NotFound.to_string()))?;
+        self.pending = None;
+        self.pending_history = None;
+        self.pending_workspace = None;
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|c| c.context == workspace.context)
+        {
+            self.finish_workspace(workspace);
+        } else {
+            let context = workspace.context.clone();
+            self.pending_workspace = Some(workspace);
+            self.connect(Some(context));
+        }
+        Ok(())
+    }
+    fn finish_workspace(&mut self, workspace: workspace::Workspace) {
+        let result = (|| -> Result<()> {
+            let connection = self.connection.as_ref().context("Not connected")?;
+            let resource = connection
+                .catalog
+                .resolve(&workspace.resource, &connection.settings.aliases)?;
+            let filter = crate::filters::Expr::parse(&workspace.filter_text)?;
+            self.state.query.resource = resource.id();
+            self.state.query.namespace = workspace.namespace;
+            self.state.query.labels = workspace.labels;
+            self.state.query.fields = workspace.fields;
+            self.state.filter_text = workspace.filter_text;
+            self.state.filter = filter;
+            self.state.sort = workspace.sort;
+            self.state.descending = workspace.descending;
+            self.watch_resource(resource)?;
+            // cancel_scope() (inside watch_resource) already clears
+            // selected/selection unconditionally -- opening a workspace
+            // never restores either, by construction, not by an extra
+            // step that could be forgotten.
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.state.error = Some(format!("Could not open workspace: {e}"));
+        }
+    }
+    fn delete_workspace(&mut self, name: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.workspaces.remove(name).is_some(),
+            workspace::WorkspaceError::NotFound.to_string()
+        );
+        self.state.status = format!("Workspace \"{name}\" deleted");
+        Ok(())
+    }
+    /// M10.4: a bounded, read-only listing -- never issues a request.
+    fn open_workspaces_view(&mut self) {
+        let mut out = format!(
+            "WORKSPACES ({} of {})\n\n",
+            self.workspaces.len(),
+            workspace::MAX_WORKSPACES
+        );
+        if self.workspaces.is_empty() {
+            out.push_str("(none saved -- :workspace_save NAME to save the current view)\n");
+        }
+        for (name, w) in &self.workspaces {
+            out.push_str(&format!(
+                "  {name}\n    context: {} · resource: {} · namespace: {}\n    sort: {} {} · filter: {}\n",
+                w.context,
+                w.resource,
+                w.namespace.as_deref().unwrap_or("*"),
+                w.sort,
+                if w.descending { "desc" } else { "asc" },
+                if w.filter_text.is_empty() { "<none>" } else { &w.filter_text },
+            ));
+        }
+        self.open_static("Workspaces", out);
     }
     /// Fetch the real namespace list from the cluster (bounded to 500, same pattern as
     /// Events) and open it as a picker, instead of navigating away to a namespaces
@@ -439,6 +568,8 @@ impl Runtime {
                 self.connection = Some(*connection);
                 if let Some(entry) = self.pending_history.take() {
                     self.finish_history(entry, true);
+                } else if let Some(workspace) = self.pending_workspace.take() {
+                    self.finish_workspace(workspace);
                 } else if let Some(query) = self.pending.take() {
                     if let Err(e) = self.navigate(query) {
                         self.state.error = Some(e.to_string());
@@ -738,6 +869,7 @@ impl Runtime {
             Command::Resource(query) => {
                 self.pending_history = None;
                 self.pending = None;
+                self.pending_workspace = None;
                 self.navigate(query)
             }
             Command::Namespace(Some(ns)) => self.switch_namespace(if ns == "all" || ns == "*" {
@@ -1338,6 +1470,13 @@ impl Runtime {
                 self.open_workflow_document(format!("Argo CD rollback: {}", object.name), built)
             }
             Command::Helm => self.open_helm_view(),
+            Command::WorkspaceSave(name) => self.save_workspace(name),
+            Command::WorkspaceOpen(name) => self.open_workspace(&name),
+            Command::WorkspaceDelete(name) => self.delete_workspace(&name),
+            Command::WorkspaceList => {
+                self.open_workspaces_view();
+                Ok(())
+            }
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -3503,6 +3642,80 @@ mod tests {
             version: "test".into(),
         });
         rt
+    }
+    #[tokio::test]
+    async fn workspace_save_then_list_renders_the_saved_entry() {
+        let mut rt = runtime();
+        rt.state.filter_text = "restarts>2".into();
+        rt.state.sort = "AGE".into();
+        rt.command(":workspace_save prod-pods")
+            .expect("save succeeds");
+        rt.command(":workspace_list").expect("list opens");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("prod-pods"));
+        assert!(text.contains("v1/pods"));
+        assert!(text.contains("restarts>2"));
+        assert!(text.contains("AGE"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn workspace_open_same_context_restores_view_never_selection() {
+        let mut rt = runtime();
+        rt.state.query.namespace = Some("team-a".into());
+        rt.state.filter_text = "restarts>2".into();
+        rt.state.sort = "AGE".into();
+        rt.state.descending = true;
+        rt.command(":workspace_save team-a-view")
+            .expect("save succeeds");
+        // Mutate the current view away from what was saved, and select a row --
+        // opening the workspace must restore the view but never the selection.
+        rt.state.query.namespace = Some("team-b".into());
+        rt.state.filter_text.clear();
+        rt.state.sort = "NAME".into();
+        rt.state.descending = false;
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.command(":workspace_open team-a-view")
+            .expect("open succeeds");
+        assert_eq!(rt.state.query.namespace.as_deref(), Some("team-a"));
+        assert_eq!(rt.state.filter_text, "restarts>2");
+        assert_eq!(rt.state.sort, "AGE");
+        assert!(rt.state.descending);
+        assert!(
+            rt.state.selected.is_none(),
+            "opening a workspace must never restore the prior selection -- \
+             it is navigation/state restoration, never trust restoration"
+        );
+        assert!(rt.state.selection.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn workspace_open_unknown_name_errors_explicitly() {
+        let mut rt = runtime();
+        assert!(
+            rt.command(":workspace_open does-not-exist").is_err(),
+            "opening an unknown workspace must error, never silently no-op"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn workspace_delete_removes_it_and_reports_missing_afterward() {
+        let mut rt = runtime();
+        rt.command(":workspace_save w1").expect("save succeeds");
+        rt.command(":workspace_delete w1").expect("delete succeeds");
+        assert!(
+            rt.command(":workspace_open w1").is_err(),
+            "a deleted workspace must no longer be openable"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn workspace_save_without_a_resource_errors() {
+        let mut rt = runtime();
+        rt.state.resource = None;
+        assert!(rt.command(":workspace_save w1").is_err());
+        rt.shutdown().await;
     }
     #[tokio::test]
     async fn history_keeps_selectors_and_resolved_identity_without_catalog_lookup() {

@@ -331,7 +331,7 @@ authorization token that fans out.
 | M10.1 | Selection model / multi-select foundation | ACCEPTED |
 | M10.2 | Bulk read-only operations / selection UX | ACCEPTED |
 | M10.3 | Bulk guarded mutations | ACCEPTED |
-| M10.4 | Workspaces | PLANNED — NOT STARTED |
+| M10.4 | Workspaces | ACCEPTED |
 | M10.5 | Bookmarks / saved navigation targets | PLANNED — NOT STARTED |
 | M10.6 | Configurable keymaps | PLANNED — NOT STARTED |
 | M10.7 | Themes / appearance configuration | PLANNED — NOT STARTED |
@@ -1038,6 +1038,60 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   the shared `src/app/mod.rs`/`src/command/mod.rs`/`src/mutation.rs`
   modules. No application bugs found. **Next: M10.4** (Workspaces),
   continuing directly in this session.
+- 2026-09-21: M10.4 (Workspaces) implemented. New `app::workspace`
+  module (pure data model + the bounded `save()` primitive):
+  `Workspace` (`schema_version`, name, context, namespace, resource --
+  stored as its qualified id STRING, never a live `Resource`, labels,
+  fields, filter_text, sort, descending -- deliberately no field that
+  could ever hold `selected`/a UID/`mutation_test_cluster_verified`/any
+  `Confirmation`, so "never restores trust" is a structural guarantee,
+  not a convention to remember), `WORKSPACE_SCHEMA_VERSION` (mirrors
+  `mutation::journal::SCHEMA_VERSION`'s own precedent), `MAX_WORKSPACES
+  = 50` (a same-name save/overwrite never counts against the bound --
+  only a genuinely new name can exceed it, explicit refusal never
+  silent eviction of an older entry).
+  Per the M10.4 contract's own explicit dependency note ("Workspaces
+  persist through the M10.8 config model... not a new file"), this
+  slice does NOT touch disk -- `workspaces: BTreeMap<String, Workspace>`
+  lives on `Runtime`, session-local, exactly like `history`/`forward`
+  already do; M10.8 is where it gets a real round trip through
+  `Config`/`Settings`.
+  Four new palette commands: `:workspace_save NAME`, `:workspace_open
+  NAME`, `:workspace_delete NAME`, `:workspace_list` (bounded, read-
+  only). `save_workspace()`/`open_workspace()`/`finish_workspace()`
+  deliberately mirror `current_history_entry()`/`apply_history()`/
+  `finish_history()`'s exact shape -- `open_workspace` reuses the same
+  "reconnect only if context differs" branch `apply_history` already
+  has (via a new `pending_workspace` field cleared at every point
+  `pending_history` already is, and resolved in the same
+  `Payload::Connected` branch), but `finish_workspace` ALWAYS re-
+  resolves the resource fresh from its stored string id via
+  `connection.catalog.resolve(...)` -- never conditionally, unlike
+  `finish_history`'s `crossed_catalog` branch -- since a workspace is
+  meant to outlive the incarnation it was captured in (the catalog may
+  have changed even within the same context). Opening a workspace never
+  sets `state.selected`: `watch_resource()`'s own `cancel_scope()`
+  already unconditionally clears both `selected` and `selection` (the
+  exact same hook M10.1 already extended), so there is no separate step
+  that could forget to do this.
+  Evidence: 4 pure unit tests in `app::workspace` (same-name save
+  overwrites without counting against the bound; the bound is refused
+  explicitly with the map left unmutated, never silently evicting an
+  older entry; overwriting an existing name still succeeds exactly at
+  the bound; an overly long name is refused explicitly); 1 grammar test
+  (all four commands' exact argument arity); 5 app-level tests (save
+  then list renders the saved entry's real fields; opening a same-
+  context workspace restores namespace/filter/sort/descending exactly
+  while leaving both `selected` and the M10.1 `selection` empty even
+  though a row was selected immediately before the open; opening an
+  unknown name errors explicitly; delete removes it and a subsequent
+  open then fails; saving with no resource selected errors). Full
+  locked suite green (352 unit, up from 342; 76 fake-HTTP unchanged --
+  this slice touched no network code), `cargo fmt --check` and `cargo
+  clippy --all-targets -- -D warnings` clean, full M1-M8B interactive
+  regression (`accept-m8b.py`) reconfirmed green on `kind-sauron-test`.
+  No application bugs found. **Next: M10.5** (Bookmarks), continuing
+  directly in this session.
 
 ## Final acceptance checklist
 

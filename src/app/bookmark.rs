@@ -6,6 +6,7 @@
 //! is exactly equivalent to navigating there manually and selecting the
 //! row by hand, nothing more.
 use crate::resources::SharedObject;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const BOOKMARK_SCHEMA_VERSION: u32 = 1;
@@ -15,8 +16,13 @@ pub const BOOKMARK_SCHEMA_VERSION: u32 = 1;
 pub const MAX_BOOKMARKS: usize = 200;
 const MAX_NAME_BYTES: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// M10.8: `Serialize`/`Deserialize` make this the actual on-disk shape,
+/// persisted through `config::Config`'s own `bookmarks` field -- same
+/// convention as `workspace::Workspace`, no separate persisted-copy type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Bookmark {
+    #[serde(default = "bookmark_schema_version_default")]
     pub schema_version: u32,
     pub name: String,
     pub context: String,
@@ -29,6 +35,9 @@ pub struct Bookmark {
     /// on reopen, never treated as still-authoritative by itself. See
     /// `Status`.
     pub uid: String,
+}
+fn bookmark_schema_version_default() -> u32 {
+    BOOKMARK_SCHEMA_VERSION
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

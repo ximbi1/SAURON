@@ -1,8 +1,20 @@
+use crate::app::{bookmark::Bookmark, workspace::Workspace};
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
-#[derive(Clone, Debug, Deserialize)]
+/// M10.8: distinguishes "no version field present" (0 -- every pre-M10
+/// `config.toml` on disk, and a freshly-`Default`-constructed `Config`)
+/// from "this file was written by an M10-aware build" (`CONFIG_VERSION`).
+/// Every field this milestone added has its own safe `#[serde(default)]`
+/// already, so loading never actually branches on this number today --
+/// it exists so a FUTURE change that alters a field's *meaning* (not
+/// just adds one) has something concrete to check, matching
+/// `mutation::journal::SCHEMA_VERSION`'s own "exists for the next
+/// migration, not this one" precedent.
+pub const CONFIG_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub namespace: Option<String>,
@@ -35,13 +47,28 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// Absent (0) on load means either a genuine pre-M10 file or a
+    /// fresh `Default`; always written as `CONFIG_VERSION` on save. See
+    /// `CONFIG_VERSION`'s own doc comment.
+    #[serde(default)]
+    pub version: u32,
     #[serde(flatten)]
     pub base: Settings,
     pub clusters: BTreeMap<String, toml::Value>,
     pub contexts: BTreeMap<String, toml::Value>,
+    /// M10.4/M10.8: session-captured navigation views, keyed by name.
+    /// Never contains anything mutation-authorization-shaped -- see
+    /// `app::workspace::Workspace`'s own doc comment for why that's a
+    /// structural guarantee, not just a convention honored here.
+    #[serde(default)]
+    pub workspaces: BTreeMap<String, Workspace>,
+    /// M10.5/M10.8: bookmarked object references, keyed by name. Same
+    /// "never an identity-authority token" guarantee as `workspaces`.
+    #[serde(default)]
+    pub bookmarks: BTreeMap<String, Bookmark>,
 }
 
 pub fn directory() -> PathBuf {
@@ -83,16 +110,89 @@ impl Config {
             .transpose()
             .map_err(|_| anyhow::anyhow!("invalid contexts configuration"))?
             .unwrap_or_default();
+        // M10.8: absent on a pre-M10 file -- 0 via #[serde(default)], the
+        // exact "no version present" case `CONFIG_VERSION`'s own doc
+        // comment describes.
+        let version = root
+            .remove("version")
+            .map(|v| v.try_into())
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("invalid version field"))?
+            .unwrap_or_default();
+        let workspaces = root
+            .remove("workspaces")
+            .map(|v| v.try_into())
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("invalid workspaces configuration"))?
+            .unwrap_or_default();
+        let bookmarks = root
+            .remove("bookmarks")
+            .map(|v| v.try_into())
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("invalid bookmarks configuration"))?
+            .unwrap_or_default();
         let base = toml::Value::Table(root)
             .try_into()
             .map_err(|_| anyhow::anyhow!("unknown or invalid application setting"))?;
         let config = Self {
+            version,
             base,
             clusters,
             contexts,
+            workspaces,
+            bookmarks,
         };
         config.resolve("", "")?;
         Ok(config)
+    }
+    /// M10.8: the same default path `load()` itself uses when no
+    /// explicit path is given -- exposed so `save()` (and its caller,
+    /// which needs to know where an explicit `--config` path was NOT
+    /// given) can target the identical file without duplicating this
+    /// logic.
+    pub fn default_path() -> PathBuf {
+        directory().join("config.toml")
+    }
+    /// M10.8: the first *write* path to this file (every prior milestone
+    /// only read it). Atomic: serializes to a temp file in the same
+    /// directory, sets conservative permissions, then renames over the
+    /// real path -- a crash or power loss mid-write leaves either the
+    /// old file intact or the new one complete, never a half-written
+    /// `config.toml`. `version` is always stamped to the current
+    /// `CONFIG_VERSION` on every save, regardless of what was loaded.
+    pub fn save(&self, path: Option<&std::path::Path>) -> Result<()> {
+        let default = Self::default_path();
+        let path = path.unwrap_or(&default);
+        let dir = path
+            .parent()
+            .context("config path has no parent directory")?;
+        std::fs::create_dir_all(dir).context("cannot create configuration directory")?;
+        let mut to_write = self.clone();
+        to_write.version = CONFIG_VERSION;
+        let text = toml::to_string_pretty(&to_write)
+            .context("cannot serialize configuration (this is a bug, not a user config error)")?;
+        let temp_path = dir.join(format!(
+            ".config.toml.tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::write(&temp_path, &text).context("cannot write temporary configuration file")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Conservative, consistent with credentials-adjacent file
+            // handling elsewhere -- this file can contain cluster/context
+            // names and (via workspaces/bookmarks) internal cluster
+            // topology, even though it never contains credentials
+            // themselves.
+            let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&temp_path, path)
+            .context("cannot atomically replace configuration file")?;
+        Ok(())
     }
 
     pub fn resolve(&self, cluster: &str, context: &str) -> Result<Settings> {
@@ -192,5 +292,109 @@ mod tests {
             c.resolve("", "").is_err(),
             "genuine resource-safety bounds must remain a hard startup failure"
         );
+    }
+    fn scratch_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sauron-config-test-{name}-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+    fn workspace(name: &str) -> Workspace {
+        Workspace {
+            schema_version: 1,
+            name: name.into(),
+            context: "kind-sauron-test".into(),
+            namespace: Some("sauron-fixtures".into()),
+            resource: "v1/pods".into(),
+            labels: None,
+            fields: None,
+            filter_text: String::new(),
+            sort: "NAME".into(),
+            descending: false,
+        }
+    }
+    #[test]
+    fn save_then_load_round_trips_workspaces_and_bookmarks_exactly() {
+        let path = scratch_path("roundtrip");
+        let mut c = Config::default();
+        c.workspaces.insert("w1".into(), workspace("w1"));
+        c.bookmarks.insert(
+            "b1".into(),
+            Bookmark {
+                schema_version: 1,
+                name: "b1".into(),
+                context: "kind-sauron-test".into(),
+                resource: "v1/pods".into(),
+                namespace: "sauron-fixtures".into(),
+                object_name: "web-1".into(),
+                uid: "uid-1".into(),
+            },
+        );
+        c.save(Some(&path)).expect("save");
+        let loaded = Config::load(Some(&path)).expect("load");
+        assert_eq!(loaded.version, CONFIG_VERSION);
+        assert_eq!(loaded.workspaces.get("w1"), c.workspaces.get("w1"));
+        assert_eq!(loaded.bookmarks.get("b1"), c.bookmarks.get("b1"));
+        std::fs::remove_file(&path).ok();
+    }
+    #[test]
+    fn a_pre_m10_config_file_with_no_new_fields_still_loads_with_empty_defaults() {
+        let path = scratch_path("pre-m10");
+        // Exactly the shape a pre-M10 config.toml has -- no version,
+        // workspaces, or bookmarks keys at all.
+        std::fs::write(&path, "theme = 'light'\nreadonly = false\n").expect("write fixture");
+        let loaded = Config::load(Some(&path)).expect("a pre-M10 file must still load");
+        assert_eq!(
+            loaded.version, 0,
+            "no version present is the documented pre-M10 signal"
+        );
+        assert!(loaded.workspaces.is_empty());
+        assert!(loaded.bookmarks.is_empty());
+        assert_eq!(loaded.base.theme, "light");
+        std::fs::remove_file(&path).ok();
+    }
+    #[test]
+    fn save_is_atomic_and_survives_being_called_repeatedly() {
+        let path = scratch_path("atomic");
+        let mut c = Config::default();
+        for i in 0..5 {
+            c.workspaces
+                .insert(i.to_string(), workspace(&i.to_string()));
+            c.save(Some(&path)).expect("save");
+        }
+        let loaded = Config::load(Some(&path)).expect("load");
+        assert_eq!(loaded.workspaces.len(), 5);
+        // No leftover temp files in the same directory.
+        let dir = path.parent().unwrap();
+        let leftover: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(&path.file_name().unwrap().to_string_lossy().to_string())
+                    && e.file_name().to_string_lossy().contains(".tmp-")
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "no temp file should survive a successful save: {leftover:?}"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+    #[test]
+    fn a_genuinely_unknown_top_level_field_is_still_a_load_error() {
+        let path = scratch_path("unknown-field");
+        std::fs::write(&path, "this_field_does_not_exist = true\n").expect("write fixture");
+        assert!(
+            Config::load(Some(&path)).is_err(),
+            "deny_unknown_fields must still reject a genuinely unrecognized field, \
+             not silently ignore it"
+        );
+        std::fs::remove_file(&path).ok();
     }
 }

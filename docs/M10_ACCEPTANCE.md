@@ -335,7 +335,7 @@ authorization token that fans out.
 | M10.5 | Bookmarks / saved navigation targets | ACCEPTED |
 | M10.6 | Configurable keymaps | ACCEPTED |
 | M10.7 | Themes / appearance configuration | ACCEPTED |
-| M10.8 | Cross-feature UX integration / persistence / migration | PLANNED — NOT STARTED |
+| M10.8 | Cross-feature UX integration / persistence / migration | ACCEPTED |
 | M10.9 | Combined acceptance / full regression / soak | PLANNED — NOT STARTED |
 
 This mirrors the task's own suggested shape unchanged: reconnaissance did
@@ -1288,6 +1288,81 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   M10.4's workspaces, M10.5's bookmarks, and this slice's own theme
   config finally get a real round trip through `Config`/`Settings`),
   continuing directly in this session.
+- 2026-09-21: M10.8 (Cross-feature UX integration / persistence /
+  migration) implemented. **Scoping finding, recorded rather than
+  silently assumed**: re-reading M10.6/M10.7's own actual scope
+  confirmed neither introduced a new in-app editor for keymaps or
+  themes -- both remain configured by editing `config.toml`'s existing
+  `keys`/`theme` fields directly (M10.6 was UI/diagnostics work over an
+  already-functional engine; M10.7 was presentation + fail-safe
+  validation). So "keymap-save"/"theme-save" named in this section's own
+  original prose have no new write path to build -- those two fields
+  were already part of `Settings` and already round-trip through
+  `Config::load`/`resolve` since before M10 started. The real, concrete
+  new persistence work is exactly M10.4's workspaces and M10.5's
+  bookmarks, which is what this slice actually built.
+  `Workspace`/`Bookmark` (`src/app/workspace.rs`/`src/app/bookmark.rs`)
+  gained `Serialize`/`Deserialize` (`deny_unknown_fields`, matching
+  `Settings`'s own convention) directly -- no separate "persisted"
+  mirror struct to keep in sync. `Config` gained three new top-level
+  fields: `version: u32` (`CONFIG_VERSION = 1`; 0 means "no version
+  present," covering both a genuine pre-M10 file and a fresh
+  `Default`; every field this milestone added already has its own
+  `#[serde(default)]`, so nothing actually branches on this number
+  today -- it exists for a FUTURE change that alters a field's
+  *meaning*, mirroring `mutation::journal::SCHEMA_VERSION`'s own "exists
+  for the next migration, not this one" precedent), `workspaces:
+  BTreeMap<String, Workspace>`, `bookmarks: BTreeMap<String, Bookmark>`
+  -- all three manually spliced out of the raw TOML table in
+  `Config::load` before the remainder is parsed as `Settings` (mirroring
+  the exact pattern `clusters`/`contexts` already used), so `Settings`'s
+  own `deny_unknown_fields` never sees them and a pre-M10 file with
+  neither key present loads with both maps empty, no hard break.
+  New `Config::save(path)`: the first *write* path this file has ever
+  had. Atomic (serialize to a `.config.toml.tmp-<pid>-<nanos>` file in
+  the same directory, `0600` permissions on Unix, then `rename()` over
+  the real path -- a crash mid-write leaves either the old file intact
+  or the new one complete, never a half-written `config.toml`); always
+  stamps `version = CONFIG_VERSION` regardless of what was loaded;
+  `Config::default_path()` extracted so `save()` and `load()` share the
+  exact same default-location logic rather than duplicating it.
+  `Runtime::new` now loads `workspaces`/`bookmarks` from the already-
+  loaded `Config` instead of always starting empty; every
+  `save_workspace`/`delete_workspace`/`save_bookmark`/`delete_bookmark`
+  now calls a new `persist_config()` that syncs both maps into
+  `self.config` and writes to disk -- a write failure is surfaced
+  visibly via `state.error` ("saved for this session, but could not
+  write to disk: ...") but never rolls back the in-memory change,
+  matching this app's own "denied/failed is visible, never silently
+  reverted state the user just set" convention throughout M7-M10.
+  **Found and fixed before any test ran** (not a shipped regression): the
+  existing `runtime()` test helper passed `config_path: None`, which
+  would have made every workspace/bookmark-saving test in this entire
+  file write to the REAL `Config::default_path()` on whatever machine
+  ran `cargo test` -- caught immediately by re-reading `persist_config`
+  against the test harness before running anything, fixed by giving
+  `runtime()` a unique scratch path per call
+  (`std::env::temp_dir().join("sauron-test-config-<pid>-<counter>.toml")`),
+  confirmed by inspecting `~/.config/sauron/` after a full test run and
+  finding only the pre-existing, unrelated `mutations.jsonl`.
+  Evidence: 5 new unit tests in `config` (save-then-load round-trips
+  workspaces/bookmarks byte-for-byte; a pre-M10 file with neither new
+  field loads with both maps empty and `version == 0`; `save()` called
+  repeatedly leaves no leftover `.tmp-` files in the directory; a
+  genuinely unknown top-level field is still a hard load error, proving
+  `deny_unknown_fields` was not weakened anywhere in this change); 4 new
+  app-level tests (a workspace save actually reaches disk, readable back
+  via a fresh `Config::load`; a workspace delete also reaches disk; a
+  bookmark save actually reaches disk; a workspace saved by one
+  `Runtime` is loaded fresh by a second `Runtime` constructed against
+  the same path -- the actual cross-session contract this slice exists
+  for, not just an in-process round trip). Full locked suite green (383
+  unit, up from 376; 76 fake-HTTP unchanged), `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` clean, full M1-M8B
+  interactive regression (`accept-m8b.py`) reconfirmed green on
+  `kind-sauron-test`. **Next: M10.9** (Combined acceptance / full
+  regression / soak -- the final M10 slice), continuing directly in this
+  session.
 
 ## Final acceptance checklist
 

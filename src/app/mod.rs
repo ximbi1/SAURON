@@ -83,6 +83,12 @@ impl Runtime {
         let settings = config.resolve("", "")?;
         let state = State::new(query, &settings);
         let (tx, rx) = mpsc::channel(256);
+        // M10.8: workspaces/bookmarks now round-trip through the config
+        // file -- loaded here once at startup (an M9-era config.toml
+        // with neither field present loads both as empty via their own
+        // #[serde(default)], never a hard break).
+        let workspaces = config.workspaces.clone();
+        let bookmarks = config.bookmarks.clone();
         Ok((
             Self {
                 state,
@@ -103,9 +109,9 @@ impl Runtime {
                 document: CancellationToken::new(),
                 pending: None,
                 pending_history: None,
-                workspaces: std::collections::BTreeMap::new(),
+                workspaces,
                 pending_workspace: None,
-                bookmarks: std::collections::BTreeMap::new(),
+                bookmarks,
                 pending_bookmark: None,
                 pending_interactive: None,
                 palette_document: None,
@@ -271,6 +277,7 @@ impl Runtime {
             "Workspace \"{name}\" saved ({} total)",
             self.workspaces.len()
         );
+        self.persist_config();
         Ok(())
     }
     /// M10.4: reconnect only if the workspace's own context differs from
@@ -334,6 +341,7 @@ impl Runtime {
             workspace::WorkspaceError::NotFound.to_string()
         );
         self.state.status = format!("Workspace \"{name}\" deleted");
+        self.persist_config();
         Ok(())
     }
     /// M10.4: a bounded, read-only listing -- never issues a request.
@@ -383,6 +391,7 @@ impl Runtime {
         bookmark::save(&mut self.bookmarks, bookmark)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         self.state.status = format!("Bookmark \"{name}\" saved ({} total)", self.bookmarks.len());
+        self.persist_config();
         Ok(())
     }
     /// M10.5: navigates to the bookmark's own context/resource/namespace
@@ -448,7 +457,25 @@ impl Runtime {
             bookmark::BookmarkError::NotFound.to_string()
         );
         self.state.status = format!("Bookmark \"{name}\" deleted");
+        self.persist_config();
         Ok(())
+    }
+    /// M10.8: syncs `self.workspaces`/`self.bookmarks` into `self.config`
+    /// and writes it to disk. A write failure (permissions, disk full,
+    /// read-only filesystem) is surfaced visibly via `state.error` but
+    /// never rolls back or discards the in-memory change -- the current
+    /// session's own view of its workspaces/bookmarks stays authoritative
+    /// regardless of whether the disk write succeeded, matching this
+    /// app's own "denied/failed is visible, never silently reverted
+    /// state the user just set" convention.
+    fn persist_config(&mut self) {
+        self.config.workspaces = self.workspaces.clone();
+        self.config.bookmarks = self.bookmarks.clone();
+        if let Err(e) = self.config.save(self.config_path.as_deref()) {
+            self.state.error = Some(format!(
+                "Saved for this session, but could not write to disk: {e}"
+            ));
+        }
     }
     /// M10.5: a bounded, read-only listing with a live-computed status
     /// column -- `bookmark::status` is pure and reused verbatim, never a
@@ -3766,10 +3793,21 @@ mod tests {
     }
     fn runtime() -> Runtime {
         let resource = entry("pods").resource;
+        // M10.8: an explicit, unique-per-call scratch path -- config
+        // writes (:workspace_save/:bookmark_save now call
+        // `persist_config()`) must NEVER touch the real
+        // `Config::default_path()` a developer's own machine uses; `None`
+        // here would do exactly that.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let config_path = std::env::temp_dir().join(format!(
+            "sauron-test-config-{}-{}.toml",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
         let (mut rt, _) = Runtime::new(
             ConnectOptions::default(),
             Config::default(),
-            None,
+            Some(config_path),
             Query {
                 resource: "pods".into(),
                 namespace: Some("test".into()),
@@ -3811,6 +3849,74 @@ mod tests {
         assert!(text.contains("restarts>2"));
         assert!(text.contains("AGE"));
         rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn workspace_save_actually_persists_to_disk_via_config_save() {
+        let mut rt = runtime();
+        rt.command(":workspace_save prod-pods")
+            .expect("save succeeds");
+        let path = rt
+            .config_path
+            .clone()
+            .expect("test runtime sets a scratch path");
+        let on_disk =
+            crate::config::Config::load(Some(&path)).expect("the config file must be readable");
+        assert!(
+            on_disk.workspaces.contains_key("prod-pods"),
+            "a workspace save must actually reach disk, not just in-memory state"
+        );
+        rt.command(":workspace_delete prod-pods")
+            .expect("delete succeeds");
+        let on_disk_after_delete =
+            crate::config::Config::load(Some(&path)).expect("still readable");
+        assert!(
+            !on_disk_after_delete.workspaces.contains_key("prod-pods"),
+            "a workspace delete must also reach disk"
+        );
+        std::fs::remove_file(&path).ok();
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_save_actually_persists_to_disk_via_config_save() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.command(":bookmark_save web-1").expect("save succeeds");
+        let path = rt
+            .config_path
+            .clone()
+            .expect("test runtime sets a scratch path");
+        let on_disk = crate::config::Config::load(Some(&path)).expect("readable");
+        assert!(on_disk.bookmarks.contains_key("web-1"));
+        std::fs::remove_file(&path).ok();
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn workspace_saved_in_one_runtime_is_loaded_fresh_by_the_next() {
+        // Proves the actual cross-process contract M10.8 exists for:
+        // Runtime::new loads whatever a prior session already saved.
+        let mut rt = runtime();
+        rt.command(":workspace_save prod-pods")
+            .expect("save succeeds");
+        let path = rt.config_path.clone().expect("scratch path");
+        rt.shutdown().await;
+        let loaded_config = crate::config::Config::load(Some(&path)).expect("readable");
+        let (mut rt2, _) = Runtime::new(
+            crate::kube::ConnectOptions::default(),
+            loaded_config,
+            Some(path.clone()),
+            crate::kube::watch::Query {
+                resource: "pods".into(),
+                ..Default::default()
+            },
+        )
+        .expect("second runtime");
+        assert!(
+            rt2.workspaces.contains_key("prod-pods"),
+            "a fresh Runtime must load workspaces a prior session already persisted"
+        );
+        std::fs::remove_file(&path).ok();
+        rt2.shutdown().await;
     }
     #[tokio::test]
     async fn workspace_open_same_context_restores_view_never_selection() {

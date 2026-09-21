@@ -13,6 +13,13 @@
 //! material. Opening a workspace is navigation/state restoration only,
 //! never trust restoration -- this is why `Workspace` has no field that
 //! could even hold any of the above, not just a convention to remember.
+//!
+//! M10.8: `Serialize`/`Deserialize` (`deny_unknown_fields`, matching
+//! `Settings`' own convention) make this the actual on-disk shape too,
+//! persisted through `config::Config`'s own `workspaces` field -- there
+//! is no separate "persisted workspace" struct to keep in sync with
+//! this one.
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Bumped whenever a field's *meaning* changes (not merely added) --
@@ -27,22 +34,32 @@ pub const WORKSPACE_SCHEMA_VERSION: u32 = 1;
 /// it is an explicit refusal, never silent eviction of an older entry.
 pub const MAX_WORKSPACES: usize = 50;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Workspace {
+    #[serde(default = "workspace_schema_version_default")]
     pub schema_version: u32,
     pub name: String,
     pub context: String,
+    #[serde(default)]
     pub namespace: Option<String>,
     /// Qualified resource id (e.g. `"v1/pods"`, matching `Resource::id()`)
     /// -- never a live `Resource`. Always re-resolved against the current
     /// catalog on open, exactly like `finish_history`'s own
     /// `crossed_catalog` re-resolve path.
     pub resource: String,
+    #[serde(default)]
     pub labels: Option<String>,
+    #[serde(default)]
     pub fields: Option<String>,
+    #[serde(default)]
     pub filter_text: String,
     pub sort: String,
+    #[serde(default)]
     pub descending: bool,
+}
+fn workspace_schema_version_default() -> u32 {
+    WORKSPACE_SCHEMA_VERSION
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -332,7 +332,7 @@ authorization token that fans out.
 | M10.2 | Bulk read-only operations / selection UX | ACCEPTED |
 | M10.3 | Bulk guarded mutations | ACCEPTED |
 | M10.4 | Workspaces | ACCEPTED |
-| M10.5 | Bookmarks / saved navigation targets | PLANNED — NOT STARTED |
+| M10.5 | Bookmarks / saved navigation targets | ACCEPTED |
 | M10.6 | Configurable keymaps | PLANNED — NOT STARTED |
 | M10.7 | Themes / appearance configuration | PLANNED — NOT STARTED |
 | M10.8 | Cross-feature UX integration / persistence / migration | PLANNED — NOT STARTED |
@@ -1091,6 +1091,78 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   clippy --all-targets -- -D warnings` clean, full M1-M8B interactive
   regression (`accept-m8b.py`) reconfirmed green on `kind-sauron-test`.
   No application bugs found. **Next: M10.5** (Bookmarks), continuing
+  directly in this session.
+- 2026-09-21: M10.5 (Bookmarks) implemented. New `app::bookmark` module:
+  `Bookmark` (schema_version, name, context, resource -- qualified id
+  string, same convention as `workspace::Workspace::resource`,
+  namespace, object_name, and the last-observed `uid` as a comparison
+  starting point, never treated as still-authoritative by itself),
+  `BOOKMARK_SCHEMA_VERSION`, `MAX_BOOKMARKS = 200` (deliberately larger
+  than `workspace::MAX_WORKSPACES` -- bookmarking one object is lighter-
+  weight and more frequent than saving a whole view), `save()` (same
+  same-name-overwrite-never-counts-against-the-bound shape as
+  `workspace::save`). The module's own reason to exist: `Status`
+  (`Exact`/`Replaced`/`Missing`/`NotCurrentlyViewed`) and the pure
+  `status()` function that computes it from a fresh `rows` snapshot --
+  a same-namespace/name row with a DIFFERENT uid is `Replaced`, never
+  silently rendered as `Exact`; `NotCurrentlyViewed` is its own honest
+  state (scope doesn't match the current view, or the list hasn't
+  synced) rather than guessing Missing/Exact from stale information.
+  Like workspaces, disk persistence is deliberately deferred to M10.8 --
+  `bookmarks: BTreeMap<String, Bookmark>` lives on `Runtime`, session-
+  local.
+  `open_bookmark()`/`finish_bookmark()` mirror `open_workspace()`/
+  `finish_workspace()`'s exact reconnect-only-if-context-differs shape
+  (a new `pending_bookmark` field cleared at the same four points
+  `pending_workspace` already is, resolved in the same
+  `Payload::Connected` branch) but restore only `state.selected =
+  Some(bookmark.uid)` after `watch_resource()` -- never a claim that the
+  object is confirmed present; the EXISTING `rebuild()` UID-validation
+  path (the same one M10.1 already relies on for stale-selection
+  handling) is what actually confirms or clears it once the fresh list
+  arrives. Opening a bookmark is therefore exactly equivalent to
+  navigating there and selecting the row by hand -- no new trust is
+  granted.
+  Four new palette commands: `:bookmark_save NAME` (bookmarks the
+  currently selected object), `:bookmark_open NAME`, `:bookmark_delete
+  NAME`, `:bookmark_list`/`:bookmarks` (bounded, read-only, with a
+  live-computed status column reusing `bookmark::status()` verbatim --
+  no second copy of the present/replaced/missing logic anywhere).
+  **Bug found and fixed during implementation** (not a regression, a
+  first-draft mistake caught by the test suite before commit): the
+  status view initially compared against `state.context` (a display
+  mirror updated only on `Payload::Connected`) instead of the actual
+  connection's own `context` field, causing every bookmark to render
+  `NotCurrentlyViewed` even when genuinely still being viewed. Fixed to
+  read `connection.context` directly, matching what
+  `save_bookmark`/`current_history_entry` already use as "the real
+  current context" everywhere else in this file. Caught by
+  `bookmark_save_then_list_reports_exact_status_while_still_present`
+  failing before any code was committed -- never shipped.
+  Evidence: 7 pure unit tests in `app::bookmark` (same-name save
+  overwrites without counting against the bound; the bound is refused
+  explicitly with the map left unmutated; status is Exact only when the
+  UID still matches; status is Replaced -- never Exact -- for a same-
+  name different-UID row; status is Missing when absent from synced
+  rows; status is NotCurrentlyViewed for a context/resource/namespace
+  mismatch or an unsynced list, never guessed at; an all-namespaces
+  view still correctly resolves a specific bookmarked namespace's own
+  object); 1 grammar test (all four commands' exact arity, `:bookmarks`
+  confirmed as a true alias for `:bookmark_list`); 7 app-level tests
+  (save without a selected row errors; save-then-list renders `exact`
+  while the object is still present; status flips to `REPLACED` the
+  moment a same-name row's UID changes, never silently staying `exact`;
+  status becomes `MISSING` once the row disappears; opening an unknown
+  name errors; delete removes it and a subsequent open then fails;
+  opening a same-context bookmark sets `state.selected` to the
+  bookmarked UID for the normal `rebuild()` path to validate, proven by
+  reading it back after the open completes synchronously). Full locked
+  suite green (367 unit, up from 352; 76 fake-HTTP unchanged), `cargo
+  fmt --check` and `cargo clippy --all-targets -- -D warnings` clean,
+  full M1-M8B interactive regression (`accept-m8b.py`) reconfirmed
+  green on `kind-sauron-test`. **Next: M10.6** (Configurable keymaps --
+  per reconnaissance, mostly already-built UI/diagnostics work over the
+  existing `command::Keymap` engine, not a new architecture), continuing
   directly in this session.
 
 ## Final acceptance checklist

@@ -627,6 +627,12 @@ pub enum Command {
     WorkspaceOpen(String),
     WorkspaceDelete(String),
     WorkspaceList,
+    // M10.5: bookmarks are navigation aids only -- see `app::bookmark`'s
+    // own doc comment; never an identity-authority or mutation token.
+    BookmarkSave(String),
+    BookmarkOpen(String),
+    BookmarkDelete(String),
+    BookmarkList,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -1040,6 +1046,31 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :workspace_list");
             return Ok(Command::WorkspaceList);
         }
+        "bookmark_save" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :bookmark_save NAME"
+            );
+            return Ok(Command::BookmarkSave(tail[0].clone()));
+        }
+        "bookmark_open" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :bookmark_open NAME"
+            );
+            return Ok(Command::BookmarkOpen(tail[0].clone()));
+        }
+        "bookmark_delete" => {
+            ensure!(
+                tail.len() == 1 && !tail[0].is_empty(),
+                "Use :bookmark_delete NAME"
+            );
+            return Ok(Command::BookmarkDelete(tail[0].clone()));
+        }
+        "bookmark_list" | "bookmarks" => {
+            ensure!(tail.is_empty(), "Use :bookmarks");
+            return Ok(Command::BookmarkList);
+        }
         _ => {}
     }
     // Every zero-argument command name resolves through the SAME action registry that
@@ -1144,6 +1175,10 @@ pub fn command_names() -> Vec<&'static str> {
         "workspace_open",
         "workspace_delete",
         "workspace_list",
+        "bookmark_save",
+        "bookmark_open",
+        "bookmark_delete",
+        "bookmarks",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1516,6 +1551,27 @@ fn workspace_commands_require_a_name_except_list() {
     assert!(parse(":workspace_delete").is_err());
     assert!(parse(":workspace_list now").is_err());
     assert!(parse(":workspace_save a b").is_err());
+}
+#[test]
+fn bookmark_commands_require_a_name_except_list_and_bookmarks_is_an_alias() {
+    assert!(matches!(
+        parse(":bookmark_save web-1"),
+        Ok(Command::BookmarkSave(n)) if n == "web-1"
+    ));
+    assert!(matches!(
+        parse(":bookmark_open web-1"),
+        Ok(Command::BookmarkOpen(n)) if n == "web-1"
+    ));
+    assert!(matches!(
+        parse(":bookmark_delete web-1"),
+        Ok(Command::BookmarkDelete(n)) if n == "web-1"
+    ));
+    assert!(matches!(parse(":bookmark_list"), Ok(Command::BookmarkList)));
+    assert!(matches!(parse(":bookmarks"), Ok(Command::BookmarkList)));
+    assert!(parse(":bookmark_save").is_err());
+    assert!(parse(":bookmark_open").is_err());
+    assert!(parse(":bookmark_delete").is_err());
+    assert!(parse(":bookmarks now").is_err());
 }
 #[test]
 fn label_and_annotate_parse_set_and_remove_grammar() {

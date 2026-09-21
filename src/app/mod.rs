@@ -1,3 +1,4 @@
+pub mod bookmark;
 pub mod document;
 pub mod event;
 pub mod forwards;
@@ -47,6 +48,9 @@ pub struct Runtime {
     /// why it must never carry mutation authorization).
     workspaces: std::collections::BTreeMap<String, workspace::Workspace>,
     pending_workspace: Option<workspace::Workspace>,
+    /// M10.5: session-local for now, same reasoning as `workspaces`.
+    bookmarks: std::collections::BTreeMap<String, bookmark::Bookmark>,
+    pending_bookmark: Option<bookmark::Bookmark>,
     /// Set by `open_shell()`/`open_attach()`, consumed by `run()` right after each
     /// key/event dispatch. Both are foreground and blocking -- unlike logs/exec
     /// output, nothing else in the app runs concurrently with either -- so neither
@@ -101,6 +105,8 @@ impl Runtime {
                 pending_history: None,
                 workspaces: std::collections::BTreeMap::new(),
                 pending_workspace: None,
+                bookmarks: std::collections::BTreeMap::new(),
+                pending_bookmark: None,
                 pending_interactive: None,
                 palette_document: None,
                 namespace_by_context: std::collections::HashMap::new(),
@@ -118,6 +124,7 @@ impl Runtime {
         self.pending = None;
         self.pending_history = None;
         self.pending_workspace = None;
+        self.pending_bookmark = None;
         self.push_history();
         if let Some(current) = self.connection.as_ref().map(|c| c.context.clone()) {
             self.namespace_by_context
@@ -184,6 +191,7 @@ impl Runtime {
         self.pending = None;
         self.pending_history = None;
         self.pending_workspace = None;
+        self.pending_bookmark = None;
         if self
             .connection
             .as_ref()
@@ -280,6 +288,7 @@ impl Runtime {
         self.pending = None;
         self.pending_history = None;
         self.pending_workspace = None;
+        self.pending_bookmark = None;
         if self
             .connection
             .as_ref()
@@ -349,6 +358,140 @@ impl Runtime {
             ));
         }
         self.open_static("Workspaces", out);
+    }
+    /// M10.5: bookmarks the currently selected object. Deliberately
+    /// captures only navigation identity (GVK/namespace/name) plus the
+    /// UID observed right now, as a comparison starting point -- never
+    /// anything mutation-authorization-shaped.
+    fn save_bookmark(&mut self, name: String) -> Result<()> {
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let resource = self
+            .state
+            .resource
+            .as_ref()
+            .context("No resource selected")?;
+        let object = self.state.selected_object().context("Select a row first")?;
+        let bookmark = bookmark::Bookmark {
+            schema_version: bookmark::BOOKMARK_SCHEMA_VERSION,
+            name: name.clone(),
+            context: connection.context.clone(),
+            resource: resource.id(),
+            namespace: object.namespace.clone(),
+            object_name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        bookmark::save(&mut self.bookmarks, bookmark)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        self.state.status = format!("Bookmark \"{name}\" saved ({} total)", self.bookmarks.len());
+        Ok(())
+    }
+    /// M10.5: navigates to the bookmark's own context/resource/namespace
+    /// (mirroring `open_workspace`'s exact reconnect-only-if-needed
+    /// shape) and, once the view is up, attempts to select the bookmarked
+    /// UID -- never pre-authorizing anything, exactly equivalent to
+    /// navigating there and pressing the row by hand. Whether that UID
+    /// is still the same object, a replacement, or gone is rendered by
+    /// `:bookmarks`' own status column once the list syncs, never
+    /// guessed at here.
+    fn open_bookmark(&mut self, name: &str) -> Result<()> {
+        let bookmark = self
+            .bookmarks
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(bookmark::BookmarkError::NotFound.to_string()))?;
+        self.pending = None;
+        self.pending_history = None;
+        self.pending_workspace = None;
+        self.pending_bookmark = None;
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|c| c.context == bookmark.context)
+        {
+            self.finish_bookmark(bookmark);
+        } else {
+            let context = bookmark.context.clone();
+            self.pending_bookmark = Some(bookmark);
+            self.connect(Some(context));
+        }
+        Ok(())
+    }
+    fn finish_bookmark(&mut self, bookmark: bookmark::Bookmark) {
+        let result = (|| -> Result<()> {
+            let connection = self.connection.as_ref().context("Not connected")?;
+            let resource = connection
+                .catalog
+                .resolve(&bookmark.resource, &connection.settings.aliases)?;
+            self.state.query.resource = resource.id();
+            self.state.query.namespace = Some(bookmark.namespace.clone());
+            self.state.query.labels = None;
+            self.state.query.fields = None;
+            self.state.filter_text.clear();
+            self.state.filter = crate::filters::Expr::All;
+            self.watch_resource(resource)?;
+            // Set after watch_resource: cancel_scope() unconditionally
+            // clears selected/selection first (same invariant
+            // finish_history/finish_workspace already rely on). The
+            // normal rebuild() then validates this UID against whatever
+            // the fresh list actually returns -- never treated as
+            // authoritative just because it was requested.
+            self.state.selected = Some(bookmark.uid);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.state.error = Some(format!("Could not open bookmark: {e}"));
+        }
+    }
+    fn delete_bookmark(&mut self, name: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.bookmarks.remove(name).is_some(),
+            bookmark::BookmarkError::NotFound.to_string()
+        );
+        self.state.status = format!("Bookmark \"{name}\" deleted");
+        Ok(())
+    }
+    /// M10.5: a bounded, read-only listing with a live-computed status
+    /// column -- `bookmark::status` is pure and reused verbatim, never a
+    /// second copy of the present/replaced/missing logic.
+    fn open_bookmarks_view(&mut self) {
+        // The current CONNECTION's own context, not `state.context` (a
+        // display mirror updated only on `Payload::Connected`) -- matches
+        // exactly what `save_bookmark`/`current_history_entry` already
+        // use as "the real current context" everywhere else.
+        let current_context = self.connection.as_ref().map(|c| c.context.as_str());
+        let current_resource_id = self.state.resource.as_ref().map(Resource::id);
+        let mut out = format!(
+            "BOOKMARKS ({} of {})\n\n",
+            self.bookmarks.len(),
+            bookmark::MAX_BOOKMARKS
+        );
+        if self.bookmarks.is_empty() {
+            out.push_str("(none saved -- select a row, then :bookmark_save NAME)\n");
+        }
+        for (name, b) in &self.bookmarks {
+            let status = match (current_context, current_resource_id.as_deref()) {
+                (Some(context), Some(resource_id)) => bookmark::status(
+                    b,
+                    context,
+                    resource_id,
+                    self.state.query.namespace.as_deref(),
+                    self.state.synced,
+                    &self.state.rows,
+                ),
+                _ => bookmark::Status::NotCurrentlyViewed,
+            };
+            let status_text = match status {
+                bookmark::Status::Exact => "exact",
+                bookmark::Status::Replaced => "REPLACED (same name, different UID)",
+                bookmark::Status::Missing => "MISSING",
+                bookmark::Status::NotCurrentlyViewed => "not currently viewed",
+            };
+            out.push_str(&format!(
+                "  {name}\n    {} {}/{}\n    status: {status_text}\n",
+                b.resource, b.namespace, b.object_name
+            ));
+        }
+        self.open_static("Bookmarks", out);
     }
     /// Fetch the real namespace list from the cluster (bounded to 500, same pattern as
     /// Events) and open it as a picker, instead of navigating away to a namespaces
@@ -570,6 +713,8 @@ impl Runtime {
                     self.finish_history(entry, true);
                 } else if let Some(workspace) = self.pending_workspace.take() {
                     self.finish_workspace(workspace);
+                } else if let Some(bookmark) = self.pending_bookmark.take() {
+                    self.finish_bookmark(bookmark);
                 } else if let Some(query) = self.pending.take() {
                     if let Err(e) = self.navigate(query) {
                         self.state.error = Some(e.to_string());
@@ -870,6 +1015,7 @@ impl Runtime {
                 self.pending_history = None;
                 self.pending = None;
                 self.pending_workspace = None;
+                self.pending_bookmark = None;
                 self.navigate(query)
             }
             Command::Namespace(Some(ns)) => self.switch_namespace(if ns == "all" || ns == "*" {
@@ -1475,6 +1621,13 @@ impl Runtime {
             Command::WorkspaceDelete(name) => self.delete_workspace(&name),
             Command::WorkspaceList => {
                 self.open_workspaces_view();
+                Ok(())
+            }
+            Command::BookmarkSave(name) => self.save_bookmark(name),
+            Command::BookmarkOpen(name) => self.open_bookmark(&name),
+            Command::BookmarkDelete(name) => self.delete_bookmark(&name),
+            Command::BookmarkList => {
+                self.open_bookmarks_view();
                 Ok(())
             }
             Command::StopForward(number) => {
@@ -3715,6 +3868,101 @@ mod tests {
         let mut rt = runtime();
         rt.state.resource = None;
         assert!(rt.command(":workspace_save w1").is_err());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_save_without_a_selected_row_errors() {
+        let mut rt = runtime();
+        assert!(
+            rt.command(":bookmark_save w1").is_err(),
+            "bookmarking with nothing selected must error, never silently no-op"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_save_then_list_reports_exact_status_while_still_present() {
+        let mut rt = runtime();
+        rt.state.query.namespace = Some("test".into());
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.state.synced = true;
+        rt.command(":bookmark_save web-1").expect("save succeeds");
+        rt.command(":bookmarks").expect("list opens");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("web-1"));
+        assert!(text.contains("status: exact"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_status_is_replaced_when_same_name_row_has_a_new_uid() {
+        let mut rt = runtime();
+        rt.state.query.namespace = Some("test".into());
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.state.synced = true;
+        rt.command(":bookmark_save web-1").expect("save succeeds");
+        // Same object name, deleted and recreated with a new UID.
+        let replacement = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"v1","kind":"Pod",
+            "metadata":{"namespace":"test","name":"pod-a","uid":"new-uid"}
+        }));
+        rt.state.rows = vec![std::sync::Arc::new(replacement)];
+        rt.command(":bookmarks").expect("list opens");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(
+            text.contains("status: REPLACED"),
+            "a same-name, different-UID row must never render as the original: {text}"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_status_is_missing_when_the_row_is_gone() {
+        let mut rt = runtime();
+        rt.state.query.namespace = Some("test".into());
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.state.synced = true;
+        rt.command(":bookmark_save web-1").expect("save succeeds");
+        rt.state.rows = vec![];
+        rt.command(":bookmarks").expect("list opens");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("status: MISSING"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_open_unknown_name_errors_explicitly() {
+        let mut rt = runtime();
+        assert!(rt.command(":bookmark_open does-not-exist").is_err());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_delete_removes_it() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.command(":bookmark_save w1").expect("save succeeds");
+        rt.command(":bookmark_delete w1").expect("delete succeeds");
+        assert!(rt.command(":bookmark_open w1").is_err());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bookmark_open_same_context_sets_the_bookmarked_uid_for_normal_rebuild_validation() {
+        let mut rt = runtime();
+        rt.state.query.namespace = Some("test".into());
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.command(":bookmark_save web-1").expect("save succeeds");
+        rt.state.selected = None;
+        rt.command(":bookmark_open web-1").expect("open succeeds");
+        assert_eq!(
+            rt.state.selected.as_deref(),
+            Some("a"),
+            "opening a bookmark sets the bookmarked UID for the normal rebuild() \
+             validation path to confirm or clear -- never guessed at directly"
+        );
         rt.shutdown().await;
     }
     #[tokio::test]

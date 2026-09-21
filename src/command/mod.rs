@@ -408,7 +408,9 @@ impl Keymap {
                 entry.keys = keys.clone();
             }
         }
-        for mode in ["table", "document", "logs", "forwards", "mutation", "drain"] {
+        for mode in [
+            "table", "document", "logs", "forwards", "mutation", "drain", "bulk",
+        ] {
             let mut used = Vec::new();
             for binding in bindings.iter().filter(|b| available(b.mode, mode)) {
                 for key in &binding.keys {
@@ -469,7 +471,7 @@ pub fn available(binding: &str, mode: &str) -> bool {
     binding == "global"
         || binding == mode
         || (mode != "input" && binding == "navigation")
-        || (matches!(mode, "logs" | "forwards" | "mutation" | "drain") && binding == "document")
+        || (matches!(mode, "logs" | "forwards" | "mutation" | "drain" | "bulk") && binding == "document")
         // M8B.5: a Drain document reuses the exact same MutationConfirm
         // key as every other mutation preview (mutation_confirm() itself
         // dispatches to drain_confirm() when the open document is a
@@ -477,6 +479,9 @@ pub fn available(binding: &str, mode: &str) -> bool {
         // bindings (including confirm) were never available in "drain"
         // mode, so pressing confirm silently did nothing.
         || (mode == "drain" && binding == "mutation")
+        // M10.3: a bulk document reuses the exact same MutationConfirm/
+        // MutationDryRun keys, same reasoning as Drain above.
+        || (mode == "bulk" && binding == "mutation")
 }
 fn normalize(mut m: KeyModifiers, c: KeyCode) -> KeyModifiers {
     if matches!(c, KeyCode::Char(_)) {
@@ -577,6 +582,31 @@ pub enum Command {
     Evict,
     ForceDelete,
     Drain,
+    // M10.3: bulk versions of the actions classified bulk-safe / bulk-safe-
+    // with-stronger-confirmation. Deliberately their own distinct commands
+    // (never a shared "bulk" prefix flag on the single-target ones) so the
+    // grammar/help/journal stay explicit about which path built a given
+    // intent. Force delete and Drain have no bulk equivalent -- see M10.3's
+    // own acceptance contract for why.
+    BulkLabel {
+        key: String,
+        value: Option<String>,
+    },
+    BulkAnnotate {
+        key: String,
+        value: Option<String>,
+    },
+    BulkScale(u32),
+    BulkRestart,
+    BulkDelete,
+    BulkEvict,
+    BulkCordon,
+    BulkUncordon,
+    BulkSetImage {
+        container: Option<String>,
+        image: String,
+    },
+    BulkTrigger,
     Flux,
     FluxSuspend,
     FluxResume,
@@ -873,6 +903,65 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :drain");
             return Ok(Command::Drain);
         }
+        "bulk_label" => {
+            let (key, value) =
+                parse_metadata_arg(tail, "Use :bulk_label KEY=VALUE or :bulk_label KEY-")?;
+            return Ok(Command::BulkLabel { key, value });
+        }
+        "bulk_annotate" => {
+            let (key, value) =
+                parse_metadata_arg(tail, "Use :bulk_annotate KEY=VALUE or :bulk_annotate KEY-")?;
+            return Ok(Command::BulkAnnotate { key, value });
+        }
+        "bulk_scale" => {
+            ensure!(tail.len() == 1, "Use :bulk_scale REPLICAS");
+            let replicas = tail[0]
+                .parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("REPLICAS must be a non-negative integer"))?;
+            return Ok(Command::BulkScale(replicas));
+        }
+        "bulk_restart" => {
+            ensure!(tail.is_empty(), "Use :bulk_restart");
+            return Ok(Command::BulkRestart);
+        }
+        "bulk_delete" => {
+            ensure!(tail.is_empty(), "Use :bulk_delete");
+            return Ok(Command::BulkDelete);
+        }
+        "bulk_evict" => {
+            ensure!(tail.is_empty(), "Use :bulk_evict");
+            return Ok(Command::BulkEvict);
+        }
+        "bulk_cordon" => {
+            ensure!(tail.is_empty(), "Use :bulk_cordon");
+            return Ok(Command::BulkCordon);
+        }
+        "bulk_uncordon" => {
+            ensure!(tail.is_empty(), "Use :bulk_uncordon");
+            return Ok(Command::BulkUncordon);
+        }
+        "bulk_set_image" => {
+            ensure!(tail.len() == 1, "Use :bulk_set_image [CONTAINER=]IMAGE");
+            let arg = &tail[0];
+            let (container, image) = match arg.split_once('=') {
+                Some((c, i)) => {
+                    ensure!(
+                        !c.is_empty() && !i.is_empty(),
+                        "Use :bulk_set_image [CONTAINER=]IMAGE"
+                    );
+                    (Some(c.to_owned()), i.to_owned())
+                }
+                None => {
+                    ensure!(!arg.is_empty(), "Use :bulk_set_image [CONTAINER=]IMAGE");
+                    (None, arg.clone())
+                }
+            };
+            return Ok(Command::BulkSetImage { container, image });
+        }
+        "bulk_trigger" => {
+            ensure!(tail.is_empty(), "Use :bulk_trigger");
+            return Ok(Command::BulkTrigger);
+        }
         "flux" => {
             ensure!(tail.is_empty(), "Use :flux");
             return Ok(Command::Flux);
@@ -1000,6 +1089,16 @@ pub fn command_names() -> Vec<&'static str> {
         "evict",
         "force_delete",
         "drain",
+        "bulk_label",
+        "bulk_annotate",
+        "bulk_scale",
+        "bulk_restart",
+        "bulk_delete",
+        "bulk_evict",
+        "bulk_cordon",
+        "bulk_uncordon",
+        "bulk_set_image",
+        "bulk_trigger",
         "flux",
         "flux_suspend",
         "flux_resume",
@@ -1254,6 +1353,62 @@ fn force_delete_takes_no_arguments_and_is_its_own_distinct_command_from_delete()
 fn drain_takes_no_arguments() {
     assert!(matches!(parse(":drain"), Ok(Command::Drain)));
     assert!(parse(":drain now").is_err());
+}
+#[test]
+fn bulk_label_and_annotate_parse_set_and_remove_grammar() {
+    assert!(matches!(
+        parse(":bulk_label team=infra"),
+        Ok(Command::BulkLabel { key, value: Some(v) }) if key == "team" && v == "infra"
+    ));
+    assert!(matches!(
+        parse(":bulk_label team-"),
+        Ok(Command::BulkLabel { key, value: None }) if key == "team"
+    ));
+    assert!(matches!(
+        parse(":bulk_annotate note=hello"),
+        Ok(Command::BulkAnnotate { key, value: Some(v) }) if key == "note" && v == "hello"
+    ));
+    assert!(parse(":bulk_label").is_err());
+}
+#[test]
+fn bulk_scale_parses_a_bounded_non_negative_integer_only() {
+    assert!(matches!(parse(":bulk_scale 3"), Ok(Command::BulkScale(3))));
+    assert!(matches!(parse(":bulk_scale 0"), Ok(Command::BulkScale(0))));
+    assert!(parse(":bulk_scale -1").is_err());
+    assert!(parse(":bulk_scale abc").is_err());
+    assert!(parse(":bulk_scale").is_err());
+}
+#[test]
+fn bulk_restart_delete_evict_cordon_uncordon_trigger_take_no_arguments() {
+    assert!(matches!(parse(":bulk_restart"), Ok(Command::BulkRestart)));
+    assert!(matches!(parse(":bulk_delete"), Ok(Command::BulkDelete)));
+    assert!(matches!(parse(":bulk_evict"), Ok(Command::BulkEvict)));
+    assert!(matches!(parse(":bulk_cordon"), Ok(Command::BulkCordon)));
+    assert!(matches!(parse(":bulk_uncordon"), Ok(Command::BulkUncordon)));
+    assert!(matches!(parse(":bulk_trigger"), Ok(Command::BulkTrigger)));
+    for cmd in [
+        ":bulk_restart now",
+        ":bulk_delete now",
+        ":bulk_evict now",
+        ":bulk_cordon now",
+        ":bulk_uncordon now",
+        ":bulk_trigger now",
+    ] {
+        assert!(parse(cmd).is_err(), "{cmd} must reject arguments");
+    }
+}
+#[test]
+fn bulk_set_image_parses_bare_image_or_container_equals_image() {
+    assert!(matches!(
+        parse(":bulk_set_image nginx:1.27"),
+        Ok(Command::BulkSetImage { container: None, image }) if image == "nginx:1.27"
+    ));
+    assert!(matches!(
+        parse(":bulk_set_image web=nginx:1.27"),
+        Ok(Command::BulkSetImage { container: Some(c), image }) if c == "web" && image == "nginx:1.27"
+    ));
+    assert!(parse(":bulk_set_image").is_err());
+    assert!(parse(":bulk_set_image a b").is_err());
 }
 #[test]
 fn flux_takes_no_arguments() {

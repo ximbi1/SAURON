@@ -3726,3 +3726,137 @@ async fn helm_read_release_reports_malformed_release_explicitly_never_an_empty_v
         sauron::kube::helm::HelmReadError::Decode(_)
     ));
 }
+
+// M10.3: `kube::mutation::bulk_commit` is a sequential loop over the exact
+// same `commit`/`verify` this file already proves single-target correctness
+// for -- these tests exercise the loop's own new behavior (independent
+// per-target aggregation, and cancellation stopping only future targets),
+// not commit/verify's own internals again.
+fn bulk_intent(uid: &str) -> sauron::mutation::MutationIntent {
+    let mut intent = mutation_intent(uid, sauron::mutation::MutationEffect::Modify);
+    intent.payload_sha256 = Some(format!("hash-{uid}"));
+    intent
+}
+fn bulk_confirmation(intent: &sauron::mutation::MutationIntent) -> sauron::mutation::Confirmation {
+    sauron::mutation::Confirmation {
+        request_id: intent.request_id,
+        scope: intent.target.scope.clone(),
+        effect: intent.effect,
+        payload_sha256: intent.payload_sha256.clone(),
+        requirement: sauron::mutation::ConfirmationRequirement::Standard,
+    }
+}
+
+#[tokio::test]
+async fn mutation_bulk_commit_two_targets_succeed_and_verify_independently() {
+    use sauron::kube::mutation::bulk_commit;
+    use sauron::mutation::{MutationOutcome, Verification};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+    let server = Server::with_request(move |request| {
+        let step = counter_clone.fetch_add(1, Ordering::SeqCst);
+        // Per target: [0] revalidate GET, [1] commit PATCH, [2] verify GET --
+        // deterministic since bulk_commit is strictly sequential.
+        let uid = if step < 3 { "uid-1" } else { "uid-2" };
+        match step % 3 {
+            0 => (
+                200,
+                json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":uid,"resourceVersion":"5"}}).to_string(),
+            ),
+            1 => {
+                assert!(request.starts_with("PATCH"), "unexpected method: {request}");
+                (200, json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":uid}}).to_string())
+            }
+            _ => (
+                200,
+                json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"namespace":"sauron-m7","name":"m7-target","uid":uid,"labels":{"team":"infra"}}}).to_string(),
+            ),
+        }
+    })
+    .await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let payload = json!({"metadata":{"labels":{"team":"infra"}}});
+    let items: Vec<_> = ["uid-1", "uid-2"]
+        .iter()
+        .map(|uid| {
+            let intent = bulk_intent(uid);
+            let confirmation = bulk_confirmation(&intent);
+            (intent, Some(payload.clone()), confirmation)
+        })
+        .collect();
+    let results = bulk_commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &items,
+        &journal,
+        &CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(results.len(), 2, "one result per target, never omitted");
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(
+            r.commit,
+            MutationOutcome::Committed,
+            "target {i} must be independently Committed"
+        );
+        assert_eq!(
+            r.verification,
+            Some(Verification::Verified),
+            "target {i} must be independently verified, not inferred from another target"
+        );
+    }
+    assert_eq!(results[0].uid, "uid-1");
+    assert_eq!(results[1].uid, "uid-2");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn mutation_bulk_commit_cancellation_stops_only_future_targets() {
+    use sauron::kube::mutation::bulk_commit;
+    use sauron::mutation::MutationOutcome;
+    // Pre-cancelled: every target must report Cancelled, and the server
+    // must never receive a single request -- the loop's own cancel check
+    // runs before any per-target work starts, mirroring the existing
+    // pre-cancelled precedent for single-target commit()/graph reads in
+    // this same file (`graph_target_replacement_and_precancel_reject_
+    // identity`).
+    let server =
+        Server::new(|_| panic!("a cancelled bulk operation must send zero requests")).await;
+    let connection = connection(server.client());
+    let (journal, dir) = test_journal();
+    let items: Vec<_> = ["uid-1", "uid-2", "uid-3"]
+        .iter()
+        .map(|uid| {
+            let intent = bulk_intent(uid);
+            let confirmation = bulk_confirmation(&intent);
+            (intent, None, confirmation)
+        })
+        .collect();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let results = bulk_commit(
+        &connection,
+        &verified_policy_context(),
+        1,
+        &items,
+        &journal,
+        &cancel,
+    )
+    .await;
+    assert_eq!(
+        results.len(),
+        3,
+        "cancellation must never shrink the result list -- every target gets an explicit entry"
+    );
+    for r in &results {
+        assert_eq!(r.commit, MutationOutcome::Cancelled);
+        assert_eq!(r.verification, None);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

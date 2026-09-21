@@ -85,4 +85,12 @@ pub enum Payload {
         request: u64,
         report: crate::mutation::drain::DrainReport,
     },
+    /// M10.3: the sequential bulk commit run finished (fully, or partially
+    /// if cancelled midway -- `results.len()` always equals the eligible
+    /// target count regardless, per `kube::mutation::bulk_commit`'s own
+    /// "never silently omitted" contract).
+    BulkCommit {
+        request: u64,
+        results: Vec<crate::mutation::bulk::BulkOutcome>,
+    },
 }

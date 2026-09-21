@@ -330,7 +330,7 @@ authorization token that fans out.
 | M10.0 | M10 acceptance contract / architecture freeze (this document) | ACCEPTED |
 | M10.1 | Selection model / multi-select foundation | ACCEPTED |
 | M10.2 | Bulk read-only operations / selection UX | ACCEPTED |
-| M10.3 | Bulk guarded mutations | PLANNED — NOT STARTED |
+| M10.3 | Bulk guarded mutations | ACCEPTED |
 | M10.4 | Workspaces | PLANNED — NOT STARTED |
 | M10.5 | Bookmarks / saved navigation targets | PLANNED — NOT STARTED |
 | M10.6 | Configurable keymaps | PLANNED — NOT STARTED |
@@ -635,10 +635,23 @@ target records (per-target `PolicyEvaluation`, `MutationOutcome`,
 11. Namespace/context changed after preview — the entire bulk operation
     is invalidated (mirrors `Confirmation::authorizes`' existing scope-
     sensitivity), not silently re-scoped.
-12. Mixed resource identities the action semantics reject (e.g. a
-    selection spanning Pod and Deployment for a Pod-only action) — each
-    ineligible target reports `Unsupported` individually; eligible
-    targets still proceed.
+12. Mixed resource identities the action semantics reject — **reality
+    check found during M10.3 implementation**: a selection literally
+    spanning two different *kinds* (e.g. Pod and Deployment
+    simultaneously) is structurally impossible in this app's UI model.
+    `Selection` lives inside `State`, which shows exactly one resource
+    kind at a time, and M10.1's own resolved Architectural question 8
+    means any kind/resource/context/namespace change clears the whole
+    selection via `cancel_scope()` — so by the time a bulk action reads
+    `self.state.selection`, every member is guaranteed to share the
+    current view's own single kind. The realistic version of this test
+    case, proven instead: the SAME builder produces different per-
+    target results because the targets' own live *content* differs, not
+    their kind (e.g. `:bulk_set_image` where one selected Deployment has
+    containers and another does not) — each ineligible target reports
+    `Unsupported` individually; eligible targets still proceed. See
+    `bulk_set_image_partial_unsupported_within_one_homogeneous_kind_
+    selection` in `src/app/mod.rs`.
 13. Empty selection — the bulk action is refused up front with a clear
     message, never silently a no-op success.
 14. Maximum bounded selection (the M10.1 cap) — exercised at exactly the
@@ -950,6 +963,81 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   the bulk-safe action set is label/annotate/scale/restart/set-image/
   cordon/uncordon/delete/evict/trigger, force-delete and drain
   explicitly excluded), continuing directly in this session.
+- 2026-09-21: M10.3 (bulk guarded mutations) implemented. **Key finding
+  confirmed during implementation**: `kube::mutation::commit()` already
+  internally re-evaluates policy, checks cancellation at multiple
+  points, TOCTOU-revalidates the live object fresh, and journals every
+  phase -- per-target, with zero changes needed. This meant the bulk
+  engine did not need to reimplement any of that: it is a genuinely
+  thin sequential loop over the exact same single-target primitives
+  this codebase already exhaustively tests.
+  New `mutation::bulk` module (pure): `BulkItem` (one target's own
+  `Result<Workflow, String>` -- `Err` is a build-time `Unsupported`,
+  recorded individually, never dropped), `BulkWorkflow` (`requirement()`
+  is the STRONGEST confirmation tier among eligible targets, never a
+  lowered one; `eligible()`/`excluded()` partition Deny/Unsupported
+  targets out of execution explicitly), `BulkOutcome`, `BulkSummary`/
+  `summarize()` (exact counts: selected/excluded/attempted/committed/
+  verified/cancelled/other -- never a single collapsed bit). New
+  `kube::mutation::bulk_commit()` (the only new I/O code this slice
+  needed): sequential, never bounded-concurrent; on cancellation, every
+  remaining target gets an explicit `MutationOutcome::Cancelled` entry
+  so `results.len()` always equals `items.len()` -- never silently
+  shrunk. New `mutation::view::bulk_report()` (bounded preview + per-
+  target result rendering, truncation past 50 always explicit with a
+  real count). `Document.bulk: Option<BulkWorkflow>` (mutually exclusive
+  with `workflow`/`drain`, its own `"bulk"` keymap mode reusing the
+  exact same `MutationConfirm`/`MutationDryRun` keys as `"mutation"`/
+  `"drain"`, mirroring M8B.5's own precedent for this). `bulk_confirm()`
+  mirrors `drain_confirm()`'s exact arm/commit contract, dispatched from
+  `mutation_confirm()` alongside the Drain check already there. Ten new
+  palette-only commands (`:bulk_label`/`:bulk_annotate`/`:bulk_scale`/
+  `:bulk_restart`/`:bulk_delete`/`:bulk_evict`/`:bulk_cordon`/
+  `:bulk_uncordon`/`:bulk_set_image`/`:bulk_trigger`), each composing
+  `open_bulk_workflow()` with the exact same single-target builder
+  function `:label`/`:scale`/etc. already uses -- no bulk-specific
+  builder logic anywhere, confirming BULK != BYPASS by construction
+  rather than by convention alone. Force delete and Drain have
+  deliberately no bulk equivalent (Architectural question 7's own
+  resolution).
+  **Reality-check finding (test matrix item 12)**: a bulk selection
+  literally spanning two different resource *kinds* is structurally
+  impossible in this app -- `Selection` lives inside `State`, which
+  shows one kind at a time, and any kind/namespace/context change
+  clears the whole selection via `cancel_scope()` (M10.1's own resolved
+  Architectural question 8). The test matrix entry was updated in place
+  to record this and substitute the realistic equivalent: the same
+  builder producing different per-target results because target
+  *content* differs (proven via `:bulk_set_image` against Deployments
+  with/without containers), not target kind.
+  Evidence: 4 pure unit tests in `mutation::bulk` (eligible/excluded
+  partitioning never silently drops Deny/Unsupported; requirement is
+  the strongest among eligible, never lowered by a weaker one;
+  requirement is None when every eligible item is plain Allow;
+  `summarize()`'s every count is exact against a synthetic workflow+
+  results); grammar tests for all 10 new commands (exact argument
+  parsing, zero-argument commands reject arguments); 7 app-level tests
+  (empty selection refused up front; readonly denies every individual
+  target with its own `PolicyEvaluation`, zero requests sent; delete's
+  Strong confirmation requires a second press with zero requests sent
+  on the first; a context/namespace switch after preview invalidates
+  the whole operation via the same `cancel_scope()`-driven epoch check
+  M10.1 already established; the realistic mixed-eligibility case
+  above; preview renders exact selected/eligible/excluded counts;
+  dry-run is explicitly not implemented for bulk, matching Drain's own
+  precedent); 2 fake-HTTP tests in `tests/watch_transport.rs` against a
+  real HTTP endpoint (two targets committed and verified fully
+  independently -- one target's outcome never leaks into another's;
+  a pre-cancelled bulk operation reports every target explicitly
+  `Cancelled` with zero requests ever sent to the server, and
+  `results.len()` still equals the full target count). Full locked
+  suite green (342 unit, up from 331; 76 fake-HTTP, up from 74),
+  `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean, full M1-M8B interactive regression (`accept-m8b.py`)
+  reconfirmed green on `kind-sauron-test` -- zero drift from touching
+  the shared `src/app/mod.rs`/`src/command/mod.rs`/`src/mutation.rs`
+  modules. No application bugs found. **Next: M10.4** (Workspaces),
+  continuing directly in this session.
 
 ## Final acceptance checklist
 

@@ -514,6 +514,79 @@ pub async fn commit(
     outcome
 }
 
+/// M10.3: sequential, never bounded-concurrent -- matches every prior
+/// milestone's "no surprising parallel writes" posture; a later slice
+/// can revisit this only with its own proven-safe evidence. Each target
+/// goes through the exact same `commit`/`verify` this module already
+/// uses for a single-target mutation -- no new policy/TOCTOU/journal
+/// logic here at all, `commit()` already re-evaluates policy, checks
+/// cancellation, and TOCTOU-revalidates fresh per call.
+///
+/// Cancellation stops FUTURE targets only: once observed, every
+/// remaining target gets an explicit `MutationOutcome::Cancelled` entry
+/// (never silently omitted from the result list -- `results.len()`
+/// always equals `items.len()`), while any target already committed by
+/// an earlier iteration is untouched and keeps its own real outcome.
+pub async fn bulk_commit(
+    connection: &Connection,
+    policy_context: &PolicyContext,
+    current_epoch: u64,
+    items: &[(MutationIntent, Option<Value>, Confirmation)],
+    journal: &Journal,
+    cancel: &CancellationToken,
+) -> Vec<crate::mutation::bulk::BulkOutcome> {
+    use crate::mutation::bulk::BulkOutcome;
+    let mut results = Vec::with_capacity(items.len());
+    let mut cancelled = false;
+    for (intent, payload, confirmation) in items {
+        let identity = (
+            intent.target.scope.uid.clone(),
+            intent.target.scope.namespace.clone(),
+            intent.target.scope.name.clone(),
+        );
+        if cancelled || cancel.is_cancelled() {
+            cancelled = true;
+            results.push(BulkOutcome {
+                uid: identity.0,
+                namespace: identity.1,
+                name: identity.2,
+                commit: MutationOutcome::Cancelled,
+                verification: None,
+            });
+            continue;
+        }
+        let outcome = commit(
+            connection,
+            policy_context,
+            current_epoch,
+            intent,
+            Some(confirmation),
+            payload.clone(),
+            journal,
+            cancel,
+        )
+        .await;
+        let verification = if matches!(
+            outcome,
+            MutationOutcome::Committed | MutationOutcome::CommittedButJournalIncomplete
+        ) {
+            let v = verify(connection, intent, payload.as_ref(), cancel).await;
+            let _ = journal.append(verification_record(intent, &v));
+            Some(v)
+        } else {
+            None
+        };
+        results.push(BulkOutcome {
+            uid: identity.0,
+            namespace: identity.1,
+            name: identity.2,
+            commit: outcome,
+            verification,
+        });
+    }
+    results
+}
+
 /// Walks a single-leaf JSON merge-patch document (exactly what every M8
 /// workflow builds: one field, however deeply nested) down to its leaf,
 /// returning a JSON pointer path and the expected value at that path.

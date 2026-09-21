@@ -74,6 +74,13 @@ pub struct Document {
     /// to "one user action, one intent", so it gets its own field rather
     /// than forcing `workflow::Workflow`'s single-intent shape to fit it.
     pub drain: Option<crate::mutation::drain::DrainWorkflow>,
+    /// M10.3: set only for a bulk mutation preview/confirm/commit
+    /// document; `None` for every other document, including every
+    /// single-target mutation (`workflow`) and Drain. Mutually exclusive
+    /// with both -- a bulk operation is its own document shape (a bounded
+    /// collection of individually-tracked `Workflow`s), never forced into
+    /// `workflow`'s single-intent shape.
+    pub bulk: Option<crate::mutation::bulk::BulkWorkflow>,
     pub freshness: Freshness,
     pub truncated: bool,
     pub page_size: usize,
@@ -117,6 +124,7 @@ impl Document {
             source: None,
             workflow: None,
             drain: None,
+            bulk: None,
             freshness: Freshness::Local,
             truncated: false,
             page_size: 20,

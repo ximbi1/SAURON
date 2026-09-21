@@ -318,6 +318,110 @@ pub fn drain_report(workflow: &DrainWorkflow) -> String {
     out
 }
 
+/// M10.3: bounded past this many rendered targets, in both the pre-commit
+/// preview and the post-commit per-target result list -- explicit
+/// truncation, never a silent "...and more" with no count.
+const BULK_RENDER_BOUND: usize = 50;
+
+/// TARGETS/eligible-vs-excluded/CONFIRMATION/per-target RESULT for a
+/// pending or finished bulk mutation. Mirrors `workflow_report`'s exact
+/// honesty rules, generalized to N targets: every target's own decision
+/// and (once committed) outcome/verification is rendered individually,
+/// never collapsed into one aggregate pass/fail line. Pure function of
+/// `BulkWorkflow`'s current state; never issues a request itself.
+pub fn bulk_report(bulk: &super::bulk::BulkWorkflow) -> String {
+    let summary = super::bulk::summarize(bulk);
+    let mut out = format!(
+        "BULK ACTION: {}\nSELECTED: {} target(s)\n\n",
+        bulk.source_action, summary.total_selected
+    );
+    if bulk.is_empty() {
+        out.push_str("Selection is empty -- nothing to do.\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "ELIGIBLE: {} · EXCLUDED: {}\n\n",
+        bulk.eligible_count(),
+        summary.excluded
+    ));
+    out.push_str("TARGETS\n");
+    for (i, item) in bulk.items.iter().enumerate() {
+        if i >= BULK_RENDER_BOUND {
+            out.push_str(&format!(
+                "  ... {} more not shown, all still included\n",
+                bulk.items.len() - i
+            ));
+            break;
+        }
+        match &item.workflow {
+            Ok(w) if matches!(w.evaluation.decision, PolicyDecision::Deny) => {
+                out.push_str(&format!(
+                    "  [denied]      {}/{} -- {:?}\n",
+                    item.namespace, item.name, w.evaluation.reasons
+                ))
+            }
+            Ok(w) if matches!(w.evaluation.decision, PolicyDecision::Unsupported) => out.push_str(
+                &format!("  [unsupported] {}/{}\n", item.namespace, item.name),
+            ),
+            Ok(w) => out.push_str(&format!(
+                "  [eligible]    {}/{}: {}\n",
+                item.namespace, item.name, w.change
+            )),
+            Err(reason) => out.push_str(&format!(
+                "  [unsupported] {}/{} -- {reason}\n",
+                item.namespace, item.name
+            )),
+        }
+    }
+    out.push('\n');
+    let confirmation_line = match bulk.requirement() {
+        ConfirmationRequirement::None => "CONFIRMATION: not required".to_string(),
+        ConfirmationRequirement::Standard => {
+            "CONFIRMATION: required (press confirm once)".to_string()
+        }
+        ConfirmationRequirement::Strong => {
+            if bulk.armed {
+                "CONFIRMATION: strong -- press confirm again to commit".to_string()
+            } else {
+                "CONFIRMATION: strong -- press confirm twice to commit".to_string()
+            }
+        }
+    };
+    out.push_str(&confirmation_line);
+    out.push('\n');
+    if bulk.eligible_count() == 0 {
+        out.push_str(
+            "No eligible targets -- every selected target is denied or unsupported; \
+             confirming does nothing.\n",
+        );
+    }
+    if let Some(results) = &bulk.results {
+        out.push_str(&format!(
+            "\nRESULT: {} attempted · {} committed ({} verified) · {} cancelled · {} other\n\n",
+            summary.attempted,
+            summary.committed,
+            summary.verified,
+            summary.cancelled,
+            summary.other
+        ));
+        out.push_str("PER-TARGET RESULT\n");
+        for (i, r) in results.iter().enumerate() {
+            if i >= BULK_RENDER_BOUND {
+                out.push_str(&format!("  ... {} more not shown\n", results.len() - i));
+                break;
+            }
+            out.push_str(&format!(
+                "  {}/{}: {:?} · verify: {}\n",
+                r.namespace,
+                r.name,
+                r.commit,
+                verification_line(&r.verification)
+            ));
+        }
+    }
+    out
+}
+
 /// Bounded, deterministic, most-recent-last. Never includes raw payload or
 /// Secret content -- the journal itself cannot hold either.
 pub fn journal_report(records: &[Record]) -> String {

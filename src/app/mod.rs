@@ -543,6 +543,15 @@ impl Runtime {
                     doc.replace(text);
                 }
             }
+            Payload::BulkCommit { request, results } if request == self.state.request => {
+                if let Some(doc) = self.active_document_mut()
+                    && let Some(bulk) = doc.bulk.as_mut()
+                {
+                    bulk.results = Some(results);
+                    let text = crate::mutation::view::bulk_report(bulk);
+                    doc.replace(text);
+                }
+            }
             Payload::DocumentError { request, error } if request == self.state.request => {
                 if let Some(doc) = self.active_document_mut() {
                     doc.replace(String::new());
@@ -1055,6 +1064,143 @@ impl Runtime {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 self.open_workflow_document(format!("Force delete: {}", object.name), built)
             }
+            Command::BulkLabel { key, value } => self.open_bulk_workflow(
+                "bulk_label",
+                "Bulk label",
+                |scope, resource, _object, request_id| {
+                    crate::mutation::workflow::label(
+                        scope,
+                        resource,
+                        &key,
+                        value.as_deref(),
+                        request_id,
+                    )
+                },
+            ),
+            Command::BulkAnnotate { key, value } => self.open_bulk_workflow(
+                "bulk_annotate",
+                "Bulk annotate",
+                |scope, resource, _object, request_id| {
+                    crate::mutation::workflow::annotate(
+                        scope,
+                        resource,
+                        &key,
+                        value.as_deref(),
+                        request_id,
+                    )
+                },
+            ),
+            Command::BulkScale(replicas) => self.open_bulk_workflow(
+                "bulk_scale",
+                "Bulk scale",
+                |scope, resource, object, request_id| {
+                    let current = object
+                        .value
+                        .pointer("/spec/replicas")
+                        .and_then(serde_json::Value::as_i64);
+                    crate::mutation::workflow::scale(scope, resource, current, replicas, request_id)
+                },
+            ),
+            Command::BulkRestart => {
+                // Generated exactly once for the whole bulk operation, shared
+                // across every target -- matches Restart's own "generated
+                // once, never per-render" discipline, extended to "never
+                // per-target" so a bulk restart reads as one coordinated
+                // action, not N independently-timestamped ones.
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                self.open_bulk_workflow(
+                    "bulk_restart",
+                    "Bulk restart",
+                    |scope, resource, _object, request_id| {
+                        crate::mutation::workflow::restart(scope, resource, &timestamp, request_id)
+                    },
+                )
+            }
+            Command::BulkDelete => self.open_bulk_workflow(
+                "bulk_delete",
+                "Bulk delete",
+                |scope, resource, _object, request_id| {
+                    crate::mutation::workflow::delete(scope, resource, request_id)
+                },
+            ),
+            Command::BulkEvict => self.open_bulk_workflow(
+                "bulk_evict",
+                "Bulk evict",
+                |scope, resource, _object, request_id| {
+                    crate::mutation::workflow::evict(scope, resource, request_id)
+                },
+            ),
+            Command::BulkCordon => self.open_bulk_workflow(
+                "bulk_cordon",
+                "Bulk cordon",
+                |scope, resource, _object, request_id| {
+                    crate::mutation::workflow::cordon(scope, resource, request_id)
+                },
+            ),
+            Command::BulkUncordon => self.open_bulk_workflow(
+                "bulk_uncordon",
+                "Bulk uncordon",
+                |scope, resource, _object, request_id| {
+                    crate::mutation::workflow::uncordon(scope, resource, request_id)
+                },
+            ),
+            Command::BulkSetImage { container, image } => self.open_bulk_workflow(
+                "bulk_set_image",
+                "Bulk set image",
+                |scope, resource, object, request_id| {
+                    let containers = object
+                        .value
+                        .pointer("/spec/template/spec/containers")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    crate::mutation::workflow::set_image(
+                        scope,
+                        resource,
+                        &containers,
+                        container.as_deref(),
+                        &image,
+                        request_id,
+                    )
+                },
+            ),
+            Command::BulkTrigger => {
+                let connection = self.connection.as_ref().context("Not connected")?;
+                let job_resource = connection
+                    .catalog
+                    .resolve("batch/v1/jobs", &connection.settings.aliases)
+                    .context("Job kind is not available on this cluster")?;
+                // Shared across every target's own generated Job name below,
+                // matching Trigger's own single-timestamp-per-preview
+                // discipline; each target still gets its own distinct Job
+                // name (object.name is part of it), so a bulk trigger never
+                // collides two CronJobs' Jobs into the same name.
+                let timestamp = chrono::Utc::now().timestamp();
+                self.open_bulk_workflow(
+                    "bulk_trigger",
+                    "Bulk trigger",
+                    move |scope, resource, object, request_id| {
+                        let job_template_spec = object
+                            .value
+                            .pointer("/spec/jobTemplate/spec")
+                            .cloned()
+                            .ok_or_else(|| {
+                                "this object has no spec.jobTemplate.spec".to_string()
+                            })?;
+                        let mut job_name = format!("{}-trigger-{timestamp}", object.name);
+                        job_name.truncate(63);
+                        job_name = job_name.trim_end_matches('-').to_string();
+                        crate::mutation::workflow::trigger_cronjob(
+                            scope,
+                            resource,
+                            job_resource.clone(),
+                            &job_template_spec,
+                            &job_name,
+                            request_id,
+                        )
+                    },
+                )
+            }
             Command::Drain => {
                 let object = self.state.selected_object().context("Select a row first")?;
                 let resource = self
@@ -1502,6 +1648,7 @@ impl Runtime {
             Mode::Document(doc) if doc.session.is_some() => "logs",
             Mode::Document(doc) if doc.workflow.is_some() => "mutation",
             Mode::Document(doc) if doc.drain.is_some() => "drain",
+            Mode::Document(doc) if doc.bulk.is_some() => "bulk",
             Mode::Document(_) => "document",
             _ => "table",
         }
@@ -1743,6 +1890,78 @@ impl Runtime {
         self.palette_document = None;
         Ok(())
     }
+    /// M10.3: the one place a bulk mutation preview document is opened.
+    /// Builds one ordinary `Built`+`PolicyEvaluation` per currently
+    /// selected target via `build` -- the exact same per-target pipeline
+    /// `open_workflow_document` uses for a single target, just run once
+    /// per selection member. A target no longer present in the current
+    /// `rows` (stale, per `app::selection`'s own contract) is recorded as
+    /// an explicit build-time `Unsupported` rather than silently skipped
+    /// or guessed at from a possibly-stale cached copy. Never issues a
+    /// network request itself.
+    fn open_bulk_workflow(
+        &mut self,
+        source_action: &str,
+        title: &str,
+        build: impl Fn(
+            session::Scope,
+            Resource,
+            &crate::resources::Object,
+            u64,
+        ) -> Result<crate::mutation::workflow::Built, String>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.state.selection.is_empty(),
+            "Selection is empty -- select at least one target first (space to toggle, V for visible)"
+        );
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let context = connection.context.clone();
+        let cluster = connection.cluster.clone();
+        let resource = self
+            .state
+            .resource
+            .clone()
+            .context("No resource selected")?;
+        self.document.cancel();
+        self.state.request += 1;
+        let request_id = self.state.request;
+        let epoch = self.state.epoch;
+        let policy_context = self.mutation_policy_context();
+        let rows = self.state.rows.clone();
+        let mut items = Vec::new();
+        for target in self.state.selection.iter() {
+            let scope = session::Scope {
+                epoch,
+                request: request_id,
+                context: context.clone(),
+                cluster: cluster.clone(),
+                resource: resource.id(),
+                namespace: target.namespace.clone(),
+                name: target.name.clone(),
+                uid: target.uid.clone(),
+            };
+            let built = match rows.iter().find(|o| o.uid == target.uid) {
+                Some(object) => build(scope, resource.clone(), object, request_id),
+                None => {
+                    Err("target is stale (no longer present in the current view); reselect it after a fresh list".into())
+                }
+            };
+            items.push(crate::mutation::bulk::BulkItem::from_built(
+                target.uid.clone(),
+                target.namespace.clone(),
+                target.name.clone(),
+                built,
+                |b| crate::mutation::policy::evaluate(&policy_context, &b.intent),
+            ));
+        }
+        let workflow = crate::mutation::bulk::BulkWorkflow::new(source_action.into(), items);
+        let text = crate::mutation::view::bulk_report(&workflow);
+        let mut doc = Document::new(title.into(), text);
+        doc.bulk = Some(workflow);
+        self.state.mode = Mode::Document(doc);
+        self.palette_document = None;
+        Ok(())
+    }
     /// M8B.5: opens the Drain preview immediately (policy evaluated fresh,
     /// same as `open_workflow_document`), then kicks off the one live read
     /// (list Pods on this Node) needed to make the preview truthful. The
@@ -1884,6 +2103,69 @@ impl Runtime {
         });
         Ok(())
     }
+    /// M10.3: Bulk's own confirm handler -- the exact same arm/commit
+    /// contract as `mutation_confirm`'s single-target one
+    /// (`RequireStrongerConfirmation` arms on the first press, commits on
+    /// the second; `Deny`/`Unsupported` items are excluded from
+    /// execution, never sent), but the confirmation strength is the
+    /// STRONGEST among every eligible target (`BulkWorkflow::requirement`)
+    /// and "commit" is `kube::mutation::bulk_commit`'s own sequential
+    /// per-target loop -- never a second, parallel confirmation
+    /// mechanism, and no target's own individual `Confirmation`/
+    /// `PolicyEvaluation` is bypassed by this bulk-level gesture.
+    fn bulk_confirm(&mut self) -> Result<()> {
+        let connection = self.connection.clone().context("Not connected")?;
+        let epoch = self.state.epoch;
+        let doc = self
+            .active_document_mut()
+            .context("No mutation preview open")?;
+        let bulk = doc.bulk.as_mut().context("No bulk preview open")?;
+        anyhow::ensure!(!bulk.is_empty(), "Selection was empty; nothing to do");
+        anyhow::ensure!(
+            bulk.eligible_count() > 0,
+            "No eligible targets: every selected target is denied or unsupported"
+        );
+        let built_epoch = bulk
+            .eligible()
+            .next()
+            .map(|w| w.intent.target.scope.epoch)
+            .context("No eligible targets")?;
+        anyhow::ensure!(
+            built_epoch == epoch,
+            "Target replaced or context changed; reopen the preview"
+        );
+        if bulk.requirement() == crate::mutation::ConfirmationRequirement::Strong && !bulk.armed {
+            bulk.armed = true;
+            let text = crate::mutation::view::bulk_report(doc.bulk.as_ref().unwrap());
+            doc.replace(text);
+            return Ok(());
+        }
+        bulk.armed = false;
+        let items: Vec<_> = bulk
+            .eligible()
+            .map(|w| (w.intent.clone(), w.payload.clone(), w.confirmation()))
+            .collect();
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        let policy_context = self.mutation_policy_context();
+        let journal = self.mutation_journal();
+        self.tasks.spawn(async move {
+            let results = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                results = crate::kube::mutation::bulk_commit(&connection, &policy_context, epoch, &items, &journal, &cancel) => results,
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload: Payload::BulkCommit { request, results } }) => {},
+            }
+        });
+        Ok(())
+    }
     /// M8.0: a server dry-run only -- never gated behind confirmation, but
     /// still fully gated behind policy: `Deny`/`Unsupported` sends zero
     /// requests, exactly like a real commit would refuse to.
@@ -1892,6 +2174,10 @@ impl Runtime {
         anyhow::ensure!(
             self.active_document_mut().is_none_or(|d| d.drain.is_none()),
             "Dry-run is not implemented for Drain -- use the preview text and the double confirm instead"
+        );
+        anyhow::ensure!(
+            self.active_document_mut().is_none_or(|d| d.bulk.is_none()),
+            "Dry-run is not implemented for bulk actions -- use the preview text and confirm instead"
         );
         let workflow = self
             .active_document_mut()
@@ -1938,6 +2224,9 @@ impl Runtime {
             .is_some_and(|d| d.drain.is_some())
         {
             return self.drain_confirm();
+        }
+        if self.active_document_mut().is_some_and(|d| d.bulk.is_some()) {
+            return self.bulk_confirm();
         }
         let connection = self.connection.clone().context("Not connected")?;
         let epoch = self.state.epoch;
@@ -3928,6 +4217,215 @@ mod tests {
             "denied force_delete confirm must error, never silently no-op"
         );
         assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    fn bulk_pod_rows(uids: &[&str]) -> Vec<std::sync::Arc<crate::resources::Object>> {
+        uids.iter()
+            .map(|uid| {
+                std::sync::Arc::new(crate::resources::Object::new(serde_json::json!({
+                    "apiVersion":"v1","kind":"Pod",
+                    "metadata":{"namespace":"test","name":format!("pod-{uid}"),"uid":uid}
+                })))
+            })
+            .collect()
+    }
+    fn select_all(rt: &mut Runtime) {
+        rt.action(Action::SelectVisible).expect("select visible");
+    }
+
+    #[tokio::test]
+    async fn bulk_workflow_empty_selection_is_refused_up_front() {
+        let mut rt = runtime();
+        rt.state.rows = bulk_pod_rows(&["a", "b"]);
+        assert!(
+            rt.command(":bulk_delete").is_err(),
+            "an empty selection must refuse up front, never a silent no-op"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_under_readonly_denies_every_target_and_sends_zero_requests() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Pod".into();
+        rt.state.resource = Some(resource);
+        rt.state.rows = bulk_pod_rows(&["a", "b", "c"]);
+        select_all(&mut rt);
+        rt.command(":bulk_delete")
+            .expect("bulk preview opens even when denied");
+        let bulk = rt
+            .active_document_mut()
+            .and_then(|d| d.bulk.as_ref())
+            .expect("bulk workflow set");
+        assert_eq!(bulk.items.len(), 3);
+        assert_eq!(
+            bulk.eligible_count(),
+            0,
+            "readonly denies every individual target, not just an aggregate bit"
+        );
+        for item in &bulk.items {
+            let workflow = item.workflow.as_ref().expect("delete is supported for Pod");
+            assert_eq!(
+                workflow.evaluation.decision,
+                crate::mutation::PolicyDecision::Deny,
+                "target {} must be individually denied",
+                item.uid
+            );
+        }
+        let tasks_before = rt.tasks.len();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "no eligible targets: confirm must error, never silently no-op"
+        );
+        assert_eq!(rt.tasks.len(), tasks_before);
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_strong_confirmation_requires_a_second_press_before_any_request() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Pod".into();
+        rt.state.resource = Some(resource);
+        rt.state.rows = bulk_pod_rows(&["a", "b"]);
+        select_all(&mut rt);
+        rt.command(":bulk_delete").expect("bulk preview opens");
+        let requirement = rt
+            .active_document_mut()
+            .and_then(|d| d.bulk.as_ref())
+            .map(|b| b.requirement())
+            .expect("bulk workflow set");
+        assert_eq!(
+            requirement,
+            crate::mutation::ConfirmationRequirement::Strong,
+            "delete is Destructive -- the bulk gesture must require the same strong \
+             confirmation every individual delete already requires, never lowered"
+        );
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::MutationConfirm)
+            .expect("first press arms, does not error");
+        assert_eq!(
+            rt.tasks.len(),
+            tasks_before,
+            "arming must send zero requests -- only the second press commits"
+        );
+        assert!(
+            rt.active_document_mut()
+                .and_then(|d| d.bulk.as_ref())
+                .expect("bulk workflow set")
+                .armed
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_confirm_rejects_a_context_or_namespace_change_after_preview() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        rt.state.rows = bulk_pod_rows(&["a", "b"]);
+        select_all(&mut rt);
+        rt.command(":bulk_label team=infra")
+            .expect("bulk preview opens");
+        // Simulates a context/namespace/resource switch after the preview
+        // was built but before confirm -- cancel_scope() is the exact hook
+        // every such switch already funnels through (see M10.1).
+        rt.cancel_scope();
+        assert!(
+            rt.action(Action::MutationConfirm).is_err(),
+            "a context/namespace switch after preview must invalidate the whole bulk \
+             operation, never silently re-scope it"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_set_image_partial_unsupported_within_one_homogeneous_kind_selection() {
+        // SAUR-ON's table view is always one resource kind at a time (a
+        // Selection can never literally span e.g. Pod+Deployment -- see
+        // M10_ACCEPTANCE.md's own note on this), so the realistic version
+        // of "mixed eligibility within one bulk operation" is: the SAME
+        // builder produces different per-target results because the
+        // targets' own live content differs, not their kind. set_image's
+        // "no containers found" build-time rejection is the clearest case
+        // of this already present in the existing single-target builder.
+        let mut rt = runtime();
+        rt.state.settings.readonly = false;
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Deployment".into();
+        rt.state.resource = Some(resource);
+        let with_container = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"apps/v1","kind":"Deployment",
+            "metadata":{"namespace":"test","name":"has-containers","uid":"a"},
+            "spec":{"template":{"spec":{"containers":[{"name":"c","image":"old:1"}]}}}
+        }));
+        let without_containers = crate::resources::Object::new(serde_json::json!({
+            "apiVersion":"apps/v1","kind":"Deployment",
+            "metadata":{"namespace":"test","name":"no-containers","uid":"b"}
+        }));
+        rt.state.rows = vec![
+            std::sync::Arc::new(with_container),
+            std::sync::Arc::new(without_containers),
+        ];
+        select_all(&mut rt);
+        rt.command(":bulk_set_image new:2")
+            .expect("bulk preview opens");
+        let bulk = rt
+            .active_document_mut()
+            .and_then(|d| d.bulk.as_ref())
+            .expect("bulk workflow set");
+        assert_eq!(bulk.items.len(), 2);
+        assert_eq!(
+            bulk.eligible_count(),
+            1,
+            "exactly one target is eligible; the other is individually Unsupported"
+        );
+        let a = bulk.items.iter().find(|i| i.uid == "a").unwrap();
+        assert!(a.workflow.is_ok(), "the target with containers is eligible");
+        let b = bulk.items.iter().find(|i| i.uid == "b").unwrap();
+        assert!(
+            b.workflow.is_err(),
+            "the target with no containers is individually Unsupported, not silently dropped"
+        );
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_preview_reports_exact_selected_eligible_excluded_counts() {
+        let mut rt = runtime();
+        rt.state.settings.readonly = true; // denies every target -> all excluded
+        rt.options.mutation_test_cluster_verified = true;
+        let mut resource = rt.state.resource.clone().expect("resource");
+        resource.api.kind = "Pod".into();
+        rt.state.resource = Some(resource);
+        rt.state.rows = bulk_pod_rows(&["a", "b", "c"]);
+        select_all(&mut rt);
+        rt.command(":bulk_delete").expect("bulk preview opens");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("SELECTED: 3 target(s)"));
+        assert!(text.contains("ELIGIBLE: 0"));
+        assert!(text.contains("EXCLUDED: 3"));
+        rt.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bulk_dry_run_is_not_implemented_and_errors_explicitly() {
+        let mut rt = runtime();
+        rt.state.rows = bulk_pod_rows(&["a", "b"]);
+        select_all(&mut rt);
+        rt.command(":bulk_delete").expect("bulk preview opens");
+        assert!(
+            rt.action(Action::MutationDryRun).is_err(),
+            "dry-run is not implemented for bulk -- must error explicitly, never silently no-op"
+        );
         rt.shutdown().await;
     }
 

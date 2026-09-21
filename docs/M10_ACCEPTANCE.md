@@ -333,7 +333,7 @@ authorization token that fans out.
 | M10.3 | Bulk guarded mutations | ACCEPTED |
 | M10.4 | Workspaces | ACCEPTED |
 | M10.5 | Bookmarks / saved navigation targets | ACCEPTED |
-| M10.6 | Configurable keymaps | PLANNED — NOT STARTED |
+| M10.6 | Configurable keymaps | ACCEPTED |
 | M10.7 | Themes / appearance configuration | PLANNED — NOT STARTED |
 | M10.8 | Cross-feature UX integration / persistence / migration | PLANNED — NOT STARTED |
 | M10.9 | Combined acceptance / full regression / soak | PLANNED — NOT STARTED |
@@ -1163,6 +1163,58 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   green on `kind-sauron-test`. **Next: M10.6** (Configurable keymaps --
   per reconnaissance, mostly already-built UI/diagnostics work over the
   existing `command::Keymap` engine, not a new architecture), continuing
+  directly in this session.
+- 2026-09-21: M10.6 (Configurable keymaps) implemented. Confirmed by
+  reconnaissance to be mostly already-built: `Action::Help` (bound to
+  `?`, already palette-suggestible as `:help`) already renders the
+  EFFECTIVE (resolved, possibly-overridden) binding table via
+  `Keymap::help()`; mode-awareness and one coherent key-resolution layer
+  were already fully satisfied by `available()`/`Keymap::action()` --
+  M10.6 adds no second key-dispatch path, exactly as the contract
+  required. No new `:keys` command was added since `:help`/`?` already
+  is that surface; adding a second name for the same thing would be
+  scope creep, not a real gap.
+  Two real, reconnaissance-identified gaps were closed:
+  1. **Conflict diagnostic was not user-actionable.** `Keymap::compile`'s
+     per-mode conflict check previously reported only `"Conflicting key
+     binding {key} in {mode}"` -- naming the key and mode but not which
+     two actions collided, forcing a user to re-derive that from the
+     registry themselves. Now reports `"Key conflict in {mode} mode:
+     \"{key}\" is bound to both \"{other}\" and \"{new}\""` -- both
+     action names, the exact mode, the exact key, in one line.
+  2. **A malformed user keymap crashed the entire application at
+     startup.** `State::new` previously propagated `Keymap::compile`'s
+     error via `?`, and `Runtime::new`'s own `?` propagated it further
+     up to `main()`, which printed the error and called
+     `std::process::exit(1)` before the TUI ever rendered a single
+     frame -- a config typo in `~/.config/sauron/config.toml`'s `[keys]`
+     table made the whole app unusable, not just that one binding.
+     `State::new` is now infallible: on a compile failure it falls back
+     to `Keymap::compile(&BTreeMap::new())` (proven elsewhere to never
+     fail -- the built-in registry has no self-conflicts) and surfaces
+     the failure as a visible, dismissible `state.error`, exactly like
+     every other "denied, not hidden" surface in this app, never a
+     silent swallow and never fatal. Every caller that previously used
+     `State::new(...)?`/`.expect("state")` was updated to the new
+     infallible signature (`src/app/mod.rs`, `src/ui/mod.rs`'s own
+     render tests, `benches/pipeline.rs`).
+  Evidence: 2 new unit tests in `app::state` (a malformed keymap falls
+  back to defaults -- proven by checking `j` still resolves to `Down`,
+  never the user's broken override -- and reports the failure visibly
+  in `state.error`; a valid keymap config produces zero startup error);
+  1 existing test (`effective_bindings_detect_conflicts`) strengthened
+  to assert the new diagnostic actually names both colliding actions
+  (`yaml`/`down`) and the mode, not just that compilation failed.
+  Full locked suite green (369 unit, up from 367; 76 fake-HTTP
+  unchanged), `cargo fmt --check` and `cargo clippy --all-targets -- -D
+  warnings` clean (including `--all-targets`, covering the benches
+  crate this slice also touched), full M1-M8B interactive regression
+  (`accept-m8b.py`) reconfirmed green on `kind-sauron-test` after one
+  transient `seq9` forward-liveness flake (curl returned `000` against
+  the still-running port-forward; classified environment/timing, not a
+  regression -- an immediate retry passed clean end to end, matching
+  this document's own established flake-classification precedent from
+  M9's own regression runs). **Next: M10.7** (Themes), continuing
   directly in this session.
 
 ## Final acceptance checklist

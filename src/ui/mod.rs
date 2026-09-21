@@ -429,8 +429,7 @@ mod tests {
                     ..Default::default()
                 },
                 &crate::config::Settings::default(),
-            )
-            .expect("state");
+            );
             terminal
                 .draw(|frame| render(frame, &mut state, &[]))
                 .expect("render");
@@ -521,8 +520,7 @@ mod tests {
                 ..Default::default()
             },
             &crate::config::Settings::default(),
-        )
-        .expect("state");
+        );
         state.mode = Mode::Document(doc);
         let backend = ratatui::backend::TestBackend::new(32, 9);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");

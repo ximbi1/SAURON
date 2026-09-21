@@ -411,15 +411,21 @@ impl Keymap {
         for mode in [
             "table", "document", "logs", "forwards", "mutation", "drain", "bulk",
         ] {
-            let mut used = Vec::new();
+            // M10.6: names both colliding actions and the exact mode/key,
+            // not just "a conflict happened somewhere" -- a user-actionable
+            // diagnostic they can act on without re-deriving it from the
+            // registry themselves.
+            let mut used: Vec<((KeyCode, KeyModifiers), &str)> = Vec::new();
             for binding in bindings.iter().filter(|b| available(b.mode, mode)) {
                 for key in &binding.keys {
                     let event = parse_key(key)?;
-                    ensure!(
-                        !used.contains(&event),
-                        "Conflicting key binding {key} in {mode}"
-                    );
-                    used.push(event);
+                    if let Some((_, other)) = used.iter().find(|(e, _)| *e == event) {
+                        bail!(
+                            "Key conflict in {mode} mode: \"{key}\" is bound to both \"{other}\" and \"{}\"",
+                            binding.name
+                        );
+                    }
+                    used.push((event, binding.name));
                 }
             }
         }
@@ -1221,7 +1227,17 @@ mod tests {
             "table".into(),
             BTreeMap::from([("yaml".into(), vec!["j".into()])]),
         );
-        assert!(Keymap::compile(&overrides).is_err());
+        let error = Keymap::compile(&overrides)
+            .err()
+            .expect("j collides with navigation's down");
+        // M10.6: the diagnostic must name both colliding actions and the
+        // mode/key, not just "somewhere in table mode" -- a user must be
+        // able to act on it without re-deriving the collision themselves.
+        let message = error.to_string();
+        assert!(message.contains("table"), "{message}");
+        assert!(message.contains('j'), "{message}");
+        assert!(message.contains("yaml"), "{message}");
+        assert!(message.contains("down"), "{message}");
         assert!(Keymap::compile(&BTreeMap::new()).is_ok());
     }
     /// The core single-source-of-truth guarantee: every registered action's name,

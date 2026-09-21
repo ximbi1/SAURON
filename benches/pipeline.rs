@@ -22,8 +22,7 @@ fn main() {
                 ..Default::default()
             },
             &Settings::default(),
-        )
-        .expect("benchmark state");
+        );
         let start = Instant::now();
         for i in 0..count {
             state.store.apply(Object::new(json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":format!("api-{i:05}"),"namespace":"benchmark","uid":format!("uid-{i}"),"resourceVersion":"1","creationTimestamp":"2026-09-15T10:00:00Z"},"spec":{"containers":[{"name":"worker"}]},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"worker","ready":true,"restartCount":i%10,"state":{"running":{}}}]}})),false);

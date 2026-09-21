@@ -8,6 +8,7 @@ use crate::{
     resources::{SharedObject, store::Store},
 };
 use chrono::Utc;
+use std::collections::BTreeMap;
 
 pub enum Mode {
     Table,
@@ -92,15 +93,30 @@ pub struct State {
     prepared: Option<(u64, u64, String, String, bool, Option<i64>)>,
 }
 impl State {
-    pub fn new(query: Query, settings: &Settings) -> anyhow::Result<Self> {
-        Ok(Self {
+    /// M10.6: a malformed user keymap config must never crash startup --
+    /// `Keymap::compile`'s own default-only call (`Keymap::compile(&
+    /// BTreeMap::new())`) is proven elsewhere to never fail (the built-in
+    /// registry has no self-conflicts), so falling back to it is always
+    /// available. The failure is surfaced as a visible, dismissible
+    /// `state.error` (exactly like every other "denied, not hidden"
+    /// surface in this app), never silently swallowed and never fatal.
+    pub fn new(query: Query, settings: &Settings) -> Self {
+        let (keymap, keymap_error) = match Keymap::compile(&settings.keys) {
+            Ok(k) => (k, None),
+            Err(e) => (
+                Keymap::compile(&BTreeMap::new())
+                    .expect("the default keymap has no self-conflicts"),
+                Some(format!("Invalid key configuration, using defaults: {e}")),
+            ),
+        };
+        Self {
             epoch: 0,
             request: 0,
             context: "Connecting".into(),
             query,
             resource: None,
             settings: settings.clone(),
-            keymap: Keymap::compile(&settings.keys)?,
+            keymap,
             store: Store::new(settings.max_objects, settings.max_bytes),
             rows: vec![],
             selected: None,
@@ -113,7 +129,7 @@ impl State {
             wide: false,
             mode: Mode::Table,
             status: "Starting".into(),
-            error: None,
+            error: keymap_error,
             input_error: None,
             synced: false,
             dirty: true,
@@ -126,7 +142,7 @@ impl State {
             printer_columns: vec![],
             metrics: super::metrics::Cache::default(),
             prepared: None,
-        })
+        }
     }
     pub fn columns(&self) -> Vec<String> {
         let mut columns = vec!["NAME".into()];
@@ -357,10 +373,43 @@ impl State {
 mod tests {
     use super::*;
     #[test]
+    fn malformed_keymap_config_falls_back_to_defaults_and_reports_visibly_never_panics() {
+        let mut settings = Settings::default();
+        settings.keys.insert(
+            "table".into(),
+            BTreeMap::from([("yaml".into(), vec!["j".into()])]),
+        );
+        let s = State::new(Query::default(), &settings);
+        assert!(
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Invalid key configuration")),
+            "a malformed keymap must be surfaced as a visible, dismissible error: {:?}",
+            s.error
+        );
+        // The default keymap is in effect -- "j" still resolves to Down,
+        // never to the user's broken "yaml" override.
+        assert_eq!(
+            s.keymap.action(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('j'),
+                    crossterm::event::KeyModifiers::NONE
+                ),
+                "table"
+            ),
+            Some(Action::Down)
+        );
+    }
+    #[test]
+    fn valid_keymap_config_produces_no_startup_error() {
+        let s = State::new(Query::default(), &Settings::default());
+        assert!(s.error.is_none());
+    }
+    #[test]
     fn sorting_preserves_uid_and_does_not_reselect_after_delete_recreate() {
         use crate::resources::Object;
         use serde_json::json;
-        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut s = State::new(Query::default(), &Settings::default());
         let object = |name: &str, uid: &str, rv: &str, n: i64| {
             Object::new(json!({
                 "metadata":{"name":name,"uid":uid,"resourceVersion":rv,"creationTimestamp":format!("2026-09-15T10:00:0{n}Z")},
@@ -402,7 +451,7 @@ mod tests {
     }
     #[test]
     fn history_selection_waits_for_initial_list_before_validation() {
-        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut s = State::new(Query::default(), &Settings::default());
         s.selected = Some("history-uid".into());
         s.prepare();
         assert_eq!(s.selected.as_deref(), Some("history-uid"));
@@ -422,7 +471,7 @@ mod tests {
     }
     #[test]
     fn repaired_filter_clears_input_error_but_preserves_transport_error() {
-        let mut state = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut state = State::new(Query::default(), &Settings::default());
         state.set_filter("name=api").expect("valid");
         state.error = Some("Forbidden API".into());
         state.input_error = state.set_filter("/[/").err().map(|e| e.to_string());
@@ -434,7 +483,7 @@ mod tests {
     }
     #[test]
     fn selection_is_uid_not_row_index() {
-        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut s = State::new(Query::default(), &Settings::default());
         s.store.apply(
             crate::resources::Object::new(
                 serde_json::json!({"metadata":{"name":"a","uid":"old","resourceVersion":"1"}}),
@@ -454,7 +503,7 @@ mod tests {
     }
     #[test]
     fn prepare_without_relevant_change_does_not_resort_across_a_clock_tick() {
-        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut s = State::new(Query::default(), &Settings::default());
         s.store.apply(
             crate::resources::Object::new(
                 serde_json::json!({"metadata":{"name":"a","uid":"1","resourceVersion":"1"}}),
@@ -481,7 +530,7 @@ mod tests {
         // number (e.g. both finish their initial list at revision 1). Without `epoch` in
         // the key, the second watch's rebuild was skipped as "unchanged" even though rows
         // had just been cleared for it, leaving the table permanently empty after refresh.
-        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut s = State::new(Query::default(), &Settings::default());
         s.store.apply(
             crate::resources::Object::new(
                 serde_json::json!({"metadata":{"name":"a","uid":"1","resourceVersion":"1"}}),
@@ -515,7 +564,7 @@ mod tests {
     }
     #[test]
     fn prepare_with_age_filter_rechecks_membership_across_a_clock_tick() {
-        let mut s = State::new(Query::default(), &Settings::default()).expect("state");
+        let mut s = State::new(Query::default(), &Settings::default());
         s.filter = Expr::parse("age>0s").expect("valid filter");
         s.filter_text = "age>0s".into();
         s.store.apply(

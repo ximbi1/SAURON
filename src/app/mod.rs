@@ -81,7 +81,7 @@ impl Runtime {
         query: Query,
     ) -> Result<(Self, mpsc::Receiver<Event>)> {
         let settings = config.resolve("", "")?;
-        let state = State::new(query, &settings)?;
+        let state = State::new(query, &settings);
         let (tx, rx) = mpsc::channel(256);
         Ok((
             Self {

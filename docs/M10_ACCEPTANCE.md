@@ -329,7 +329,7 @@ authorization token that fans out.
 | --- | --- | --- |
 | M10.0 | M10 acceptance contract / architecture freeze (this document) | ACCEPTED |
 | M10.1 | Selection model / multi-select foundation | ACCEPTED |
-| M10.2 | Bulk read-only operations / selection UX | PLANNED — NOT STARTED |
+| M10.2 | Bulk read-only operations / selection UX | ACCEPTED |
 | M10.3 | Bulk guarded mutations | PLANNED — NOT STARTED |
 | M10.4 | Workspaces | PLANNED — NOT STARTED |
 | M10.5 | Bookmarks / saved navigation targets | PLANNED — NOT STARTED |
@@ -904,6 +904,52 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   deviation from this document's own M10.1 contract. **Next: M10.2**
   (bulk read-only operations / selection UX), continuing directly in
   this session.
+- 2026-09-21: M10.2 (bulk read-only operations / selection UX)
+  implemented. Two new `Action`s: `InvertSelection` ("i") and
+  `InspectSelection` ("s") -- select/deselect current, select-visible,
+  and clear were already delivered as part of M10.1's own foundation
+  work (the M10.2 contract's test list named them, but the primitives
+  landed a slice early since they're inseparable from `Selection`
+  itself). `invert_selection()` (`src/app/mod.rs`) reuses
+  `Selection::toggle` over `state.rows` only -- never a global scan,
+  satisfying the non-goal "invert within the currently visible/filtered
+  set, never everything in the cluster minus what's selected" exactly
+  by construction (it has no path to anything outside `rows`). New pure
+  `selection::report()` renders a bounded (`REPORT_RENDER_BOUND = 100`)
+  summary: exact present/stale/total counts up front, one line per
+  target with an explicit `[stale]` marker, explicit truncation past the
+  bound ("... N more not shown, all still selected") rather than a bare
+  "...and more". `open_selection_view()` (`Action::InspectSelection`)
+  renders it as a zero-network read-only document, including an explicit
+  "(nothing selected)" state rather than erroring on an empty selection
+  -- matching every other read-only view's own "never silent" precedent.
+  Confirmed (no new code needed): `:select_toggle`/`:select_visible`/
+  `:select_clear`/`:select_invert`/`:select_inspect` are already
+  palette-suggestible and parse to their `Action`s purely through the
+  existing `registry()` fallback in `command::parse` and
+  `command_names()`'s own "every registry entry is automatically
+  suggestible" design -- proven by the pre-existing, unmodified
+  `every_registered_action_name_resolves_via_parse_to_the_same_action`
+  test, which iterates the whole registry and already covered these five
+  new entries with zero changes required.
+  Evidence: 3 new pure unit tests in `app::selection` (`report()`'s
+  present/stale counts are exact against a synthetic rows+Selection;
+  explicit "(nothing selected)" state; explicit truncation message past
+  the render bound, with the header count still reflecting the true
+  total); 4 new app-level tests (invert flips only currently-visible
+  rows; invert never touches a selected target that is outside the
+  current `rows` -- e.g. a stale entry from a prior broader view -- since
+  it only iterates `rows`, never the selection's own full membership;
+  inspecting the selection opens a document with zero new network tasks;
+  inspecting an empty selection renders the explicit empty state rather
+  than erroring). Full locked suite green (327 unit, up from 320),
+  `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean. No bugs found; no deviation from this document's own M10.2
+  contract. **Next: M10.3** (bulk guarded mutations -- the highest-risk
+  slice, per this document's own Architectural question 7 resolution:
+  the bulk-safe action set is label/annotate/scale/restart/set-image/
+  cordon/uncordon/delete/evict/trigger, force-delete and drain
+  explicitly excluded), continuing directly in this session.
 
 ## Final acceptance checklist
 

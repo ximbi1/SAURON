@@ -138,6 +138,48 @@ pub struct SelectionStatus<'a> {
     pub stale: Vec<&'a SelectedTarget>,
 }
 
+/// Bounded past this many rendered targets -- a "... N more" line makes
+/// the truncation explicit rather than silently cutting the report off.
+/// Every target beyond this bound is still counted (see the header
+/// counts), just not individually rendered.
+const REPORT_RENDER_BOUND: usize = 100;
+
+/// M10.2: a pure, read-only summary of the current selection. Never
+/// issues a request -- everything it renders is already-known local
+/// state (`selection` + the current view's own `rows`).
+pub fn report(selection: &Selection, rows: &[SharedObject], resource_label: &str) -> String {
+    let status = selection.status(rows);
+    let mut out = format!(
+        "SELECTION: {} selected ({} present, {} stale) · resource: {resource_label}\n\n",
+        selection.len(),
+        status.present.len(),
+        status.stale.len(),
+    );
+    if selection.is_empty() {
+        out.push_str("(nothing selected)\n");
+        return out;
+    }
+    let stale_uids: std::collections::HashSet<&str> =
+        status.stale.iter().map(|t| t.uid.as_str()).collect();
+    out.push_str("TARGETS\n");
+    for (i, target) in selection.iter().enumerate() {
+        if i >= REPORT_RENDER_BOUND {
+            out.push_str(&format!(
+                "  ... {} more not shown (all still selected)\n",
+                selection.len() - REPORT_RENDER_BOUND
+            ));
+            break;
+        }
+        let marker = if stale_uids.contains(target.uid.as_str()) {
+            "[stale]  "
+        } else {
+            "         "
+        };
+        out.push_str(&format!("{marker}{}/{}\n", target.namespace, target.name));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +289,37 @@ mod tests {
         s.add(&object("b", "ns", "b")).unwrap();
         let order: Vec<_> = s.iter().map(|t| t.uid.as_str()).collect();
         assert_eq!(order, ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn report_counts_are_exact_for_present_and_stale() {
+        let mut s = Selection::default();
+        s.add(&object("a", "ns", "pod-a")).unwrap();
+        s.add(&object("b", "ns", "pod-b")).unwrap();
+        let rows = [object("a", "ns", "pod-a")]; // "b" is now stale
+        let text = report(&s, &rows, "v1/pods");
+        assert!(text.contains("2 selected (1 present, 1 stale)"));
+        assert!(text.contains("resource: v1/pods"));
+        assert!(text.contains("[stale]  ns/pod-b"));
+        assert!(text.contains("ns/pod-a"));
+    }
+
+    #[test]
+    fn report_states_explicitly_when_nothing_is_selected() {
+        let s = Selection::default();
+        let text = report(&s, &[], "v1/pods");
+        assert!(text.contains("0 selected"));
+        assert!(text.contains("(nothing selected)"));
+    }
+
+    #[test]
+    fn report_truncates_past_the_bound_explicitly_never_silently() {
+        let mut s = Selection::default();
+        for i in 0..REPORT_RENDER_BOUND + 3 {
+            s.add(&object(&i.to_string(), "ns", "pod")).unwrap();
+        }
+        let text = report(&s, &[], "v1/pods");
+        assert!(text.contains("... 3 more not shown (all still selected)"));
+        assert!(text.contains(&format!("{} selected", REPORT_RENDER_BOUND + 3)));
     }
 }

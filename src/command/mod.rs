@@ -54,6 +54,8 @@ pub enum Action {
     ToggleSelect,
     SelectVisible,
     ClearSelection,
+    InvertSelection,
+    InspectSelection,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -360,6 +362,20 @@ pub fn registry() -> Vec<Binding> {
             "table",
             "Bulk multi-select: clear the current selection",
             "C",
+        ),
+        (
+            Action::InvertSelection,
+            "select_invert",
+            "table",
+            "Bulk multi-select: invert within currently visible rows",
+            "i",
+        ),
+        (
+            Action::InspectSelection,
+            "select_inspect",
+            "table",
+            "Bulk multi-select: inspect the current selection (read-only)",
+            "s",
         ),
     ];
     definitions

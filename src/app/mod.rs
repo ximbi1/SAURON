@@ -1360,6 +1360,8 @@ impl Runtime {
             ToggleSelect => self.toggle_select()?,
             SelectVisible => self.select_visible(),
             ClearSelection => self.state.selection.clear(),
+            InvertSelection => self.invert_selection(),
+            InspectSelection => self.open_selection_view(),
         }
         self.state.dirty = true;
         Ok(())
@@ -1414,6 +1416,46 @@ impl Runtime {
                 self.state.selection.len()
             )
         };
+    }
+    /// M10.2: inverts the selection strictly within currently visible
+    /// (already-filtered) rows -- never "everything in the cluster minus
+    /// what's selected." A row already selected is deselected (never
+    /// fails); a row not yet selected is added (can hit the bound). If
+    /// the bound is hit partway through, everything toggled so far stays
+    /// toggled and the refusal is reported explicitly.
+    fn invert_selection(&mut self) {
+        let before = self.state.selection.len();
+        let mut refused = false;
+        for object in &self.state.rows.clone() {
+            if self.state.selection.toggle(object).is_err() {
+                refused = true;
+                break;
+            }
+        }
+        let after = self.state.selection.len();
+        self.state.status = if refused {
+            format!(
+                "Inverted selection partially (bound {} reached); {after} selected",
+                selection::MAX_SELECTION
+            )
+        } else {
+            format!("Inverted selection: {after} selected (was {before})")
+        };
+    }
+    /// M10.2: a read-only, bounded detail view of the current selection
+    /// -- never issues a request, reuses the already-fetched `rows` for
+    /// staleness. Opens even when the selection is empty (reports that
+    /// explicitly), matching every other read-only view's "never silent"
+    /// convention rather than erroring on an empty selection.
+    fn open_selection_view(&mut self) {
+        let resource_label = self
+            .state
+            .resource
+            .as_ref()
+            .map(crate::kube::discovery::Resource::qualified)
+            .unwrap_or_else(|| self.state.query.resource.clone());
+        let text = selection::report(&self.state.selection, &self.state.rows, &resource_label);
+        self.open_static("Selection", text);
     }
     /// Session-local, UID-scoped watch history -- never Events or an audit
     /// log. Newest first, since the most recent transition is almost always
@@ -3396,6 +3438,72 @@ mod tests {
             rt.state.selection.contains("a"),
             "moving the cursor must not change the selected set"
         );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn invert_selection_flips_only_currently_visible_rows() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b", "c"]);
+        rt.state.selected = Some("a".into());
+        rt.action(Action::ToggleSelect).expect("select a");
+        rt.action(Action::InvertSelection).expect("invert");
+        assert!(
+            !rt.state.selection.contains("a"),
+            "a was selected, invert deselects it"
+        );
+        assert!(rt.state.selection.contains("b"));
+        assert!(rt.state.selection.contains("c"));
+        assert_eq!(rt.state.selection.len(), 2);
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn invert_selection_never_touches_rows_outside_the_visible_set() {
+        let mut rt = runtime();
+        // "z" is selected but not in the current (filtered) rows -- a
+        // stale entry from a prior broader view. Invert must never
+        // touch it: it only flips membership within `rows`.
+        rt.state.rows = pod_rows(&["a"]);
+        rt.action(Action::SelectVisible).expect("select a");
+        rt.state
+            .selection
+            .add(&pod_rows(&["z"])[0])
+            .expect("seed a stale-shaped entry");
+        rt.action(Action::InvertSelection).expect("invert");
+        assert!(
+            !rt.state.selection.contains("a"),
+            "a was visible and selected, now deselected"
+        );
+        assert!(
+            rt.state.selection.contains("z"),
+            "z is outside the visible set and must be left untouched by invert"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn inspect_selection_opens_a_bounded_read_only_report() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b"]);
+        rt.action(Action::SelectVisible).expect("select visible");
+        let tasks_before = rt.tasks.len();
+        rt.action(Action::InspectSelection).expect("inspect");
+        assert_eq!(
+            tasks_before,
+            rt.tasks.len(),
+            "inspecting the selection issues no network request"
+        );
+        let doc = rt.active_document_mut().expect("doc open");
+        assert_eq!(doc.title, "Selection");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("2 selected"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn inspect_selection_reports_explicitly_when_empty() {
+        let mut rt = runtime();
+        rt.action(Action::InspectSelection).expect("inspect");
+        let doc = rt.active_document_mut().expect("doc open");
+        let text = doc.lines.iter().cloned().collect::<Vec<_>>().join("\n");
+        assert!(text.contains("(nothing selected)"));
         rt.shutdown().await;
     }
     #[tokio::test]

@@ -144,7 +144,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         _ => {
             let now = Utc::now();
             let rows = state.rows.iter().map(|o| {
-                let cells = columns
+                let mut cells = columns
                     .iter()
                     .map(|column| {
                         crate::safety::text(&if column == "AGE" {
@@ -155,6 +155,18 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                         .replace(['\n', '\t'], " ")
                     })
                     .collect::<Vec<_>>();
+                // M10.1: a distinct marker from the cursor's own `› `
+                // highlight_symbol below -- cursor focus and bulk
+                // multi-select membership are independent and must both
+                // stay visible at once, never collapsed into one glyph.
+                if let Some(first) = cells.first_mut() {
+                    let marker = if state.selection.contains(&o.uid) {
+                        "✓ "
+                    } else {
+                        "  "
+                    };
+                    first.insert_str(0, marker);
+                }
                 Row::new(cells).style(Style::default().fg(theme.severity(o.health.severity)))
             });
             let widths: Vec<_> = columns

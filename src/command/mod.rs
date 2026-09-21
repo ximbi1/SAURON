@@ -51,6 +51,9 @@ pub enum Action {
     ToggleWarnings,
     MutationDryRun,
     MutationConfirm,
+    ToggleSelect,
+    SelectVisible,
+    ClearSelection,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -336,6 +339,27 @@ pub fn registry() -> Vec<Binding> {
             "mutation",
             "Mutation preview: confirm (press twice if strong confirmation is required)",
             "y",
+        ),
+        (
+            Action::ToggleSelect,
+            "select_toggle",
+            "table",
+            "Bulk multi-select: toggle the row under the cursor",
+            "space",
+        ),
+        (
+            Action::SelectVisible,
+            "select_visible",
+            "table",
+            "Bulk multi-select: add every currently visible (filtered) row",
+            "V",
+        ),
+        (
+            Action::ClearSelection,
+            "select_clear",
+            "table",
+            "Bulk multi-select: clear the current selection",
+            "C",
         ),
     ];
     definitions

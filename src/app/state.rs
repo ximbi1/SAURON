@@ -1,4 +1,5 @@
 pub use super::document::Document;
+use super::selection::Selection;
 use crate::{
     command::{Action, Keymap},
     config::Settings,
@@ -61,6 +62,10 @@ pub struct State {
     pub store: Store,
     pub rows: Vec<SharedObject>,
     pub selected: Option<String>,
+    /// M10.1: the bulk multi-select set -- deliberately separate from
+    /// `selected` (cursor focus). See `super::selection`'s own doc
+    /// comment for why and how it is scoped/cleared.
+    pub selection: Selection,
     pub table: ratatui::widgets::TableState,
     pub filter: Expr,
     pub filter_text: String,
@@ -99,6 +104,7 @@ impl State {
             store: Store::new(settings.max_objects, settings.max_bytes),
             rows: vec![],
             selected: None,
+            selection: Selection::default(),
             table: Default::default(),
             filter: Expr::All,
             filter_text: String::new(),

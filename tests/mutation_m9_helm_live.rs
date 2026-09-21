@@ -35,7 +35,10 @@ async fn release_secret_uid(connection: &kube::Connection, name: &str) -> String
         .group_kind("", "Secret")
         .expect("Secret is a core resource");
     let api = resource.api(connection.client.clone(), Some("sauron-m9"));
-    let secret = api.get(name).await.expect("real Helm release Secret exists");
+    let secret = api
+        .get(name)
+        .await
+        .expect("real Helm release Secret exists");
     let object = Object::new(serde_json::to_value(secret).unwrap());
     object.uid
 }

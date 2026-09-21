@@ -328,7 +328,7 @@ authorization token that fans out.
 | Slice | Scope | Status |
 | --- | --- | --- |
 | M10.0 | M10 acceptance contract / architecture freeze (this document) | ACCEPTED |
-| M10.1 | Selection model / multi-select foundation | PLANNED — NOT STARTED |
+| M10.1 | Selection model / multi-select foundation | ACCEPTED |
 | M10.2 | Bulk read-only operations / selection UX | PLANNED — NOT STARTED |
 | M10.3 | Bulk guarded mutations | PLANNED — NOT STARTED |
 | M10.4 | Workspaces | PLANNED — NOT STARTED |
@@ -738,15 +738,20 @@ starting M10.1/M10.3 implementation** and are flagged as such.
    inspection (never assuming every existing single-target mutation
    belongs in bulk merely because its individual implementation already
    exists).
-8. **Selection scope across kind/namespace/context changes (M10.1).**
-   Reconnaissance did not find an existing precedent to reuse here (single
-   `selected` is simply cleared on any incompatible relist today) — M10.1
-   must make an explicit design choice (selection is fully scoped to the
-   view it was created in, and any kind/namespace/context change either
-   clears it or marks it wholly stale) and document it as a first-class
-   part of M10.1's own contract before implementation, since this is the
-   one piece of the selection model with no existing analog to extend.
-   Blocks M10.1 implementation start (not this document).
+8. **Selection scope across kind/namespace/context changes (M10.1) —
+   RESOLVED during M10.1 implementation.** Decision: `App::cancel_scope()`
+   is already the single place `state.selected` (single-select) is
+   cleared, and is already unconditionally called on every context
+   switch (`connect()`), resource-kind switch, and namespace switch
+   (both funnel through `watch_resource()` -> `cancel_scope()`). M10.1
+   extends that exact call site to also clear `state.selection`
+   (`src/app/mod.rs`, `cancel_scope()`) rather than giving `Selection`
+   its own copy of context/resource/namespace to compare against — the
+   selection is scoped to the view it was made in by construction (it
+   lives inside `State`, and the one function that tears down a view's
+   scope tears down the selection with it), with zero new state to keep
+   in sync. Proven by `context_or_resource_switch_clears_the_whole_
+   selection` (`src/app/mod.rs` test). No longer blocking.
 
 None of items 1-8 is a reason to hold back this planning document; items 1,
 2 (completion), 6, and 8 are real decisions/spikes that gate specific later
@@ -856,6 +861,49 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   this session per the user's own explicit preference (no further
   background/subagent delegation for the remainder of M10, to keep
   total token cost down even at the cost of more wall-clock time).
+- 2026-09-21: M10.1 (selection model / multi-select foundation)
+  implemented. New `app::selection` module: `Selection` (bounded, ordered
+  `Vec<SelectedTarget>`, cap `MAX_SELECTION = 500`), `SelectedTarget`
+  (`uid`/`namespace`/`name`), `SelectionError::BoundExceeded`,
+  `toggle`/`add`/`clear`/`contains`/`iter`/`status` (splits into
+  present-vs-stale against a fresh `rows` snapshot without ever mutating
+  the selection itself). Added `State.selection: Selection`, deliberately
+  separate from the existing `State.selected: Option<String>` cursor
+  field. Three new `Action`s (`ToggleSelect` "space", `SelectVisible`
+  "V", `ClearSelection` "C", all mode `table`, zero key conflicts —
+  `Keymap::compile`'s existing conflict-detection pass caught nothing).
+  UI: table rows now render a `✓ `/`  ` marker prefix on the first cell,
+  visually distinct from the cursor's own `› ` `highlight_symbol` --
+  cursor focus and selection membership are both visible simultaneously,
+  never collapsed into one glyph (`src/ui/mod.rs`). Architectural
+  question 8 (selection scope across context/resource/namespace changes)
+  resolved by extending the existing `cancel_scope()` call site (already
+  the single place `state.selected` is cleared, already called on every
+  context/resource-kind/namespace switch) to also clear `state.selection`
+  -- zero new scope-tracking state, the selection is scoped to its view
+  simply by living inside `State` and being torn down alongside it.
+  Evidence: 7 pure unit tests in `app::selection` (toggle add/remove by
+  identity, add is idempotent and never deselects, bound is refused
+  explicitly with the mutation left unchanged -- not partially applied,
+  status marks a deleted-and-replaced same-name target stale by its
+  ORIGINAL uid rather than silently rebinding to the new one, status
+  leaves the selection itself unmutated, clear empties regardless of
+  present/stale, iteration preserves insertion order); 10 app-level
+  tests (toggle marks/unmarks without moving the cursor; toggle without
+  a row selected errors rather than silently no-op; select_visible adds
+  every visible row and is idempotent on re-run -- does not re-toggle an
+  already-deselected-by-hand target off again; select_visible past the
+  bound keeps exactly what fit and reports the refusal in `state.status`,
+  never silent; clear empties it; a relist that drops a selected row's
+  UID leaves it as an explicit stale entry, never silently forgotten;
+  a context/resource switch via `cancel_scope()` clears the whole
+  selection; ordinary cursor Down/Up navigation is completely unaffected
+  by an active selection and vice versa). Full locked suite green (320
+  unit, up from 305 pre-M10), `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` clean. No bugs found; no
+  deviation from this document's own M10.1 contract. **Next: M10.2**
+  (bulk read-only operations / selection UX), continuing directly in
+  this session.
 
 ## Final acceptance checklist
 

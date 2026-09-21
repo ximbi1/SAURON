@@ -2,6 +2,7 @@ pub mod document;
 pub mod event;
 pub mod forwards;
 pub mod metrics;
+pub mod selection;
 pub mod session;
 pub mod state;
 pub mod terminal;
@@ -298,6 +299,12 @@ impl Runtime {
         self.state.epoch += 1;
         self.state.request += 1;
         self.state.selected = None;
+        // M10.1: the bulk multi-select set is scoped to the view it was
+        // made in -- a context/resource-kind/namespace switch (every one
+        // of which funnels through cancel_scope) clears it wholesale,
+        // exactly like the single-select `selected` field above, rather
+        // than letting it silently survive into a different scope.
+        self.state.selection.clear();
         self.state.autoselect = true;
         self.state.rows.clear();
         self.state.filter_unknown = 0;
@@ -1350,9 +1357,63 @@ impl Runtime {
             }
             MutationDryRun => self.mutation_dry_run()?,
             MutationConfirm => self.mutation_confirm()?,
+            ToggleSelect => self.toggle_select()?,
+            SelectVisible => self.select_visible(),
+            ClearSelection => self.state.selection.clear(),
         }
         self.state.dirty = true;
         Ok(())
+    }
+    /// M10.1: toggles the row under the cursor in the bulk multi-select
+    /// set. Deliberately separate from cursor movement (`Down`/`Up`/...)
+    /// -- pressing this never moves the cursor, and moving the cursor
+    /// never changes the selected set.
+    fn toggle_select(&mut self) -> Result<()> {
+        let object = self.state.selected_object().context("Select a row first")?;
+        let selected = self
+            .state
+            .selection
+            .toggle(&object)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        self.state.status = format!(
+            "{} {} ({} selected)",
+            if selected { "Selected" } else { "Deselected" },
+            object.name,
+            self.state.selection.len()
+        );
+        Ok(())
+    }
+    /// M10.1: adds every currently visible (already-filtered) row to the
+    /// selection -- reuses the existing bounded `rows`, never a fresh
+    /// unbounded scan. Idempotent per row (`Selection::add`, not
+    /// `toggle`): re-running this over a partially-selected view only
+    /// adds, never deselects. If the bound is hit partway through, the
+    /// rows already added stay selected and the refusal is reported
+    /// explicitly -- never silently stopping with no indication of how
+    /// many were actually added versus skipped.
+    fn select_visible(&mut self) {
+        let before = self.state.selection.len();
+        let total = self.state.rows.len();
+        let mut refused = false;
+        for object in &self.state.rows.clone() {
+            if self.state.selection.add(object).is_err() {
+                refused = true;
+                break;
+            }
+        }
+        let added = self.state.selection.len() - before;
+        self.state.status = if refused {
+            format!(
+                "Selected {added} more (bound {} reached; {} of {total} visible rows not added)",
+                selection::MAX_SELECTION,
+                total.saturating_sub(before + added)
+            )
+        } else {
+            format!(
+                "Selected {added} more visible rows ({} total)",
+                self.state.selection.len()
+            )
+        };
     }
     /// Session-local, UID-scoped watch history -- never Events or an audit
     /// log. Newest first, since the most recent transition is almost always
@@ -3190,6 +3251,151 @@ mod tests {
         let sort = rt.state.sort.clone();
         assert!(rt.command("sort name:wrong").is_err());
         assert_eq!(rt.state.sort, sort);
+        rt.shutdown().await;
+    }
+    fn pod_rows(uids: &[&str]) -> Vec<std::sync::Arc<crate::resources::Object>> {
+        uids.iter()
+            .map(|uid| {
+                std::sync::Arc::new(crate::resources::Object::new(serde_json::json!({
+                    "apiVersion":"v1","kind":"Pod",
+                    "metadata":{"namespace":"test","name":format!("pod-{uid}"),"uid":uid}
+                })))
+            })
+            .collect()
+    }
+    #[tokio::test]
+    async fn toggle_select_marks_and_unmarks_without_moving_cursor() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b"]);
+        rt.state.selected = Some("a".into());
+        rt.action(Action::ToggleSelect).expect("toggle on");
+        assert!(rt.state.selection.contains("a"));
+        assert_eq!(rt.state.selection.len(), 1);
+        assert_eq!(
+            rt.state.selected.as_deref(),
+            Some("a"),
+            "toggling selection must never move the cursor"
+        );
+        rt.action(Action::ToggleSelect).expect("toggle off");
+        assert!(!rt.state.selection.contains("a"));
+        assert!(rt.state.selection.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn toggle_select_without_a_row_errors_and_selects_nothing() {
+        let mut rt = runtime();
+        assert!(
+            rt.action(Action::ToggleSelect).is_err(),
+            "with nothing selected, toggle-select must error, never silently no-op"
+        );
+        assert!(rt.state.selection.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn select_visible_adds_every_row_once_idempotently() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b", "c"]);
+        rt.action(Action::SelectVisible).expect("select visible");
+        assert_eq!(rt.state.selection.len(), 3);
+        for uid in ["a", "b", "c"] {
+            assert!(rt.state.selection.contains(uid));
+        }
+        // Deselect one, then re-run select_visible: must not re-toggle it off,
+        // only add what's missing (add is idempotent, unlike toggle).
+        rt.state.selected = Some("a".into());
+        rt.action(Action::ToggleSelect).expect("toggle a off");
+        assert!(!rt.state.selection.contains("a"));
+        rt.action(Action::SelectVisible)
+            .expect("select visible again");
+        assert_eq!(
+            rt.state.selection.len(),
+            3,
+            "re-running select_visible must not deselect b/c"
+        );
+        assert!(rt.state.selection.contains("a"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn select_visible_refuses_explicitly_past_the_bound_keeping_what_fit() {
+        let mut rt = runtime();
+        let uids: Vec<String> = (0..crate::app::selection::MAX_SELECTION + 5)
+            .map(|i| i.to_string())
+            .collect();
+        let uid_refs: Vec<&str> = uids.iter().map(String::as_str).collect();
+        rt.state.rows = pod_rows(&uid_refs);
+        rt.action(Action::SelectVisible).expect("select visible");
+        assert_eq!(
+            rt.state.selection.len(),
+            crate::app::selection::MAX_SELECTION,
+            "refusal past the bound must keep exactly what fit, never silently drop it"
+        );
+        assert!(
+            rt.state.status.contains("bound"),
+            "the refusal must be reported to the user, not silent: {}",
+            rt.state.status
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn clear_selection_empties_it() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b"]);
+        rt.action(Action::SelectVisible).expect("select visible");
+        assert_eq!(rt.state.selection.len(), 2);
+        rt.action(Action::ClearSelection).expect("clear");
+        assert!(rt.state.selection.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn selection_never_silently_drops_a_stale_target_on_relist() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b"]);
+        rt.action(Action::SelectVisible).expect("select visible");
+        // Relist without "a" -- simulates deletion. Selection retains it
+        // as an explicit stale entry (never silently forgotten, never
+        // silently rebound to a same-name different-UID row).
+        rt.state.rows = pod_rows(&["b"]);
+        let status = rt.state.selection.status(&rt.state.rows);
+        assert_eq!(status.present.len(), 1);
+        assert_eq!(status.stale.len(), 1);
+        assert_eq!(status.stale[0].uid, "a");
+        assert_eq!(
+            rt.state.selection.len(),
+            2,
+            "relisting must never mutate the selection itself"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn context_or_resource_switch_clears_the_whole_selection() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b"]);
+        rt.action(Action::SelectVisible).expect("select visible");
+        assert_eq!(rt.state.selection.len(), 2);
+        rt.cancel_scope();
+        assert!(
+            rt.state.selection.is_empty(),
+            "a context/resource/namespace switch (cancel_scope) must clear the whole selection, \
+             matching the existing single-select clearing invariant"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn selection_does_not_regress_ordinary_single_row_navigation() {
+        let mut rt = runtime();
+        rt.state.rows = pod_rows(&["a", "b", "c"]);
+        rt.state.selected = Some("a".into());
+        rt.action(Action::ToggleSelect).expect("toggle a");
+        rt.action(Action::Down).expect("move down");
+        assert_eq!(
+            rt.state.selected.as_deref(),
+            Some("b"),
+            "cursor navigation is unaffected by the multi-select set"
+        );
+        assert!(
+            rt.state.selection.contains("a"),
+            "moving the cursor must not change the selected set"
+        );
         rt.shutdown().await;
     }
     #[tokio::test]

@@ -1,0 +1,913 @@
+# M10 — Bulk/Workspaces/Bookmarks/Themes/Keymaps: acceptance ledger
+
+Status: **PLANNED — NOT STARTED**. This document is M10.0: the scope-freeze
+contract written before any M10 implementation code, exactly like
+`docs/M8B_ACCEPTANCE.md` was written before M8B and `docs/M9_ACCEPTANCE.md`
+before M9. It records what reconnaissance found in the existing codebase,
+which primitives every later slice must reuse rather than fork, and the
+proposed slice ledger. Nothing in this file authorizes touching code,
+cluster, or CI — only the slices marked ACCEPTED in the Journal, once this
+contract exists, authorize implementation work.
+
+`docs/M9B_A_ACCEPTANCE.md` and `docs/M9B_B_ACCEPTANCE.md` are separate,
+PLANNED — NOT STARTED ledgers for deferred Helm mutation work; M10 does not
+touch, schedule, or depend on them.
+
+## Purpose
+
+M1-M9 built a Kubernetes/operator console: observation (watch/list) ->
+evidence (M5 health, M6 relationships) -> guarded single-target action
+(M7/M8/M8B mutation model, extended to Flux/Argo/Helm in M9) -> journal ->
+verification. Every milestone through M9 operates on exactly one object at
+a time. M10 is the first milestone whose deliverable is explicitly
+*plural*: select many identifiable objects, act on them as individually
+tracked operations, and give the user durable ways to organize/return to
+cluster views (workspaces), specific objects (bookmarks), and their own
+terminal ergonomics (keymaps, themes). Per `docs/ROADMAP.md`'s own M10
+line, the deliverable contract is: "Invalid reload retains policy/keymap;
+per-context scope; effective help; mark identity."
+
+M10 is explicitly **not** "a new bulk-mutation engine" and **not** "a
+second config system." Every slice composes what M1-M9 already built. If a
+candidate M10 feature cannot be expressed as composition of the existing
+selection/mutation-gateway/config/command-registry/theme primitives, this
+document narrows or defers that feature rather than forking the
+architecture to fit it (see Explicit design rule, below — the same
+discipline M9's own kickoff prompt established).
+
+## Relationship to existing milestones
+
+M1-M9 are ACCEPTED (tag `m9-accepted`, `f2a18d0`) and M10 must not regress
+any of them: existing single-object selection, mutation workflows,
+command grammar, config resolution, and rendering must keep working
+identically when M10 features are not in use. M9B-A/M9B-B remain PLANNED
+— NOT STARTED and out of scope for M10 entirely — not read, not extended,
+not referenced by M10 code.
+
+Concretely, M10 reuses:
+
+- **Selection/identity** — `app::state::State.selected: Option<String>` is
+  already a **UID**, not a row index or a name (`src/app/state.rs:63`,
+  with the module comment at line 39 explicitly documenting "same-name-
+  different-UID must not reselect"). `State::rebuild()`/relist logic
+  already clears `selected` when the UID it names is no longer present
+  (`src/app/state.rs` around line 270-283) rather than silently rebinding
+  to a same-name replacement. `HistoryEntry.selected` (line 51) already
+  carries this same UID convention across back/forward navigation, and is
+  explicitly documented as "semantic navigation intent... never a state
+  snapshot." M10.1's multi-select is a **superset** of this exact
+  invariant (a `BTreeSet`/ordered collection of the same identity kind
+  the single-selection model already uses), not a parallel selection
+  concept.
+- **Full target identity for mutation** — `app::session::Scope` (context,
+  cluster, resource id, namespace, name, uid, epoch, request —
+  `src/app/session.rs:27`) is the identity unit every mutation, log
+  session, exec session, and port-forward already keys off. Multi-select
+  needs this full `Scope`-shaped identity (not just a UID string) because
+  a bulk operation must survive being reasoned about outside the single
+  current table view's implicit context/namespace/resource. M10.1 defines
+  its selected-target type in terms of (or literally reusing) `Scope`.
+- **Mutation gateway** — `mutation::{MutationIntent, MutationTarget,
+  MutationEffect, MutationRisk, PolicyDecision, PolicyReason,
+  PolicyEvaluation, ConfirmationRequirement, Confirmation,
+  MutationOutcome, Verification}` (`src/mutation.rs`), the single policy
+  engine `mutation::policy::evaluate` (`src/mutation/policy.rs`), the
+  shared `mutation::workflow::{Built, Workflow}` shell every action
+  builder returns (`src/mutation/workflow.rs`), and the single execution
+  gateway `kube::mutation::{preflight, commit, verify}`
+  (`src/kube/mutation.rs:256,400,655`). M10.3 (bulk guarded mutations)
+  must build *N* `Workflow`s — one fully independent
+  intent/evaluation/preview/confirm/commit/verify per target — and drive
+  them through this exact gateway in a loop/bounded-concurrency
+  orchestrator. It must not invent a second policy engine, a second
+  `Confirmation`/TOCTOU mechanism, or a second executor. `Confirmation`
+  already binds to `(request_id, scope, effect, payload_sha256)`
+  (`src/mutation.rs:129-144`) — a bulk confirmation is naturally modeled
+  as one `Confirmation` per target sharing the same bulk `request_id`
+  prefix/correlation, not one confirmation authorizing many scopes.
+- **Journal** — `mutation::journal::{Journal, Phase, Record}`
+  (`src/mutation/journal.rs`), append-only, redacted, schema-versioned.
+  M10.3 adds no new file/format; a bulk run is a sequence of ordinary
+  per-target `Record`s correlated by `request_id`, exactly like Drain's
+  own `DrainStarted`/`DrainStep`/`DrainFinished` phases already bracket a
+  sequence of ordinary per-Pod eviction records without replacing them
+  (`src/mutation/journal.rs:33-38`) — the exact precedent M10.3's bulk
+  bracket phases should follow.
+- **Command registry** — `command::{Command, Action, Keymap, parse,
+  command_names}` (`src/command/mod.rs`) is the single command
+  grammar/dispatch table. `Action` is a static registry of `(action,
+  name, mode, description, default keys)` tuples (`registry()`, consumed
+  by `Keymap::compile` at `src/command/mod.rs:357`); `Keymap::compile`
+  already merges user TOML overrides over these defaults, validates every
+  key with `parse_key`, and already performs **deterministic per-mode
+  conflict detection** (`src/command/mod.rs:371-383`, tested at
+  `effective_bindings_detect_conflicts`, line ~1008). `Keymap::primary_key`
+  (line 402) already exists specifically so UI help text reflects the
+  *effective* (possibly user-overridden) binding, not a hardcoded
+  default. M10.6 (configurable keymaps) is therefore almost entirely
+  **already built** — reconnaissance found no separate keymap engine to
+  design; the remaining gap is a `:keys`/help-overlay UI slice showing
+  the resolved table, more thorough conflict/malformed-config
+  diagnostics surfaced to the user (currently `compile()` returns an
+  `anyhow::Error` on conflict, which must fail configuration load safely
+  rather than crash startup), and confirming per-context/per-cluster
+  scoping composes with `Config::resolve` (see below).
+- **Config persistence** — `src/config.rs`'s `Config`/`Settings` is
+  already the one coherent, versioned-by-convention config model:
+  `Settings` (`#[serde(deny_unknown_fields)]`, so unknown keys are a load
+  error, not silently ignored) holds `keys: BTreeMap<String,
+  BTreeMap<String, Vec<String>>>` (keymap overrides), `theme: String`,
+  `favorite_namespaces`, `aliases`, and more; `Config` layers `base` under
+  per-`clusters`/per-`contexts` TOML tables merged by `Config::resolve`
+  (`src/config.rs` — cluster layer then context layer, matching
+  ROADMAP's own M10 line "per-context scope"). `Config::load` already
+  treats "file absent" as default-safe and any malformed TOML/unknown
+  field as an explicit load error with the raw source deliberately
+  omitted from the message (credentials-safety precedent). M10.4
+  (workspaces), M10.5 (bookmarks), M10.7 (themes), and M10.8 (integration/
+  migration) must all extend `Settings`/`Config` — new fields, not a
+  second file, second format, or second load path. This is the single
+  biggest reuse finding of this reconnaissance: **there is already one
+  config file, one resolution layering (base -> cluster -> context), one
+  fail-safe-on-malformed policy, and one credentials-safety convention**,
+  and M10 must extend it, never duplicate it.
+- **UI/theme rendering** — `ui::Theme` (`src/ui/mod.rs:17`) is a struct of
+  named `Color` fields (`foreground/background/accent/good/warning/
+  critical/muted`) with three built-in constructors and a `severity(self,
+  Severity) -> Color` mapping method (`src/ui/mod.rs:58-64`) that is
+  **already** the closest thing to a semantic-role system in the
+  codebase: callers ask for "the color for this `Severity`," not an
+  arbitrary RGB value, everywhere health/status color is rendered
+  (`src/ui/mod.rs:158`). There is no `ThemeRole` enum yet and no
+  monochrome/no-color fallback — severities are currently distinguished
+  by color alone in table rows (`Row::new(cells).style(Style::default()
+  .fg(theme.severity(...)))`, line 158) with no accompanying glyph/text
+  marker. M10.7 must add that non-color channel (this is a concrete,
+  evidence-based non-goal-turned-requirement — see below) and should
+  generalize `severity()`'s existing pattern into a small closed
+  `ThemeRole` enum (`Normal/Muted/Selected/Warning/Critical/Unknown`,
+  matching this task's own suggested shape) rather than adding new ad hoc
+  `Style::default().fg(...)` call sites throughout the renderer.
+- **Test harnesses** — `scripts/accept-m*.py` (regression scripts, one per
+  milestone, run unmodified for M10.9's full regression), `scripts/soak-
+  m*.py` (soak harness precedent for M10.9), `scripts/test-cluster.sh`
+  (Docker/API loopback identity guard backing `mutation_test_cluster_
+  verified`, `kind-sauron-test`) and `scripts/test-cluster-m9.sh` /
+  `bootstrap-test-cluster-m9.sh` (the `sauron-m9` dedicated GitOps
+  cluster). M10 live/mutation testing reuses these guard scripts
+  unmodified — `kind-sauron-test` for M10.1-M10.3/M10.9 general bulk-
+  mutation proof, `sauron-m9` only if a bulk test specifically needs
+  Flux/Argo/Helm targets (unlikely; M10.3's matrix is expressed primarily
+  in terms of ordinary namespaced resources already proven safe in
+  `kind-sauron-test`).
+
+## Explicit design rule (mirroring M9's own kickoff framing)
+
+For every M10 feature, ask: does this reuse the existing selection model /
+mutation gateway / config model / command registry / theme abstraction, or
+does it fork a parallel one? If a feature only seems to require a fork,
+this document must say so explicitly (see Open architectural questions)
+rather than silently building the fork. M10 must not become "a TUI with a
+bolted-on second settings system," "a bulk button that skips per-target
+policy," or "a keymap engine that bypasses `Keymap::compile`."
+
+## Invariants (SAUR-ON's own established vocabulary)
+
+- **UNKNOWN != ZERO != HEALTHY** — a bulk aggregate with unverified/
+  unknown-outcome members must never render as if it succeeded, and must
+  never render as "0 affected" when the truth is "verification could not
+  be attempted." `MutationOutcome::OutcomeUnknown` and
+  `Verification::Unknown` already encode this per-target; bulk aggregation
+  must preserve, never collapse, that distinction.
+- **UID != NAME** — bulk selection identity is UID-based (composed with
+  namespace/context/GVK), exactly like single selection already is
+  (`src/app/state.rs:39`); no bulk feature may resolve or re-target by
+  name alone.
+- **RELATIONSHIP != CAUSE** — bookmarks/workspaces observing that two
+  objects are related (owner refs, label selectors) never implies one
+  caused the other's state; M10 does not add a new relationship-inference
+  engine (that's M6's, reused as-is if ever touched).
+- **COMMIT != OBSERVED EFFECT** — a bulk target's `MutationOutcome::
+  Committed` is never itself proof of the desired end state; each target
+  still gets its own independent `Verification`, exactly like single-
+  target mutations already require.
+- **REQUEST ACCEPTED != DESIRED EFFECT OBSERVED** — applies per-target in
+  bulk exactly as it does today for a single mutation; a bulk operation's
+  aggregate "N committed" is a request-accepted count, never conflated
+  with "N verified converged."
+- **LOOKS CORRECT != PROVEN CORRECT** — bulk preview rendering (a table of
+  N targets and their proposed changes) is a rendering of intent, not
+  proof of anything; only per-target `commit`/`verify` results are proof,
+  and only for the targets actually executed.
+- No second policy engine, mutation gateway, confirmation system, journal,
+  or verification dispatcher — restated as a hard constraint on M10.3
+  specifically, since bulk mutation is the one slice most likely to be
+  tempted to build a parallel fast path.
+- No hidden automatic mutation retries — a bulk run that hits a transient
+  failure on target 7 of 20 does not retry target 7 automatically; it
+  records the failure and continues (or stops, per the cancellation model
+  M10.3 defines) to target 8. Retrying is always a distinct, explicit,
+  user-initiated new intent.
+- No name-prefix identity heuristics — bulk "select all matching prefix
+  X" is explicitly out of scope (see non-goals); selection is always by
+  exact identity (filter/search narrows the *visible* candidate set, but
+  the resulting selection is still a bounded, explicit set of UIDs, never
+  a live pattern re-evaluated at execution time).
+- No context-name mutation authorization — `PolicyContext.
+  cluster_verified_for_mutation` (`src/mutation/policy.rs:20`) remains the
+  only source of mutation authorization; M10 workspaces/bookmarks must
+  never persist or imply this flag (see M10.4/M10.5 contracts and the
+  Safety boundary below).
+- No runtime shell-out to kubectl/helm/flux/argocd — unchanged from every
+  prior milestone; M10 adds no CLI subprocess anywhere, including
+  workspace/keymap/theme file I/O (pure Rust file read/write only).
+- Production remains READ-ONLY, always. Never push/publish without
+  explicit authorization.
+
+## Safety boundary
+
+Production is read-only, always, for every M10 slice — this does not
+change relative to M7/M8/M8B/M9. All mutation/live-write testing (M10.1's
+selection-stability proof under a real relist, M10.3's bulk guarded
+mutations, M10.9's combined acceptance) uses only the already-established,
+externally-verified disposable kind test clusters: `kind-sauron-test`
+(general mutation proof, via `scripts/test-cluster.sh`) and `sauron-m9`
+(only if a bulk test genuinely needs a Flux/Argo/Helm target, via
+`scripts/test-cluster-m9.sh`). Mutation safety is never inferred from
+context name, `readonly` flag alone, namespace, "looks like localhost," or
+a familiar cluster name — only `mutation_test_cluster_verified`, set only
+by the CLI flag backed by the external Docker/API loopback proof already
+implemented in `scripts/test-cluster.sh`, ever authorizes a live mutation
+in tests. M10 must not weaken, bypass, or duplicate these guard scripts.
+
+Workspaces/bookmarks (M10.4/M10.5) introduce a new, M10-specific safety
+requirement beyond "don't mutate production": **persisted state must never
+be able to accidentally restore mutation authorization**. Concretely nothing
+persisted by M10 may include `mutation_test_cluster_verified`, an active
+`Confirmation`, an in-flight `Workflow`, a stale UID treated as a live
+target, or any credential/token/kubeconfig material. See M10.4's own
+contract and the corresponding entry in Architectural questions.
+
+## Explicit non-goals for M10
+
+Based on what reconnaissance actually found (not a generic list):
+
+- **No unbounded/global selection.** "Select all" always means "select
+  all *currently visible* rows in the bounded, already-filtered table,"
+  never a fresh unbounded cluster-wide scan. `State.store`/`Store::new`
+  already bounds `max_objects`/`max_bytes` (`src/config.rs` defaults:
+  20,000 objects / 128MiB) — M10.2's bulk selection reuses that existing
+  bound, it does not introduce a second one, and never silently exceeds
+  it by paginating beyond what the table already loaded.
+- **No cross-resource-kind bulk mutation in one operation.** Given
+  `MutationTarget.resource: Resource` is per-target and action builders
+  (`scale`/`restart`/`delete`/...) are already kind-gated (`SCALE_KINDS`/
+  `RESTART_KINDS`/`DELETE_KINDS` in `src/mutation/workflow.rs:16-27`), a
+  single bulk action operates over a selection whose members are the
+  *same* action-eligible kind; a selection mixing eligible/ineligible
+  kinds surfaces those as explicit per-target `Unsupported` entries
+  (mirroring `unsupported()` at `src/mutation/workflow.rs:76`), never a
+  silent skip and never a forced narrowing the user didn't ask for.
+- **No new relationship/health/timeline engine.** Bookmarks/workspaces
+  reference objects; they do not compute or cache relationship/health
+  facts — those are re-derived live from M5/M6 exactly as they are today
+  when a bookmark is opened.
+- **No "GitOps-aware bulk" special-casing.** M9's Flux/Argo/Helm guarded
+  actions are explicitly excluded from M10.3's first bulk-eligible set
+  (see M10.3 contract) — bulk starts with the plain-Kubernetes actions
+  M8/M8B already proved (scale/restart/delete/label/annotate/cordon/
+  uncordon/evict), and only extends to M9 actions in a later, explicitly
+  separate step if genuinely needed, per this document's own "small
+  slices, real evidence" discipline.
+- **No plugin/headless/scripted bulk execution** — belongs to M12,
+  exactly as M9's own non-goals already stated for GitOps.
+- **No arbitrary shell/CLI keymap actions** — keymaps bind to the
+  existing closed `Action` enum only; M10.6 does not add a way to bind a
+  key to an arbitrary shell command or external program.
+- **No theme marketplace/import-from-URL** — M10.7 ships a small,
+  hardcoded set of built-in themes (mirroring the existing `ember`/`mono`/
+  `midnight`-shaped constructors already in `ui::Theme`) plus a
+  documented, versioned, validated TOML shape for a user theme; no
+  network fetch of theme definitions.
+- **No workspace/bookmark sync across machines** — local file only,
+  exactly like `config.toml` today; no cloud sync, no multi-device merge.
+- **No bulk drain, no bulk force-delete.** Both are explicitly excluded
+  from M10.3's scope — a deliberate, user-confirmed safety/scope decision
+  (see Architectural question 7, RESOLVED), not an omission. Per-target
+  safety is not sufficient for either: bulk Drain in particular has
+  emergent, set-level cluster effects a generic per-target bulk contract
+  does not model (aggregate remaining scheduling capacity across the
+  targeted Nodes, aggregate PDB/disruption pressure differing from
+  evaluating each Node independently, execution-order sensitivity, the
+  safe decision for target N potentially changing after targets 1..N-1
+  complete, and materially different cancellation/partial-completion
+  consequences than a simple per-target bulk report). Both are recorded
+  as a dedicated future backlog item (see "Future backlog: dedicated
+  high-risk bulk operations" below), never silently included in M10.3's
+  bulk-safe set and never implemented as part of M10.
+
+## Core design principle for bulk mutations: BULK != BYPASS
+
+A bulk mutation is an explicit, bounded collection of individually
+identifiable, individually policy-evaluated, individually journaled,
+individually verified operations. Every target keeps its own exact
+GVK/namespace/name/UID/policy result/confirmation semantics/commit
+outcome/verification outcome/journal traceability. Partial success must
+remain visible — e.g. "17 selected, 14 committed+verified, 1 policy
+denied, 1 target replaced, 1 outcome unknown" — never collapsed to
+"SUCCESS." No target may be authorized merely because another target in
+the same bulk operation was authorized: each target gets its own
+`PolicyEvaluation` from the unmodified `policy::evaluate`, its own
+`Confirmation` (or refusal), its own `preflight`/`commit`/`verify` calls.
+A "confirm bulk operation" UI gesture is sugar for "confirm N individually
+evaluated operations whose evaluations the user has seen," never a single
+authorization token that fans out.
+
+## Proposed slice ledger
+
+| Slice | Scope | Status |
+| --- | --- | --- |
+| M10.0 | M10 acceptance contract / architecture freeze (this document) | ACCEPTED |
+| M10.1 | Selection model / multi-select foundation | PLANNED — NOT STARTED |
+| M10.2 | Bulk read-only operations / selection UX | PLANNED — NOT STARTED |
+| M10.3 | Bulk guarded mutations | PLANNED — NOT STARTED |
+| M10.4 | Workspaces | PLANNED — NOT STARTED |
+| M10.5 | Bookmarks / saved navigation targets | PLANNED — NOT STARTED |
+| M10.6 | Configurable keymaps | PLANNED — NOT STARTED |
+| M10.7 | Themes / appearance configuration | PLANNED — NOT STARTED |
+| M10.8 | Cross-feature UX integration / persistence / migration | PLANNED — NOT STARTED |
+| M10.9 | Combined acceptance / full regression / soak | PLANNED — NOT STARTED |
+
+This mirrors the task's own suggested shape unchanged: reconnaissance did
+not find a reason to split or reorder it further. M10.1 must precede
+M10.2/M10.3 (selection is their shared foundation); M10.6/M10.7 are
+independent of M10.1-M10.5 and could in principle be reordered earlier,
+but are kept last-but-one because M10.8 (the config-integration slice)
+benefits from all of M10.4/M10.5/M10.6/M10.7's config shapes existing
+first, so the migration/versioning slice is designed once against the
+real final shape rather than speculatively.
+
+## Per-slice contracts
+
+### M10.1 — Selection model / multi-select foundation
+
+**Purpose.** Extend `State.selected: Option<String>` to a bounded ordered
+multi-select collection without breaking single-selection semantics.
+
+**Scope.** A new selection type — e.g. `Selection` wrapping an ordered
+`IndexSet<TargetId>` (or `BTreeSet` if insertion order is not needed) —
+where `TargetId` carries at minimum `{context, namespace, resource
+(GVK-equivalent id, matching `Scope.resource`'s existing `"v1/pods"`-style
+string), name, uid}`, i.e. the same identity fields `Scope` already
+carries minus session-local `epoch`/`request`. Cursor focus (today's
+`table.selected()` ratatui cursor row) stays a **distinct** concept from
+the selected set — a user can move the cursor without changing selection,
+and toggle-select the row under the cursor explicitly (mirroring how `vim`
+visual-block / file-manager multi-select UIs keep cursor and mark-set
+separate).
+
+**Architecture/invariants.**
+- Selection membership test is by full identity tuple, not UID alone,
+  because two different namespaces/contexts could theoretically share a
+  UID string only in adversarial/test data — namespace+context+resource
+  scoping the same way `Scope`/`Confirmation::authorizes` already do
+  removes any ambiguity.
+- A relist/reorder/filter change must never silently retarget selection:
+  if a selected UID is no longer present in `rows`, it becomes explicitly
+  "stale/missing" in the selection (rendered distinctly), never silently
+  dropped without indication and never rebound to a same-name new-UID
+  replacement — this generalizes the existing single-`selected` clearing
+  logic in `State::rebuild()` (`src/app/state.rs` ~line 270-283) to a set,
+  but changes its user-facing behavior from silent-clear to
+  explicit-stale-marker, since silently shrinking a 20-item bulk selection
+  with no visible trace is a worse UX/safety trade for bulk than for
+  single-select.
+- Kind/namespace/context change (e.g. user runs `:namespace other` or
+  `:context other` while a selection is active) has explicit,
+  documented semantics — the default is "selection is scoped to the
+  view it was made in; changing that view's kind/namespace/context clears
+  or marks-stale the whole selection," not a persisted cross-view
+  selection (this needs an explicit decision — see Architectural
+  questions).
+- Bounded selection count (a concrete cap, e.g. matching or below
+  `max_objects`, with a much smaller practical UI-sane bound — proposed
+  500, refined during implementation) — exceeding it is an explicit
+  refusal with a stated count, never silent truncation.
+- UI distinguishes cursor focus (row highlight) from selected set (a
+  separate marker glyph/column), and both remain visible simultaneously.
+
+**Tests.** Unit: identity-based membership; stale-on-relist marking (not
+silent clear, not silent rebind); bounded-count refusal; toggle/select-
+visible/clear are pure functions over `Selection` + `rows`; selection
+across a kind/namespace/context change matches the documented policy
+exactly. App/input tests: keybinding to toggle-select current row,
+select-visible, clear, does not regress ordinary single-row navigation.
+
+### M10.2 — Bulk read-only operations / selection UX
+
+**Purpose.** Make the M10.1 selection set actually usable before any
+mutation exists: select/deselect current, select all visible, clear,
+bounded invert, inspect selected targets (a read-only detail list), and a
+bounded summary line ("14 selected, 3 stale, resource: Pod, namespace:
+sauron-m7").
+
+**Scope/non-goals.** No global unbounded cluster scan (reuses M10.1's
+bound). Every aggregated view states target/completed/partial-unknown
+counts and bounded/truncated state explicitly — this generalizes the same
+honesty M5/M6 already apply to partial RBAC/bounded traversal results.
+Invert is only offered if the result is still boundedly clear (i.e. invert
+within the currently visible/filtered set, never "everything in the
+cluster minus what's selected").
+
+**Tests.** Unit: summary aggregation counts are exact for a synthetic
+`rows`+`Selection`; invert is scoped to visible rows only. App/input:
+keybindings for each new action; command-palette entries via the existing
+`Action`/`command_names()` registry, not a parallel input path.
+
+### M10.3 — Bulk guarded mutations
+
+**Purpose.** The highest-risk slice: run the existing single-target
+mutation gateway (`policy::evaluate` -> `Workflow` -> `preflight` ->
+confirm -> `commit` -> `verify` -> journal) once per selected target,
+under one bulk-scoped UI flow, with a bulk-shaped preview and a bulk-shaped
+result report that never collapses per-target outcomes.
+
+**Scope.** Classify every existing mutation action explicitly:
+- **bulk-safe:** label, annotate (idempotent, low blast radius per
+  target).
+- **bulk-safe-with-stronger-confirmation:** scale, restart, set-image,
+  cordon/uncordon, delete, evict, trigger (each already carries its own
+  per-action risk in the existing model; bulk does not lower any
+  individual target's `MutationRisk`/`ConfirmationRequirement` — it adds
+  an *additional* bulk-level acknowledgement, e.g. "you are about to
+  attempt this on N targets," on top of, never instead of, each target's
+  own existing confirmation strength).
+- **excluded from M10.3 entirely (user-confirmed decision, not deferred-
+  by-default):** force delete, drain — both are already documented
+  composite/highest-risk exceptions (`src/mutation/drain.rs`,
+  `PolicyReason::ForceSemantics`); running many of either concurrently
+  multiplies worst-case blast radius in a way the generic per-target
+  bulk contract does not model. This is a resolved architectural
+  decision (Architectural question 7), not an open one — see the non-
+  goals entry above and the "Future backlog: dedicated high-risk bulk
+  operations" section for what a later, separate contract for these
+  would need to cover.
+- **deferred:** any M9 Flux/Argo/Helm guarded action (see non-goals).
+
+**Execution model (must be resolved and documented here as slices land,
+not left implicit):** sequential vs. bounded concurrency (recommendation:
+sequential by default, matching every prior milestone's "no surprising
+parallel writes" posture, with bounded concurrency only if a later slice
+proves it's needed and safe); cancellation semantics stop **future**
+unstarted targets only, never imply or attempt reversal of already-
+committed targets (mirrors `Verification`'s own "commit is commit, never
+downgraded" rule); ordering is deterministic (selection order); failure
+handling continues to the next target by default (no fail-fast that
+silently abandons the rest without a report) unless the user explicitly
+cancels; a structured `BulkResult` type reuses `MutationOutcome`/
+`Verification` per target rather than inventing new success/failure
+vocabulary.
+
+**Preview.** A bounded, deterministic table of every target and its
+proposed change — explicit truncation past a stated bound (e.g. render
+first 50, state "and 12 more not shown, all still included in execution"),
+never hiding risk behind "...and N more" with no count or acknowledgement
+that those targets are still part of the operation.
+
+**Tests.** See the dedicated Bulk mutation test matrix section below —
+individual target records must be inspected in every test, not just the
+final aggregate count.
+
+### M10.4 — Workspaces
+
+**Purpose.** Persist/restore a navigation view: cluster/context identity,
+namespace/scope, resource kind, filters/search, view mode, optional
+bookmarks/UI prefs.
+
+**Scope/invariants.** Built from the existing `HistoryEntry`-shaped
+navigation-intent model (`src/app/state.rs:33-52`) — a workspace is
+essentially a named, persisted `HistoryEntry` (minus `selected`, which is
+UID-scoped to a specific already-loaded incarnation and must not be
+treated as durable across a fresh load — reopening a workspace does not
+restore selection, only the view; M10.1 selection is session-local for
+now unless a later slice explicitly proves durable bulk-selection restore
+is safe). Workspaces persist through the M10.8 config model (extending
+`Config`/`Settings`, not a new file). **Must not** persist or restore:
+`mutation_test_cluster_verified`, any `Confirmation`, any active
+`Workflow`, any stale UID treated as authoritative, any credential/secret/
+kubeconfig material. Versioned (a schema version field, consistent with
+`journal::SCHEMA_VERSION`'s existing precedent). Malformed/old workspace
+state fails gracefully — the app starts with defaults and a visible
+warning, never a crash, mirroring `Config::load`'s own existing "absent
+file is default-safe, malformed file is an explicit error" split.
+
+### M10.5 — Bookmarks / saved navigation targets
+
+**Purpose.** Persisted references to specific objects, as navigation aids.
+
+**Scope/invariants.** Persist GVK + namespace + name + last-observed UID.
+Reopening: same UID = exact resource; different UID = explicit
+replacement/stale, rendered as such, never silently treated as "the same
+object"; missing = explicit missing state. **Never** authorizes mutation
+by itself — opening a bookmark is exactly equivalent to navigating there
+manually and does not pre-fill or imply any `Confirmation`.
+
+### M10.6 — Configurable keymaps
+
+**Purpose.** User-facing surface over the keymap engine that (per
+reconnaissance) **already exists** in `command::Keymap`/`Action`/
+`registry()`/`Keymap::compile`.
+
+**Scope.** `:keys`/help-overlay UI showing the effective (resolved,
+possibly-overridden) table via `Keymap::help()`/`primary_key()` — both
+already implemented. Confirm/extend deterministic conflict detection
+(`Keymap::compile`'s existing per-mode conflict check) to surface a
+user-actionable diagnostic (which two actions, which mode, which key) on
+load failure rather than the current bare `anyhow::Error` string, and to
+fail safely (fall back to defaults with a warning, never crash startup)
+rather than aborting the process — this is a real gap found in
+reconnaissance, not speculative. Mode-awareness and one coherent
+resolution layer are already satisfied by `available()`/`Keymap::action()`
+— M10.6 does not add a second key-dispatch path.
+
+### M10.7 — Themes / appearance configuration
+
+**Purpose.** Centralize presentation, never semantics.
+
+**Scope.** Generalize `ui::Theme::severity()`'s existing pattern into a
+small closed `ThemeRole` enum (`Normal/Muted/Selected/Warning/Critical/
+Unknown`, matching `Severity`'s own existing variants plus `Selected`) so
+renderer call sites ask for a role, not an arbitrary `Style`. Add a
+non-color distinguishing channel (glyph/text prefix, e.g. a one-character
+status marker already partially implied by how the table renders health)
+so a monochrome/no-color terminal still distinguishes healthy/warning/
+error/unknown, selected/focused, mutation risk, and denied/pending/
+partial/stale — reconnaissance found today's table styling
+(`src/ui/mod.rs:158`) is color-only for severity, which is the concrete
+gap this slice closes. Current/default theme (`ember`) stays visually
+unchanged. Invalid theme config falls back to a built-in default with a
+visible warning, never a crash or a blank/invisible UI.
+
+### M10.8 — Cross-feature UX integration / persistence / migration
+
+**Purpose.** One coherent versioned config model, not four independent
+persistence mechanisms bolted onto `src/config.rs` separately.
+
+**Scope.** Extend `Config`/`Settings` (file location: unchanged,
+`config::directory()` + `config.toml`, already XDG-aware; format:
+unchanged TOML) with the M10.4/M10.5/M10.6/M10.7 fields, each under
+`deny_unknown_fields` exactly like `Settings` already is. Define: schema/
+versioning (a top-level version field distinguishing "no version present
+= today's pre-M10 shape" from "M10-versioned shape," so an M9-era
+`config.toml` continues to load with only the new fields defaulted, never
+a hard break); defaults (every new field has a safe default matching "no
+M10 feature in use" behavior); migration policy (forward-only, best-
+effort field-level defaulting — no destructive rewrite of a user's
+existing file without their action); invalid-config behavior (unchanged
+from today: malformed TOML or a genuinely unknown field is a load error
+with source omitted, not a silent partial load); atomic write strategy
+(write-to-temp-then-rename in the config directory, since M10 introduces
+the first *writes* to this file — today's `Config::load` is read-only;
+workspaces/bookmarks/keymap-save/theme-save are new write paths and must
+not corrupt the file on a crash mid-write); permission handling (config
+directory/file permissions checked/set conservatively, consistent with
+credentials-adjacent file handling elsewhere in the app). **Never** write
+kube credentials, raw Secret data, mutation confirmation material, decoded
+Helm values, or journal content into config — restated here as the single
+place all of M10.4/M10.5's "never persist X" rules are enforced by one
+shared serialization boundary, not four separate ad hoc checks.
+
+### M10.9 — Combined acceptance / full regression / soak
+
+**Purpose.** Close out M10 exactly like M8B.7/M9.7 closed out their
+milestones.
+
+**Scope.** Full M1-M9 regression via existing `accept-m*.py` scripts
+unmodified. Combined M10 acceptance run twice clean. Production zero-write
+guarantee reconfirmed across every new M10 action. Bulk TOCTOU/partial-
+failure/cancellation proven (per the test matrix below). Terminal
+restoration proven under a bulk-operation-in-progress interrupt. Config/
+workspace migration/invalid-config behavior proven with real malformed
+fixtures. Soak with RSS/fd/thread/reconnect/transient-error/state-growth
+observations (a bulk-selection-heavy session is a new soak dimension not
+exercised by M1-M9's soaks — bounded selection growth/shrink over a long
+session), "observed stability only" honesty, never a leak-freedom claim.
+Docs reconciled: `HANDBOOK.md`, `docs/RUNBOOK.md`, `README.md`, this file,
+`docs/ROADMAP.md` checkpoint line. M9B-A/M9B-B confirmed still PLANNED —
+NOT STARTED and untouched. Worktree clean. Local annotated tag
+`m10-accepted`, never pushed without explicit authorization.
+
+## Bulk mutation test matrix
+
+A bulk test that only checks the final aggregate count (e.g. "14 of 17
+succeeded") is **insufficient** — every test below must inspect individual
+target records (per-target `PolicyEvaluation`, `MutationOutcome`,
+`Verification`, and journal `Record`s), not just the count:
+
+1. All-succeed — every target's individual `Committed`+`Verified` proven,
+   not inferred from an aggregate.
+2. One policy-denied among N allowed — the denied target's exact
+   `PolicyReason`(s) recorded; the other N-1 unaffected and independently
+   evaluated.
+3. One target UID-replaced between preview and commit — TOCTOU rejection
+   (`PolicyReason::TargetReplaced`/`MutationOutcome::TargetReplaced`) for
+   that target only; others proceed normally.
+4. One target `NotFound` at commit time.
+5. One target `OutcomeUnknown` (simulated transport ambiguity) — never
+   silently upgraded to success or downgraded to failure in the bulk
+   aggregate.
+6. Cancellation midway — targets already committed stay committed and
+   verified as normal; targets not yet started are explicitly "not
+   attempted," never silently omitted from the report.
+7. Journal write failure *before* a given target's commit — that target's
+   mutation must fail closed (not committed), matching the existing
+   single-target pre-commit journal-failure contract.
+8. Journal write failure *after* a target's commit (if the existing model
+   permits this state) — must render as `CommittedButJournalIncomplete`
+   for that target specifically, never silently dropped from the bulk
+   report.
+9. No hidden retry anywhere in the sequence — assert retry count is
+   exactly zero for every outcome type, including transient-looking
+   failures.
+10. Selection changed after preview (user deselects/adds a target between
+    preview and confirm) — executed set must exactly match the
+    last-confirmed set, never the original preview set if it changed.
+11. Namespace/context changed after preview — the entire bulk operation
+    is invalidated (mirrors `Confirmation::authorizes`' existing scope-
+    sensitivity), not silently re-scoped.
+12. Mixed resource identities the action semantics reject (e.g. a
+    selection spanning Pod and Deployment for a Pod-only action) — each
+    ineligible target reports `Unsupported` individually; eligible
+    targets still proceed.
+13. Empty selection — the bulk action is refused up front with a clear
+    message, never silently a no-op success.
+14. Maximum bounded selection (the M10.1 cap) — exercised at exactly the
+    boundary and one over it (refused before it starts).
+
+## Architectural questions that MUST be resolved before implementation
+
+These are genuine ambiguities found during reconnaissance, not invented
+busywork. **None of them block writing this document; several block
+starting M10.1/M10.3 implementation** and are flagged as such.
+
+1. **Does bulk confirmation change M7's trust model?** M7/M8's
+   `Confirmation` binds to exactly one `(request_id, scope, effect,
+   payload_sha256)`. A bulk UI reasonably wants "confirm once for the
+   visible batch," but per this document's own BULK != BYPASS principle,
+   the actual authorization must still be N individual `Confirmation`s.
+   **Open question:** is "one user keypress produces N `Confirmation`s,
+   each independently bound to its own target" an acceptable UX, or does
+   the product want a distinct `BulkConfirmation` wrapper type (still
+   authorizing N independent commits, just a different struct shape for
+   UI convenience)? Blocks M10.3. Resolves by: a short design spike
+   showing both shapes against the existing `Workflow`/`Confirmation`
+   code before committing to one.
+2. **Can workspace persistence accidentally restore mutation
+   authorization?** Reconnaissance confirms `mutation_test_cluster_
+   verified` is process-lifetime CLI-flag-only today (`src/main.rs:33`,
+   never touches `src/config.rs`), so there is no existing code path by
+   which a workspace/bookmark could restore it — but M10.4/M10.5 are new
+   *write* paths into config, the first ones this codebase has had. Not
+   currently blocking (the invariant is enforceable by simply never
+   adding that field to the persisted shape), but M10.8's serialization
+   boundary must have an explicit test asserting no mutation-authority-
+   shaped field is ever reachable from `Config`'s `Serialize` impl once
+   one is added (`Settings`/`Config` are currently `Deserialize`-only;
+   M10.8 is the point at which they also become `Serialize`, which is a
+   new surface worth its own dedicated test). Blocks M10.8's completion,
+   not its start.
+3. **Does bulk execution require retry semantics that would violate no-
+   hidden-retry?** No — reconnaissance found no existing precedent for
+   automatic retry anywhere in the mutation gateway (M8B.4 explicitly
+   *disabled* kube-rs's transport-level auto-retry, per its own commit
+   message). M10.3's bulk orchestrator inherits that zero-retry posture
+   directly; this is not blocking, just restated as a hard constraint in
+   this document (see Invariants) so it isn't accidentally reintroduced
+   under "bulk convenience" pressure.
+4. **Does keymap architecture require bypassing the command registry?**
+   No — `Keymap::compile`/`Action`/`registry()` already provide
+   deterministic conflict detection and a single resolution layer; M10.6
+   is UI-and-diagnostics work on top of an already-adequate engine, not a
+   new architecture. Not blocking.
+5. **Would theme work make any existing semantic status color-only?**
+   Reconnaissance found this is **already true today** (table row styling
+   at `src/ui/mod.rs:158` uses `theme.severity()` color with no
+   accompanying non-color marker) — not a risk M10.7 introduces, but a
+   pre-existing gap M10.7 must fix as part of its own scope (see M10.7
+   contract). Not blocking M10 start, but is a concrete acceptance
+   criterion for M10.7/M10.9.
+6. **Can the existing config model safely migrate persisted state?**
+   Partially open: `Config::load` today is read-only and has no versioning
+   field at all (an M9-era `config.toml` and a hypothetical M1-era one are
+   structurally identical from the loader's point of view — new fields
+   just default via `#[serde(default)]`). M10.8 is the first slice that
+   needs real forward migration (old file + new fields). **Open
+   question:** does M10.8 need an explicit version field from day one, or
+   is `#[serde(default)]` field-level defaulting sufficient forever (i.e.
+   "versioning" is really just "every field has a safe default and
+   `deny_unknown_fields` catches genuine incompatibility")? Blocks M10.8
+   design specifically (not M10.1-M10.7). Resolves by: implementing
+   M10.4-M10.7's config field additions first, then checking whether any
+   of them actually need a discriminated schema version (e.g. a field
+   whose *meaning* changes, not just new fields) before deciding.
+7. **Bulk Drain / bulk force-delete safety — RESOLVED (2026-09-21, user
+   decision).** Running Drain (a composite cordon+sequential-eviction-
+   sweep workflow with its own PDB/emptyDir/unmanaged-Pod safety logic,
+   `src/mutation/drain.rs`) against multiple Nodes concurrently, or
+   force-deleting many Pods at once, multiplies worst-case blast radius
+   in a way M10.3's general per-target bulk-safe classification does not
+   adequately model. Per-target safety alone is not sufficient for
+   either operation. Bulk Drain specifically has emergent, set-level
+   cluster effects: draining several individually-valid Nodes may leave
+   insufficient remaining scheduling capacity; aggregate PDB/disruption
+   pressure differs from evaluating each Node independently; execution
+   order matters; the safe decision for target N may change after
+   targets 1..N-1 already completed; and cancellation/partial completion
+   has materially different consequences than a simple per-target bulk
+   report. **Decision: both are explicitly excluded from M10.3's scope
+   entirely** — not included with stronger confirmation, not silently
+   folded into the generic classification table. This is recorded as a
+   deliberate safety/scope decision, not an omission, and as a dedicated
+   future backlog item (see "Future backlog: dedicated high-risk bulk
+   operations" below) requiring its own safety contract if ever picked
+   up. Nothing in M10 implements any part of bulk Drain/bulk
+   force-delete. No longer blocking — M10.3 proceeds with the explicit
+   bulk-safe action set: label, annotate, scale, restart, set-image,
+   cordon, uncordon, delete, evict, trigger, plus any other action the
+   acceptance contract positively classifies as bulk-safe after
+   inspection (never assuming every existing single-target mutation
+   belongs in bulk merely because its individual implementation already
+   exists).
+8. **Selection scope across kind/namespace/context changes (M10.1).**
+   Reconnaissance did not find an existing precedent to reuse here (single
+   `selected` is simply cleared on any incompatible relist today) — M10.1
+   must make an explicit design choice (selection is fully scoped to the
+   view it was created in, and any kind/namespace/context change either
+   clears it or marks it wholly stale) and document it as a first-class
+   part of M10.1's own contract before implementation, since this is the
+   one piece of the selection model with no existing analog to extend.
+   Blocks M10.1 implementation start (not this document).
+
+None of items 1-8 is a reason to hold back this planning document; items 1,
+2 (completion), 6, and 8 are real decisions/spikes that gate specific later
+slices as noted. Item 7 was returned to the user for an explicit scope
+decision before any bulk-Drain/bulk-force-delete code could be written and
+is now RESOLVED (excluded from M10 entirely) — see item 7 above and the
+backlog entry immediately below.
+
+## Future backlog: dedicated high-risk bulk operations (NOT part of M10)
+
+Per Architectural question 7's resolution: bulk Drain and bulk force-delete
+are explicitly out of M10's scope. If ever picked up as a future milestone
+or slice, that work needs its own dedicated safety contract — mirroring how
+Drain itself earned its own M8B.5 write-up rather than being folded into a
+generic classification table — and must at minimum address:
+
+- Set-level remaining cluster capacity (not just per-target legality) before
+  proceeding with each additional Node.
+- Execution ordering, and whether it must always be sequential (no bounded
+  concurrency) given that draining Node N's safety can depend on the
+  post-drain state of Nodes 1..N-1.
+- Recalculation of safety before each Node, not just once at preview time —
+  the set of pods needing rescheduling changes after every completed drain.
+- Aggregate PDB/disruption-budget effects across the whole targeted set, not
+  merely each Node's own individual PDB evaluation in isolation.
+- Partial completion and cancellation semantics specific to a multi-Node
+  drain sequence (what state remains, what is safe to resume vs. must be
+  re-previewed from scratch).
+- Whether the engine must support "stop on risk change" — i.e. abort
+  remaining targets if a later target's safety picture has materially
+  worsened because of earlier targets' effects, not just abort on error.
+- A blast-radius preview that reflects the *aggregate* effect of the whole
+  targeted set, not N independent single-Node previews concatenated.
+
+Nothing in M10 implements any part of this. This section exists so the
+design considerations already identified during M10.0's own reconnaissance
+are not lost before a future milestone picks this up.
+
+## Bugs / limitations (placeholder)
+
+None yet — implementation has not started. This section is updated per
+slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
+
+## Journal
+
+- 2026-09-21: M10.0 (acceptance contract / architecture freeze) written.
+  Reconnaissance covered `docs/ROADMAP.md`, `HANDBOOK.md`,
+  `docs/RUNBOOK.md`, `README.md`, `docs/M9_ACCEPTANCE.md`/
+  `docs/M8B_ACCEPTANCE.md` (structure/tone mirrored), `src/command/mod.rs`,
+  `src/app/mod.rs`, `src/app/state.rs`, `src/app/session.rs`,
+  `src/app/document.rs`, `src/config.rs`, all of `src/mutation.rs` +
+  `src/mutation/{policy,workflow,journal,drain,view}.rs`,
+  `src/kube/mutation.rs`, `src/ui/mod.rs`, and the test harness scripts.
+  Key findings, all restated above with file/line evidence: (1) selection
+  is already UID-based with explicit stale/relist handling
+  (`app::state::State.selected`) — M10.1 extends this to a bounded ordered
+  set, it does not invent a new identity concept; (2) the full mutation
+  gateway (`mutation::*` + `kube::mutation::{preflight,commit,verify}` +
+  `mutation::journal`) is exactly reusable per-target for M10.3, with
+  Drain's own `DrainStarted/DrainStep/DrainFinished` journal-phase-
+  bracket pattern being the direct precedent for bulk's own bracket
+  phases; (3) `src/config.rs` is already one coherent, layered
+  (base/cluster/context), fail-safe-on-malformed config model that M10.4/
+  M10.5/M10.6/M10.7/M10.8 must extend, not fork — and it is currently
+  read-only (Deserialize only), so M10 is the first milestone to add
+  config *writes*, which is a real new surface, not a trivial extension;
+  (4) the keymap engine (`command::Keymap`/`Action`/`registry()`/
+  `Keymap::compile`) already implements deterministic per-mode conflict
+  detection and effective-binding introspection (`primary_key`, `help`) —
+  M10.6 is much smaller than the task's own suggested shape implied,
+  mostly a UI/diagnostics slice over an existing engine; (5) `ui::Theme`
+  already has a `severity()` role-mapping method but table rendering is
+  genuinely color-only today for severity (`src/ui/mod.rs:158`), a real,
+  evidence-backed gap M10.7 must close, not a hypothetical risk.
+  Slice ledger kept identical to this task's own suggested M10.1-M10.9
+  shape — reconnaissance found no architecturally-forced reason to split
+  or reorder it, only to note (per-slice, above) how much of M10.6 in
+  particular is already-built versus net-new. One genuine architectural
+  fork was found (bulk Drain / bulk force-delete safety, Open question 7)
+  and is deliberately **not** resolved unilaterally in this document —
+  recommendation given, decision left to the user. No other item in Open
+  architectural questions was judged significant enough to block writing
+  this document; each states what evidence/spike resolves it and which
+  slice it gates.
+- 2026-09-21: Architectural question 7 (bulk Drain / bulk force-delete
+  safety) RESOLVED by explicit user decision: both are excluded from
+  M10.3's scope entirely, not included with stronger confirmation, not
+  folded into the generic bulk-safe classification table. Rationale
+  (user-provided, recorded verbatim in Architectural question 7's own
+  entry above): per-target safety is not sufficient for either
+  operation — bulk Drain in particular has emergent set-level effects
+  (aggregate remaining scheduling capacity, aggregate PDB/disruption
+  pressure, execution-order sensitivity, per-target safety changing as
+  earlier targets complete, and materially different cancellation/
+  partial-completion semantics) that a generic per-target bulk contract
+  does not model. M10.3's initial bulk-safe action set is now final:
+  label, annotate, scale, restart, set-image, cordon, uncordon, delete,
+  evict, trigger. A "Future backlog: dedicated high-risk bulk
+  operations" section was added recording the specific design
+  considerations (set-level capacity, ordering, per-Node recalculation,
+  aggregate PDB effects, partial/cancellation semantics, stop-on-risk-
+  change behavior, aggregate blast-radius preview) a future dedicated
+  contract for bulk Drain/force-delete would need to cover — nothing in
+  M10 implements any part of it. With this resolved, M10.0 is complete
+  and no other item blocks starting implementation. **Next: M10.1
+  (selection model / multi-select foundation)**, proceeding directly in
+  this session per the user's own explicit preference (no further
+  background/subagent delegation for the remainder of M10, to keep
+  total token cost down even at the cost of more wall-clock time).
+
+## Final acceptance checklist
+
+- [ ] Every M10.1-M10.9 slice implemented and individually ACCEPTED in
+      this document's own Journal (or explicitly, evidence-backed
+      DEFERRED, mirroring M9.6's precedent — never silently dropped).
+- [ ] Every bulk mutation action goes through the unmodified M7/M8/M8B
+      gateway (`policy::evaluate` -> `Workflow` -> `preflight`/`commit`/
+      `verify`) — no bulk-only bypass path, no CLI shell-out, no second
+      policy engine.
+- [ ] BULK != BYPASS proven: every bulk test in the matrix above passes
+      with individual target records inspected, not just aggregate counts.
+- [ ] No target ever authorized merely because another target in the same
+      bulk operation was authorized (verified by test, not just by code
+      review).
+- [ ] No hidden automatic retry anywhere in the bulk path.
+- [ ] Selection model (M10.1) never silently retargets on relist/reorder/
+      filter/kind/namespace/context change; stale/missing selections are
+      explicit.
+- [ ] Config model (M10.8) is the single persisted config surface — no
+      second file/format for workspaces, bookmarks, keymaps, or themes.
+- [ ] No mutation-authorization-shaped state (verified-cluster flag,
+      confirmations, in-flight workflows, credentials) is ever persisted
+      by workspaces or bookmarks — proven by an explicit serialization
+      test, not just informal review.
+- [ ] Keymap help overlay reflects effective (resolved/overridden)
+      bindings, never hardcoded defaults; malformed keymap config fails
+      safely with an actionable diagnostic, never crashes startup.
+- [ ] Themes never make health/safety meaning color-only; monochrome/
+      no-color terminal still distinguishes every required state via
+      text/symbol/style. Default theme visually unchanged.
+- [ ] Invalid config/workspace/keymap/theme reload retains prior working
+      policy/keymap state rather than crashing or silently corrupting it
+      (the exact ROADMAP M10 deliverable line: "Invalid reload retains
+      policy/keymap").
+- [ ] Per-context config scope (cluster/context layering) works for every
+      new M10 setting category, matching the ROADMAP M10 deliverable line
+      "per-context scope."
+- [ ] Bookmark identity survives/detects UID replacement correctly,
+      matching the ROADMAP M10 deliverable line "mark identity."
+- [ ] Production sees zero writes and zero mutating dry-runs across every
+      M10 action, for the entire milestone.
+- [ ] 32x9 works. Terminal restoration works, including under a bulk
+      operation interrupted mid-run.
+- [ ] Full M1-M9 regression (`accept-m*.py`, unmodified) passes.
+- [ ] Combined M10 acceptance run twice clean.
+- [ ] Soak (M10.9) is acceptably stable under the "observed stability
+      only" honesty standard — no leak-freedom claims.
+- [ ] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
+      `README.md`, `docs/ROADMAP.md` checkpoint line.
+- [ ] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed
+      still PLANNED — NOT STARTED and untouched by any M10 change.
+- [ ] Worktree clean.
+- [ ] Local annotated tag `m10-accepted` created — never pushed without
+      explicit authorization.

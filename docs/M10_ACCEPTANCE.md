@@ -334,7 +334,7 @@ authorization token that fans out.
 | M10.4 | Workspaces | ACCEPTED |
 | M10.5 | Bookmarks / saved navigation targets | ACCEPTED |
 | M10.6 | Configurable keymaps | ACCEPTED |
-| M10.7 | Themes / appearance configuration | PLANNED — NOT STARTED |
+| M10.7 | Themes / appearance configuration | ACCEPTED |
 | M10.8 | Cross-feature UX integration / persistence / migration | PLANNED — NOT STARTED |
 | M10.9 | Combined acceptance / full regression / soak | PLANNED — NOT STARTED |
 
@@ -1216,6 +1216,78 @@ slice, exactly like M8B/M9's own "Bugs / limitations" sections were.
   this document's own established flake-classification precedent from
   M9's own regression runs). **Next: M10.7** (Themes), continuing
   directly in this session.
+- 2026-09-21: M10.7 (Themes / appearance configuration) implemented.
+  New `ui::ThemeRole` (`Normal`/`Muted`/`Selected`/`Warning`/`Critical`/
+  `Unknown`) and `Theme::role()` generalize `Theme::severity()`'s own
+  pre-existing private match into the one place any renderer should ask
+  for presentational color -- `Theme::severity()` now delegates to
+  `role(ThemeRole::from(severity))`, producing byte-identical colors to
+  before (`good`/`muted`/`warning`/`critical`), proven by
+  `theme_role_from_severity_preserves_the_exact_pre_m10_7_colors`, so
+  the ember theme's own look is unchanged exactly as required. `Normal`
+  is deliberately what `Severity::Healthy` maps to (a role is a
+  presentation concept, not a health concept); `Muted` and `Selected`
+  are the two genuinely new roles this milestone's own UI needed
+  (de-emphasized text; the cursor/multi-select marker).
+  New `severity_glyph()` closes the concrete gap reconnaissance
+  identified: table row severity was color-only
+  (`Style::default().fg(theme.severity(...))` with no accompanying
+  marker) -- reconnaissance also confirmed a "mono" theme already
+  exists where every `Color` is `Color::Reset` (zero color information
+  whatsoever), making this a real, not hypothetical, gap. Each row's
+  marker prefix now carries both the M10.1 selection glyph and a
+  distinct severity glyph (`' '`/`'!'`/`'✗'`/`'?'` for healthy/warning/
+  critical/unknown) side by side, so a monochrome terminal can still
+  tell them apart. Every OTHER place this document's own M10.7 contract
+  named (mutation risk, denied/pending/partial/stale) was checked
+  against `workflow_report`/`drain_report`/`bulk_report`/`bookmark`
+  status rendering and confirmed already text-word-based, not color-
+  only (`"DENIED"`, `"[stale]"`, `"REPLACED"`, `"[eligible]"`/
+  `"[unsupported]"`, etc.) -- no further gap found there, so no changes
+  were needed to those renderers.
+  **Second real gap closed, found by re-reading this section's own
+  "Invalid theme config falls back to a built-in default with a
+  visible warning, never a crash" requirement against the actual code**
+  (not hypothetical -- `Config::resolve()` had exactly this bug): an
+  invalid `theme` string previously `bail!`ed inside `Config::resolve`,
+  and (via the same `?`-propagation chain M10.6 already found and fixed
+  for keymaps) crashed the entire application at startup on a config
+  typo, before a single frame ever rendered. Fixed the same way as
+  M10.6's keymap fix: the `bail!` was removed (with a comment
+  explaining why this specific check, unlike the neighboring
+  `max_objects`/`max_bytes`/`request_timeout_secs` resource-safety
+  bounds, is safe to relax -- those remain hard failures, confirmed
+  unchanged by `resource_bounds_still_hard_fail_unlike_the_purely_
+  cosmetic_theme`), and `State::new` now checks the resolved theme name
+  itself and folds a visible `"Unknown theme ..., using default
+  (ember)"` warning into `state.error` alongside any keymap warning
+  (both can coexist in one message, proven by `both_a_malformed_
+  keymap_and_theme_are_reported_together`) -- never silently rewriting
+  the user's own config string, only warning; `ui::Theme::named()`'s
+  own pre-existing `_ => ember-look` fallback arm was already graceful
+  and needed no change.
+  Evidence: 3 new unit tests in `ui` (every `Severity` variant's glyph
+  is distinct; `Theme::role`'s colors for the ember theme exactly match
+  the pre-M10.7 `severity()` mapping; the "mono" theme's roles all
+  collapse to `Color::Reset` while `severity_glyph` still distinguishes
+  healthy from critical, proving the non-color channel actually carries
+  information when color cannot); 2 new unit tests in `app::state` (an
+  unrecognized theme falls back with a visible warning, the settings
+  string itself left unrewritten; keymap and theme warnings combine
+  into one message when both are broken at once) plus 1 existing test's
+  fallback path was already covered; 2 new unit tests in `config` (an
+  unrecognized theme name no longer fails `resolve()`, proving startup
+  survives it; genuine resource-safety bounds still hard-fail, proving
+  the relaxation was scoped to theme only, not a blanket removal of
+  validation). Full locked suite green (376 unit, up from 369; 76
+  fake-HTTP unchanged), `cargo fmt --check` and `cargo clippy
+  --all-targets -- -D warnings` clean, full M1-M8B interactive
+  regression (`accept-m8b.py`) reconfirmed green on `kind-sauron-test`.
+  No deviation from this document's own M10.7 contract. **Next: M10.8**
+  (Cross-feature UX integration / persistence / migration -- where
+  M10.4's workspaces, M10.5's bookmarks, and this slice's own theme
+  config finally get a real round trip through `Config`/`Settings`),
+  continuing directly in this session.
 
 ## Final acceptance checklist
 

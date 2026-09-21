@@ -56,12 +56,66 @@ impl Theme {
         }
     }
     fn severity(self, s: Severity) -> Color {
-        match s {
-            Severity::Healthy => self.good,
-            Severity::Unknown => self.muted,
-            Severity::Warning => self.warning,
-            Severity::Critical => self.critical,
+        self.role(ThemeRole::from(s))
+    }
+    /// M10.7: the one place any renderer should ask for presentational
+    /// color -- a closed role, never an arbitrary `Style` built ad hoc
+    /// at the call site. Centralizes presentation; carries no semantic
+    /// meaning of its own (a role does not decide WHAT is
+    /// healthy/denied/selected, only how that fact is colored once
+    /// something else has already decided it).
+    pub fn role(self, role: ThemeRole) -> Color {
+        match role {
+            ThemeRole::Normal => self.good,
+            ThemeRole::Muted => self.muted,
+            ThemeRole::Selected => self.accent,
+            ThemeRole::Warning => self.warning,
+            ThemeRole::Critical => self.critical,
+            ThemeRole::Unknown => self.muted,
         }
+    }
+}
+
+/// M10.7: a small closed set every renderer asks for by role, not an
+/// arbitrary `Style` -- generalizes `Theme::severity()`'s own pre-M10.7
+/// pattern (`Normal`/`Unknown`/`Warning`/`Critical` line up with
+/// `Severity`'s own variants -- `Healthy` is spelled `Normal` here
+/// because a role is a presentation concept, not a health concept) plus
+/// two new roles this slice's own UI needs: `Muted` (de-emphasized/
+/// secondary text) and `Selected` (cursor/multi-select marker).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeRole {
+    Normal,
+    Muted,
+    Selected,
+    Warning,
+    Critical,
+    Unknown,
+}
+impl From<Severity> for ThemeRole {
+    fn from(s: Severity) -> Self {
+        match s {
+            Severity::Healthy => ThemeRole::Normal,
+            Severity::Unknown => ThemeRole::Unknown,
+            Severity::Warning => ThemeRole::Warning,
+            Severity::Critical => ThemeRole::Critical,
+        }
+    }
+}
+
+/// M10.7: the non-color distinguishing channel -- reconnaissance found
+/// the "mono" theme already exists (every `Color` is `Color::Reset`,
+/// i.e. zero color information at all) but table row severity was
+/// color-only (`Style::default().fg(theme.severity(...))`  with no
+/// accompanying marker), the concrete gap this slice closes. A
+/// monochrome/no-color terminal must still be able to tell healthy from
+/// warning/critical/unknown from this glyph alone.
+pub fn severity_glyph(s: Severity) -> char {
+    match s {
+        Severity::Healthy => ' ',
+        Severity::Warning => '!',
+        Severity::Critical => '✗',
+        Severity::Unknown => '?',
     }
 }
 
@@ -159,13 +213,19 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
                 // highlight_symbol below -- cursor focus and bulk
                 // multi-select membership are independent and must both
                 // stay visible at once, never collapsed into one glyph.
+                // M10.7: the severity glyph right after it is the non-
+                // color channel -- on the "mono" theme (all colors reset)
+                // this is the ONLY way severity is distinguishable at all.
                 if let Some(first) = cells.first_mut() {
-                    let marker = if state.selection.contains(&o.uid) {
-                        "✓ "
+                    let selected = if state.selection.contains(&o.uid) {
+                        '✓'
                     } else {
-                        "  "
+                        ' '
                     };
-                    first.insert_str(0, marker);
+                    first.insert_str(
+                        0,
+                        &format!("{selected}{} ", severity_glyph(o.health.severity)),
+                    );
                 }
                 Row::new(cells).style(Style::default().fg(theme.severity(o.health.severity)))
             });
@@ -418,6 +478,51 @@ fn render_document(frame: &mut Frame, area: Rect, doc: &mut Document, theme: The
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn severity_glyph_is_distinct_for_every_variant_never_two_the_same() {
+        let glyphs: Vec<char> = [
+            Severity::Healthy,
+            Severity::Warning,
+            Severity::Critical,
+            Severity::Unknown,
+        ]
+        .into_iter()
+        .map(severity_glyph)
+        .collect();
+        let mut sorted = glyphs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            glyphs.len(),
+            "every severity must have its own distinct non-color marker: {glyphs:?}"
+        );
+    }
+    #[test]
+    fn theme_role_from_severity_preserves_the_exact_pre_m10_7_colors() {
+        // The whole point of generalizing through ThemeRole is that the
+        // ember theme's own rendered colors must not change -- this is
+        // the same mapping `Theme::severity` used before M10.7, now
+        // reached through `role()` instead of a private match.
+        let theme = Theme::named("ember");
+        assert_eq!(theme.severity(Severity::Healthy), theme.good);
+        assert_eq!(theme.severity(Severity::Unknown), theme.muted);
+        assert_eq!(theme.severity(Severity::Warning), theme.warning);
+        assert_eq!(theme.severity(Severity::Critical), theme.critical);
+    }
+    #[test]
+    fn mono_theme_still_has_a_non_color_channel() {
+        // "mono" sets every Color to Reset -- role() colors carry zero
+        // information there, so severity_glyph is the ONLY thing that
+        // still distinguishes healthy from warning/critical/unknown.
+        let mono = Theme::named("mono");
+        assert_eq!(mono.role(ThemeRole::Normal), Color::Reset);
+        assert_eq!(mono.role(ThemeRole::Critical), Color::Reset);
+        assert_ne!(
+            severity_glyph(Severity::Healthy),
+            severity_glyph(Severity::Critical)
+        );
+    }
     #[test]
     fn narrow_and_empty_terminal_do_not_panic() {
         for (w, h) in [(0, 0), (12, 3), (40, 12), (100, 30)] {

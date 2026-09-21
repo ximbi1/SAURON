@@ -123,9 +123,16 @@ impl Config {
         if !(1..=120).contains(&settings.request_timeout_secs) {
             bail!("request_timeout_secs must be 1..120");
         }
-        if !["ember", "light", "mono"].contains(&settings.theme.as_str()) {
-            bail!("theme must be ember, light or mono");
-        }
+        // M10.7: deliberately NOT validated here (unlike max_objects/
+        // max_bytes/request_timeout_secs above, which are genuine
+        // resource-safety bounds worth a hard startup failure) -- an
+        // invalid theme name is purely cosmetic. `ui::Theme::named()`
+        // already falls back to the default look for any unrecognized
+        // name, and `State::new` surfaces a visible, non-fatal warning
+        // for it, mirroring the same fail-safe pattern already
+        // established for a malformed keymap config (M10.6). A typo in
+        // `theme` must never be able to crash the whole application at
+        // startup the way it used to (this `bail!` did exactly that).
         Ok(settings)
     }
 }
@@ -167,5 +174,23 @@ mod tests {
         let resolved = c.resolve("cluster", "team/prod").expect("valid");
         assert_eq!(resolved.theme, "mono");
         assert_eq!(resolved.aliases.len(), 2);
+    }
+    #[test]
+    fn an_unrecognized_theme_never_fails_resolution_startup_must_not_crash_on_a_typo() {
+        let mut c = Config::default();
+        c.base.theme = "not-a-real-theme".into();
+        let resolved = c.resolve("", "").expect(
+            "a bad theme name must never fail resolution -- see this function's own comment",
+        );
+        assert_eq!(resolved.theme, "not-a-real-theme");
+    }
+    #[test]
+    fn resource_bounds_still_hard_fail_unlike_the_purely_cosmetic_theme() {
+        let mut c = Config::default();
+        c.base.max_objects = 0;
+        assert!(
+            c.resolve("", "").is_err(),
+            "genuine resource-safety bounds must remain a hard startup failure"
+        );
     }
 }

@@ -109,6 +109,23 @@ impl State {
                 Some(format!("Invalid key configuration, using defaults: {e}")),
             ),
         };
+        // M10.7: same fail-safe pattern as the keymap check above --
+        // `Config::resolve` deliberately no longer hard-fails on this
+        // (see its own comment), and `ui::Theme::named` already falls
+        // back to the default look for any name it doesn't recognize;
+        // this only adds the visible, non-fatal warning.
+        const KNOWN_THEMES: &[&str] = &["ember", "light", "mono"];
+        let theme_error = (!KNOWN_THEMES.contains(&settings.theme.as_str())).then(|| {
+            format!(
+                "Unknown theme \"{}\", using default (ember)",
+                settings.theme
+            )
+        });
+        let error = match (keymap_error, theme_error) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
         Self {
             epoch: 0,
             request: 0,
@@ -129,7 +146,7 @@ impl State {
             wide: false,
             mode: Mode::Table,
             status: "Starting".into(),
-            error: keymap_error,
+            error,
             input_error: None,
             synced: false,
             dirty: true,
@@ -404,6 +421,40 @@ mod tests {
     fn valid_keymap_config_produces_no_startup_error() {
         let s = State::new(Query::default(), &Settings::default());
         assert!(s.error.is_none());
+    }
+    #[test]
+    fn malformed_theme_falls_back_to_ember_and_reports_visibly_never_panics() {
+        let settings = Settings {
+            theme: "not-a-real-theme".into(),
+            ..Settings::default()
+        };
+        let s = State::new(Query::default(), &settings);
+        assert!(
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("Unknown theme") && e.contains("ember")),
+            "an invalid theme must be surfaced as a visible, dismissible warning: {:?}",
+            s.error
+        );
+        // The settings string itself is left as-is (Theme::named() is
+        // what actually falls back at render time) -- State::new only
+        // adds the warning, it does not silently rewrite user config.
+        assert_eq!(s.settings.theme, "not-a-real-theme");
+    }
+    #[test]
+    fn both_a_malformed_keymap_and_theme_are_reported_together() {
+        let mut settings = Settings {
+            theme: "bogus".into(),
+            ..Settings::default()
+        };
+        settings.keys.insert(
+            "table".into(),
+            BTreeMap::from([("yaml".into(), vec!["j".into()])]),
+        );
+        let s = State::new(Query::default(), &settings);
+        let error = s.error.expect("both must be reported");
+        assert!(error.contains("key configuration"), "{error}");
+        assert!(error.contains("theme"), "{error}");
     }
     #[test]
     fn sorting_preserves_uid_and_does_not_reselect_after_delete_recreate() {

@@ -207,7 +207,7 @@ investigation.
 | M11.2 | Eye — problem-priority current-context overview | ACCEPTED |
 | M11.3 | Pulse — bounded refreshed operational overview | ACCEPTED |
 | M11.4 | Evidence bundle — redacted local incident export | ACCEPTED |
-| M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | PLANNED |
+| M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | ACCEPTED |
 | M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | PLANNED |
 | M11.7 | Cross-feature navigation / UX integration (command registry wiring for all of the above) | PLANNED |
 | M11.8 | Combined acceptance / full M1-M10 regression / soak / docs / tag | PLANNED |
@@ -762,6 +762,57 @@ every prior milestone's own section.
   the same command with `--force` succeeded and replaced the prior
   contents; 32x9 rendered without corruption; quit restored the terminal
   cleanly. 416 unit + 76 fake-HTTP total, fmt/clippy clean.
+
+- 2026-09-22: M11.5 (blast radius) implemented. New
+  `src/blast_radius.rs::report(&Report) -> (String, Vec<adjacent::Target>)`
+  -- a pure renderer over the exact same `kube::relationships::report::xray`
+  collector Xray already uses (`Runtime::start_adjacent` extended with a
+  `matches!(action, Action::Xray | Action::BlastRadius)` branch, since both
+  need the same 2-hop bounded traversal; only the renderer differs). Rows
+  are grouped by `graph::Provenance` with safety-oriented labels distinct
+  from `adjacent::label`'s navigation-oriented wording (`VERIFIED OWNERSHIP/
+  DEPENDENCY`/`EXPLICIT REFERENCE`/`SELECTOR-DERIVED (INFERENCE)`/`STATUS-
+  REPORTED`) -- one `Provenance` enum, two presentations for two audiences,
+  never a second relationship taxonomy. A `DIRECTLY TARGETED` section always
+  leads, showing the root's own current `Health` (current state, never a
+  predicted one). Every bound hit (`graph::Bound`) is shown explicitly. A
+  fixed closing disclaimer states the core invariant in the document itself,
+  not just in code comments: relationship is not proof of cause, guaranteed
+  impact, or future failure; selector-derived rows are inference, never
+  verified ownership; no action is taken by this view. New
+  `Action::BlastRadius`/`:blast_radius` registry entry (table mode, key
+  `b`), requiring a selected row, reachable independent of whether any
+  mutation is being previewed -- it is not wired into the mutation state
+  machine anywhere, so it cannot become a confirmation bypass.
+
+  Explicitly reduced v1 scope, documented rather than silently dropped: no
+  dedicated "policy/operational risk" category for relationships the M6
+  graph does not already model as an edge (e.g. Node→Pod via
+  `spec.nodeName`, relevant to cordon/drain decisions) -- adding that would
+  require new correlation logic beyond this slice's reuse boundary, not a
+  rendering choice over already-collected evidence. The four
+  `Provenance`-backed categories are what M11.5 ships.
+
+  5 new unit tests: owner-chain and selector-match rendered as two distinct,
+  non-adjacent sections; a positive-assertion check that no affirmative
+  causal/predictive phrase (`"will fail"`, `"will be down"`, `"users
+  affected"`, `"is the cause"`) ever appears, while the negated safety
+  disclaimer itself (containing "not... guaranteed impact", "not proof of
+  cause") is correctly exempted -- absence-of-a-banned-substring alone would
+  have false-failed on the report's own safety language, the exact class of
+  test-writing mistake this project's own M10.9 journal already documents
+  learning from; bound-hit visibility and its absence; `DIRECTLY TARGETED`
+  always leads and is itself navigable. **Live evidence** against
+  `kind-sauron-test`/`sauron-fixtures`'s real `healthy` Deployment:
+  `:blast_radius` showed `DIRECTLY TARGETED` (the Deployment, `[Ready]`)
+  followed by `VERIFIED OWNERSHIP/DEPENDENCY` listing 5 real ReplicaSets
+  (each with its own real current status, e.g. `[Unavailable]`,
+  `[ScaledDown]` -- genuinely observed states, never invented), plus real
+  `PARTIAL EVIDENCE` notes for the traversal's own documented bounds
+  (reverse-ownership-kind scope, depth-2 cap); `Down` then `Enter` (Follow)
+  navigated to the exact selected ReplicaSet by UID; 32x9 rendered without
+  corruption; quit restored the terminal cleanly. 421 unit + 76 fake-HTTP
+  total, fmt/clippy clean.
 
 ## Final acceptance checklist
 

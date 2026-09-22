@@ -1,5 +1,6 @@
 pub mod adjacent;
 pub mod app;
+pub mod blast_radius;
 pub mod brand;
 pub mod bundle;
 pub mod command;

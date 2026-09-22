@@ -58,6 +58,7 @@ pub enum Action {
     InspectSelection,
     Eye,
     Pulse,
+    BlastRadius,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -184,6 +185,13 @@ pub fn registry() -> Vec<Binding> {
             "table",
             "Bounded 2-hop relationship + health traversal",
             "x",
+        ),
+        (
+            Action::BlastRadius,
+            "blast_radius",
+            "table",
+            "Read-only safety lens: labeled relationships to the selected target (never a causal claim)",
+            "b",
         ),
         (
             Action::Policy,

@@ -1703,7 +1703,9 @@ impl Runtime {
                 };
             }
             Help => self.open_static("Keyboard reference", self.state.keymap.help()),
-            Yaml | Describe | Explain | Events | Adjacent | Xray => self.open_document(action)?,
+            Yaml | Describe | Explain | Events | Adjacent | Xray | BlastRadius => {
+                self.open_document(action)?
+            }
             Follow => self.follow_adjacent()?,
             Policy => self.open_policy_view()?,
             Mutations => self.open_mutations_view()?,
@@ -2863,7 +2865,12 @@ impl Runtime {
         if self
             .active_document_mut()
             .and_then(|d| d.source.as_ref())
-            .is_some_and(|s| matches!(s.action, Action::Adjacent | Action::Xray))
+            .is_some_and(|s| {
+                matches!(
+                    s.action,
+                    Action::Adjacent | Action::Xray | Action::BlastRadius
+                )
+            })
         {
             let source = self
                 .active_document_mut()
@@ -2921,7 +2928,7 @@ impl Runtime {
         let cancel = self.document.clone();
         self.tasks.spawn(async move {
             let document::Source { resource, selected: object, action, .. } = source;
-            let result = if action == Action::Xray {
+            let result = if matches!(action, Action::Xray | Action::BlastRadius) {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return,
@@ -2936,14 +2943,19 @@ impl Runtime {
             };
             let payload = match result {
                 Ok(report) => {
-                    let (text, adjacent) = if action == Action::Xray {
-                        crate::xray::report(&report, 2)
-                    } else {
-                        crate::adjacent::report(&report)
+                    let (text, adjacent) = match action {
+                        Action::Xray => crate::xray::report(&report, 2),
+                        Action::BlastRadius => crate::blast_radius::report(&report),
+                        _ => crate::adjacent::report(&report),
+                    };
+                    let label = match action {
+                        Action::Xray => "Xray",
+                        Action::BlastRadius => "Blast radius",
+                        _ => "Adjacent",
                     };
                     Payload::Document {
                         request,
-                        title: format!("{}: {}", if action == Action::Xray { "Xray" } else { "Adjacent" }, object.name),
+                        title: format!("{label}: {}", object.name),
                         text,
                         adjacent,
                     }

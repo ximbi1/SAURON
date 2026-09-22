@@ -8,8 +8,21 @@ name: Release artifacts
 # rustup/cross-linker/macOS hardware on the development machine, and
 # publishing/triggering CI beyond what was already authorized for
 # main/tags needs its own explicit go-ahead).
+#
+# The `publish_release` job creates a GitHub Release as a DRAFT
+# (`draft: true`, fixed, not an input) -- it is never auto-published. A
+# human must open the draft in the GitHub UI and click "Publish release"
+# before it becomes visible to the public or linkable from anywhere.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -84,3 +97,24 @@ jobs:
             target/dist/SHA256SUMS.txt
             target/dist/manifest.json
           if-no-files-found: error
+
+  publish_release:
+    needs: manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sauron-release-manifest
+          path: target/dist
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: SAUR-ON ${{ inputs.tag }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            target/dist/*.tar.gz
+            target/dist/SHA256SUMS.txt
+            target/dist/manifest.json

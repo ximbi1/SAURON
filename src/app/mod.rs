@@ -1658,6 +1658,7 @@ impl Runtime {
                 Ok(())
             }
             Command::Bundle { path, force } => self.open_bundle(path, force),
+            Command::ContextDiff(context) => self.open_context_diff(context),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2810,6 +2811,74 @@ impl Runtime {
         self.state.dirty = true;
         Ok(())
     }
+    /// M11.6: a temporary, independent second `Connection` for exactly one
+    /// bounded GET -- never stored on `Runtime`, never touching
+    /// `self.connection`, dropped the instant this task finishes. Not a
+    /// background watcher, not a second live connection the rest of the app
+    /// ever sees.
+    fn open_context_diff(&mut self, other_context: String) -> Result<()> {
+        let object = self.state.selected_object().context("Select a row first")?;
+        let resource = self
+            .state
+            .resource
+            .clone()
+            .context("No resource selected")?;
+        let left_context = self
+            .connection
+            .as_ref()
+            .context("Not connected")?
+            .context
+            .clone();
+        let mut options = self.options.clone();
+        options.context = Some(other_context.clone());
+        options.force_readonly = true;
+        let app_config = self.config.clone();
+        let key = crate::context_diff::ComparisonKey {
+            kind: object.kind.clone(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+        };
+        let doc = Document::new(
+            format!("Context diff: {}", object.name),
+            format!("Comparing against context {other_context} ...\n"),
+        );
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        self.tasks.spawn(async move {
+            let right = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    connect_and_fetch(options, app_config, &resource, &object),
+                ) => result,
+            };
+            let right = match right {
+                Ok(r) => r,
+                Err(_) => crate::context_diff::RightSide::Unknown("connection timed out".into()),
+            };
+            let text =
+                crate::context_diff::report(&left_context, &other_context, &key, &object, right);
+            let payload = Payload::Document {
+                request,
+                title: format!("Context diff: {}", object.name),
+                text,
+                adjacent: vec![],
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload }) => {},
+            }
+        });
+        self.state.mode = Mode::Document(doc);
+        self.state.dirty = true;
+        Ok(())
+    }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
         let resource = self
@@ -3549,6 +3618,42 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
     }.await;
     runtime.shutdown().await;
     result
+}
+/// M11.6: one bounded, independent connect + GVK resolve + GET for
+/// `open_context_diff`. The returned `Connection` is dropped when this
+/// function returns -- nothing here is stored on `Runtime`, so there is
+/// never a second live connection the rest of the app can observe.
+async fn connect_and_fetch(
+    options: ConnectOptions,
+    app_config: Config,
+    resource: &Resource,
+    object: &crate::resources::Object,
+) -> crate::context_diff::RightSide {
+    use crate::context_diff::RightSide;
+    let connection = match crate::kube::connect(options, app_config).await {
+        Ok(c) => c,
+        Err(e) => return RightSide::Unknown(e.to_string()),
+    };
+    let Some(right_resource) = connection
+        .catalog
+        .group_kind(&resource.api.group, &resource.api.kind)
+    else {
+        return RightSide::Unsupported;
+    };
+    let api = right_resource.api(connection.client.clone(), Some(&object.namespace));
+    match api.get(&object.name).await {
+        Ok(fresh) => {
+            let mut value = match serde_json::to_value(fresh) {
+                Ok(v) => v,
+                Err(e) => return RightSide::Unknown(e.to_string()),
+            };
+            value["kind"] = right_resource.api.kind.clone().into();
+            value["apiVersion"] = right_resource.api.api_version.clone().into();
+            RightSide::Found(Box::new(crate::resources::Object::new(value)))
+        }
+        Err(::kube::Error::Api(e)) if e.code == 404 => RightSide::NotFound,
+        Err(e) => RightSide::Unknown(crate::safety::api_error(&e, "fetching for context diff")),
+    }
 }
 /// Suspends Ratatui's alternate screen, forwards the real terminal to one
 /// interactive remote shell until it ends by any means, then restores. Owns the

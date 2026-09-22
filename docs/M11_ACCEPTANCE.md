@@ -208,7 +208,7 @@ investigation.
 | M11.3 | Pulse — bounded refreshed operational overview | ACCEPTED |
 | M11.4 | Evidence bundle — redacted local incident export | ACCEPTED |
 | M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | ACCEPTED |
-| M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | PLANNED |
+| M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | ACCEPTED (reduced scope) |
 | M11.7 | Cross-feature navigation / UX integration (command registry wiring for all of the above) | PLANNED |
 | M11.8 | Combined acceptance / full M1-M10 regression / soak / docs / tag | PLANNED |
 
@@ -813,6 +813,57 @@ every prior milestone's own section.
   navigated to the exact selected ReplicaSet by UID; 32x9 rendered without
   corruption; quit restored the terminal cleanly. 421 unit + 76 fake-HTTP
   total, fmt/clippy clean.
+
+- 2026-09-22: M11.6 (context diff) investigated and implemented at reduced
+  scope, per this document's own pre-authorized decision path. Investigation
+  finding: a minimal version IS cleanly buildable from already-accepted
+  primitives -- `kube::connect` is a free function, not a `Runtime` method,
+  so a second, fully independent `Connection` can exist for the lifetime of
+  one bounded async task without `Runtime` ever holding two connections
+  structurally (`self.connection` is untouched); the fetch reuses the exact
+  same `resource.api(client, namespace).get(name)` shape
+  `kube::evidence::document`'s own "fresh GET" already uses. No genuine
+  architectural blocker was found, so this was NOT deferred -- reduced in
+  scope instead (single-target-only, no bulk/multi-object diff; no scoring;
+  no GitOps-revision field in the projection, matching the bundle/blast-
+  radius precedent of documenting an explicitly narrower v1 rather than
+  silently dropping it).
+
+  New `src/context_diff.rs::report(left_context, right_context, key, left,
+  RightSide)` -- a pure renderer over a deliberately small, explicit
+  projection (`health.status`, container images, desired/available
+  replicas; never a raw full-object diff). `RightSide` makes every outcome
+  explicit and non-conflatable: `Found`/`NotFound` (only-left)/`Unsupported`
+  (CRD absent on the right, never confused with not-found)/`Unknown(reason)`
+  (RBAC/timeout/transport failure -- never treated as equivalence or
+  absence). The comparison key (kind/namespace/name) is stated in the
+  report's own text as explicitly NOT identity, satisfying the M11
+  kickoff's own stop-and-ask condition #2 by design rather than by
+  avoiding the question. New `Runtime::open_context_diff` +
+  free function `connect_and_fetch` (placed outside `impl Runtime`,
+  confirming it owns no `Runtime` state): calls `kube::connect` with
+  `force_readonly: true` unconditionally (belt-and-suspenders on a feature
+  that should never write, regardless of the target context's own
+  settings), a 15s bounded timeout via `tokio::time::timeout`, and drops the
+  temporary connection the instant the task returns. New
+  `Command::ContextDiff(String)`/`:context_diff CONTEXT` grammar, requiring
+  a selected row.
+
+  6 new unit tests (`context_diff::tests`): identical projection ->
+  Equivalent; a real field difference -> Different, both values shown side
+  by side, never silently equivalent; only-left explicit; unsupported-kind
+  explicit and never confused with not-found; comparison-key-not-identity
+  wording present in the actual output text (not just a doc comment);
+  transport/RBAC failure -> Unknown, never a false Equivalent. **Live
+  evidence**: `:context_diff kind-sauron-test-b` (a second context alias
+  pointing at the very same physical cluster, already an established
+  convention in this project's own M2/M3 acceptance scripts) against the
+  real `healthy` Deployment correctly reported `EQUIVALENT`; `:context_diff
+  nonexistent-context-xyz` produced a graceful, explicit `UNKNOWN:
+  comparison could not be completed (Requested context is not present in
+  kubeconfig)` -- no crash, no false result; 32x9 rendered without
+  corruption; quit restored the terminal cleanly; zero writes to either
+  context throughout. 427 unit + 76 fake-HTTP total, fmt/clippy clean.
 
 ## Final acceptance checklist
 

@@ -5,6 +5,7 @@ pub mod brand;
 pub mod bundle;
 pub mod command;
 pub mod config;
+pub mod context_diff;
 pub mod evidence;
 pub mod explain;
 pub mod eye;

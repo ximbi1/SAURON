@@ -1660,6 +1660,7 @@ impl Runtime {
             Command::Bundle { path, force } => self.open_bundle(path, force),
             Command::ContextDiff(context) => self.open_context_diff(context),
             Command::Plugin(name) => self.open_plugin(name),
+            Command::Theme(name) => self.set_theme(name),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2811,6 +2812,43 @@ impl Runtime {
         self.state.mode = Mode::Document(doc);
         self.state.dirty = true;
         Ok(())
+    }
+    /// M13.1: live, session-only theme switch. `ui::Theme::named` is
+    /// re-resolved from `state.settings.theme` on every render frame
+    /// (never cached), so mutating the string here is the entire
+    /// mechanism -- the new theme is visible on the very next frame with
+    /// no separate "apply" step. Not persisted (see M13.2); a bare
+    /// `:theme` lists the known names with the active one marked, never
+    /// silently doing nothing.
+    fn set_theme(&mut self, name: Option<String>) -> Result<()> {
+        match name {
+            None => {
+                let current = self.state.settings.theme.clone();
+                let listed = crate::ui::KNOWN_THEMES
+                    .iter()
+                    .map(|t| {
+                        if *t == current {
+                            format!("[{t}]")
+                        } else {
+                            (*t).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.state.status = format!("Themes: {listed}");
+                Ok(())
+            }
+            Some(name) => {
+                anyhow::ensure!(
+                    crate::ui::KNOWN_THEMES.contains(&name.as_str()),
+                    "Unknown theme \"{name}\", available: {}",
+                    crate::ui::KNOWN_THEMES.join(", ")
+                );
+                self.state.settings.theme = name.clone();
+                self.state.status = format!("Theme set to \"{name}\" (not saved)");
+                Ok(())
+            }
+        }
     }
     /// M11.6: a temporary, independent second `Connection` for exactly one
     /// bounded GET -- never stored on `Runtime`, never touching
@@ -4740,6 +4778,41 @@ mod tests {
             record.state,
             session::State::Ended(session::Outcome::Completed)
         );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn theme_command_applies_a_known_theme_live_next_frame_visible_immediately() {
+        let mut rt = runtime();
+        rt.state.settings.theme = "ember".into();
+        rt.command(":theme light").expect("known theme applies");
+        assert_eq!(rt.state.settings.theme, "light");
+        assert!(rt.state.status.contains("light"));
+        assert!(rt.state.status.contains("not saved"));
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn theme_command_rejects_an_unknown_name_explicitly_never_silently_no_op() {
+        let mut rt = runtime();
+        rt.state.settings.theme = "ember".into();
+        let err = rt
+            .command(":theme not-a-real-theme")
+            .expect_err("unknown theme must fail, never silently no-op");
+        assert!(err.to_string().contains("Unknown theme"), "{err}");
+        assert_eq!(
+            rt.state.settings.theme, "ember",
+            "a rejected theme must never partially apply"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn bare_theme_command_lists_every_known_theme_marking_the_active_one() {
+        let mut rt = runtime();
+        rt.state.settings.theme = "mono".into();
+        rt.command(":theme").expect("listing never fails");
+        for name in crate::ui::KNOWN_THEMES {
+            assert!(rt.state.status.contains(name), "{}", rt.state.status);
+        }
+        assert!(rt.state.status.contains("[mono]"), "{}", rt.state.status);
         rt.shutdown().await;
     }
     #[tokio::test]

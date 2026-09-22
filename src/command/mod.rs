@@ -677,6 +677,11 @@ pub enum Command {
     /// M12.2: run one explicitly `approved` plugin by name against the
     /// selected row's bounded, redacted projection. Never a mutation path.
     Plugin(String),
+    /// M13.1: live theme switch. `None` lists the built-in themes with the
+    /// active one marked; `Some(name)` applies a known theme immediately,
+    /// session-only (not persisted). Purely cosmetic -- never touches what
+    /// is queried, filtered, or how health/evidence is computed.
+    Theme(Option<String>),
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -1093,6 +1098,11 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.len() == 1 && !tail[0].is_empty(), "Use :plugin NAME");
             return Ok(Command::Plugin(tail[0].clone()));
         }
+        "theme" if tail.is_empty() => return Ok(Command::Theme(None)),
+        "theme" => {
+            ensure!(tail.len() == 1 && !tail[0].is_empty(), "Use :theme [NAME]");
+            return Ok(Command::Theme(Some(tail[0].clone())));
+        }
         "workspace_save" => {
             ensure!(
                 tail.len() == 1 && !tail[0].is_empty(),
@@ -1254,6 +1264,7 @@ pub fn command_names() -> Vec<&'static str> {
         "bundle",
         "context_diff",
         "plugin",
+        "theme",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names

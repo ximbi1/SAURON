@@ -125,13 +125,13 @@ impl State {
         // (see its own comment), and `ui::Theme::named` already falls
         // back to the default look for any name it doesn't recognize;
         // this only adds the visible, non-fatal warning.
-        const KNOWN_THEMES: &[&str] = &["ember", "light", "mono"];
-        let theme_error = (!KNOWN_THEMES.contains(&settings.theme.as_str())).then(|| {
-            format!(
-                "Unknown theme \"{}\", using default (ember)",
-                settings.theme
-            )
-        });
+        let theme_error =
+            (!crate::ui::KNOWN_THEMES.contains(&settings.theme.as_str())).then(|| {
+                format!(
+                    "Unknown theme \"{}\", using default (ember)",
+                    settings.theme
+                )
+            });
         let startup_warning = match (keymap_error, theme_error) {
             (Some(a), Some(b)) => Some(format!("{a}; {b}")),
             (Some(a), None) | (None, Some(a)) => Some(a),

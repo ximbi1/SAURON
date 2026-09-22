@@ -13,6 +13,12 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Row, Table, Wrap},
 };
 
+/// The single source of truth for which theme names `Theme::named` gives a
+/// real (non-fallback) look for. `Config`'s own startup fail-safe check and
+/// the live `:theme` command both validate against this, never a private
+/// copy of the list.
+pub const KNOWN_THEMES: &[&str] = &["ember", "light", "mono"];
+
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub foreground: Color,

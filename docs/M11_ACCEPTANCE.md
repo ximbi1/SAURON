@@ -209,7 +209,7 @@ investigation.
 | M11.4 | Evidence bundle — redacted local incident export | ACCEPTED |
 | M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | ACCEPTED |
 | M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | ACCEPTED (reduced scope) |
-| M11.7 | Cross-feature navigation / UX integration (command registry wiring for all of the above) | PLANNED |
+| M11.7 | Cross-feature navigation / UX integration (command registry wiring for all of the above) | ACCEPTED |
 | M11.8 | Combined acceptance / full M1-M10 regression / soak / docs / tag | PLANNED |
 
 ## Explicit non-goals for M11
@@ -864,6 +864,29 @@ every prior milestone's own section.
   kubeconfig)` -- no crash, no false result; 32x9 rendered without
   corruption; quit restored the terminal cleanly; zero writes to either
   context throughout. 427 unit + 76 fake-HTTP total, fmt/clippy clean.
+
+- 2026-09-22: M11.7 (cross-feature UX) confirmed ACCEPTED by construction,
+  not as a separate implementation pass -- each of M11.2-M11.6 was already
+  wired into the single central `command::registry()`/`command_names()`
+  table as it shipped (`:eye`/`:pulse`/`:blast_radius` with default table-
+  mode keys; `:bundle`/`:context_diff` command-only, matching
+  `:workspace_save`'s own established precedent for argument-taking
+  commands with no default key). `Keymap::help()` is fully generic over
+  `self.bindings` with no hardcoded list, so every new action appeared in
+  the effective help overlay automatically -- confirmed live (`?` in a real
+  session shows `table b Read-only safety lens...`, `table e
+  Priority-ordered attention view...`, `table o Refreshed health/metrics
+  tile summary...` alongside every pre-existing M1-M10 binding, all with
+  their real resolved keys, not hardcoded defaults). `Keymap::compile`'s
+  own existing per-mode conflict detection is the actual authority on key
+  availability (not manual audit) and never failed while adding these five
+  keys, confirmed by the full test suite passing throughout. `:bundle`
+  confirmed reachable and suggested by the command palette
+  (`:bun` → `bundle` in the suggestion list) live. No new navigation
+  mechanism was introduced anywhere in M11: Eye/blast radius reuse
+  `adjacent::Target`/`Document.navigate`'s existing Up/Down/Follow
+  verbatim; Pulse/bundle/context-diff are plain `Document` reports with no
+  navigation needs of their own.
 
 ## Final acceptance checklist
 

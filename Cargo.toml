@@ -8,7 +8,6 @@ name = "saur-on"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-publish = false
 description = "An evidence-driven Kubernetes terminal operations console"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ximbi1/SAURON"

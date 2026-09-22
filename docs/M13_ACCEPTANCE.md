@@ -255,6 +255,40 @@ Journal → continue.
   `:theme_save` reported `"mono" saved`; confirmed the real file now
   exists and its actual bytes read `theme = "mono"`.
 
+- 2026-09-22: M13.3 (banner rendering) implemented and **ACCEPTED**.
+  Added `brand::BANNER` (`src/brand.rs`): the exact same 4-line ASCII
+  mark already shown in the project's own marketing website
+  (`sauron-s-command-center`'s decorative `.terminal-eye` block) --
+  reused verbatim, by design, so the real TUI and the website agree on
+  one look rather than two independently-invented ones. Added
+  `Settings.banner: bool` (default `true`) with the same
+  `Config::resolve()` explicit-field-list fix `plugins` already needed
+  in M12 (a new `Settings` field is silently dropped unless the
+  hand-built base `toml::Value` names it) -- caught and fixed *before*
+  it could repeat, with its own dedicated regression test
+  (`base_level_banner_setting_flows_through_resolve_not_silently_
+  dropped`).
+
+  `ui::render` (`src/ui/mod.rs`) renders the banner inside space the
+  header block already reserved but never used: the header area is 4
+  lines tall whenever the terminal isn't narrow, but the existing
+  heading+scope text only ever filled 2 of them. The banner occupies a
+  right-aligned column carved out of that same already-reserved area via
+  a horizontal split -- no new vertical space claimed, so nothing else
+  shrinks. Gated on `!fullscreen && area.height >= 16 && area.width >=
+  100 && settings.banner`, comfortably above the `32x9` narrow-terminal
+  floor this project's own acceptance scripts already enforce
+  everywhere, so it can never compete with real content or corrupt a
+  small terminal.
+
+  **Verified live**, not merely asserted, against `kind-sauron-test`:
+  a 180x40 terminal shows the banner exactly in the top-right corner,
+  visually matching the website's own mockup, with no overlap on the
+  heading/scope text; the existing `32x9` narrow-terminal case renders
+  with no banner and no corruption; and a `banner = false` config, even
+  on the same wide 180x40 terminal, keeps it fully hidden. Full suite
+  (452 unit + 76 fake-HTTP) + `fmt`/`clippy -D warnings` clean.
+
 ## Final acceptance checklist
 
 - [x] M13.1 (live theme switching) implemented, unit + live-terminal
@@ -262,7 +296,7 @@ Journal → continue.
 - [x] M13.2 (persistence) implemented and accepted, reusing
       `Config::save()` verbatim, live-proven to survive a real process
       restart (mirroring the existing workspace/bookmark restart proof).
-- [ ] M13.3 (banner rendering) implemented and accepted; 32x9
+- [x] M13.3 (banner rendering) implemented and accepted; 32x9
       narrow-terminal regression re-run and still green; `banner = false`
       proven to fully disable it.
 - [ ] M13.4 (banner selection) either implemented-and-accepted with

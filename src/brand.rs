@@ -11,3 +11,12 @@ pub const DATA_DIR: &str = BINARY;
 pub const WEBSITE: Option<&str> = None;
 pub const MARK: &str = "◉";
 pub const USER_AGENT: &str = concat!("sauron", "/", env!("CARGO_PKG_VERSION"));
+
+/// M13.3: the same 4-line ASCII mark already shown in the project's own
+/// marketing website (`sauron-s-command-center`'s decorative
+/// `.terminal-eye` block) -- reused verbatim here so the real TUI and the
+/// website agree on one look, not two. Lines are ragged on purpose
+/// (matching the website's own markup); the renderer centers each one
+/// within `BANNER_WIDTH`, the widest line's own character count.
+pub const BANNER: [&str; 4] = ["╭──────╮", "╲  ◉  ╱", " ╲──╱ ", "SAUR-ON"];
+pub const BANNER_WIDTH: u16 = 8;

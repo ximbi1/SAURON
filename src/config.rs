@@ -22,6 +22,11 @@ pub struct Settings {
     pub resource: String,
     pub readonly: bool,
     pub theme: String,
+    /// M13.3: shows/hides the decorative ASCII mark in the header. Purely
+    /// cosmetic, never affects layout correctness -- a narrow/short
+    /// terminal already omits the banner regardless of this flag (see
+    /// `ui::render`'s own width/height gate).
+    pub banner: bool,
     pub max_objects: usize,
     pub max_bytes: usize,
     pub request_timeout_secs: u64,
@@ -45,6 +50,7 @@ impl Default for Settings {
             resource: "v1/pods".into(),
             readonly: true,
             theme: "ember".into(),
+            banner: true,
             max_objects: 20_000,
             max_bytes: 128 * 1024 * 1024,
             request_timeout_secs: 10,
@@ -208,6 +214,7 @@ impl Config {
         // Serialize via explicit fields so overrides retain absent-vs-default semantics.
         let mut value = toml::Value::try_from(serde_json::json!({
             "resource": self.base.resource, "readonly": self.base.readonly, "theme":self.base.theme,
+            "banner":self.base.banner,
             "max_objects":self.base.max_objects,"max_bytes":self.base.max_bytes,
             "request_timeout_secs":self.base.request_timeout_secs,"aliases":self.base.aliases,
             "favorite_namespaces":self.base.favorite_namespaces,"keys":self.base.keys,
@@ -335,6 +342,19 @@ mod tests {
         assert_eq!(
             base_only.plugins.get("sanitize").unwrap().trust,
             crate::plugin::Trust::Disabled
+        );
+    }
+    #[test]
+    fn base_level_banner_setting_flows_through_resolve_not_silently_dropped() {
+        // Matches the exact class of gap M12 already found for `plugins`:
+        // `resolve`'s hand-built base `toml::Value` must explicitly list
+        // every `Settings` field or a new one is silently lost.
+        let mut c = Config::default();
+        c.base.banner = false;
+        let resolved = c.resolve("", "").expect("valid");
+        assert!(
+            !resolved.banner,
+            "a base-level banner=false must survive resolve()"
         );
     }
     #[test]

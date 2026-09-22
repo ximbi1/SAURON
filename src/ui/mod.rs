@@ -177,6 +177,40 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         let ns = state.query.namespace.as_deref().unwrap_or("*");
         format!("ctx:{} › ns:{ns} › {resource_label}", state.context)
     };
+    // M13.3: the decorative banner only ever occupies space the header
+    // already reserved (4 lines tall whenever the terminal isn't
+    // narrow) but never used -- the heading+scope text below only fills
+    // 2 of those 4 lines. Gated on width too, well above the `32x9`
+    // narrow-terminal floor this project's own acceptance scripts
+    // already enforce everywhere, so it never competes with real
+    // content for space.
+    let show_banner =
+        !fullscreen && area.height >= 16 && area.width >= 100 && state.settings.banner;
+    let header = if show_banner {
+        let cols = Layout::horizontal([
+            Constraint::Min(1),
+            Constraint::Length(crate::brand::BANNER_WIDTH + 2),
+        ])
+        .split(parts[0]);
+        frame.render_widget(
+            Paragraph::new(
+                crate::brand::BANNER
+                    .iter()
+                    .map(|line| {
+                        Line::from(Span::styled(
+                            format!("{line:^w$}", w = crate::brand::BANNER_WIDTH as usize),
+                            Style::default().fg(theme.muted),
+                        ))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .alignment(ratatui::layout::Alignment::Center),
+            cols[1],
+        );
+        cols[0]
+    } else {
+        parts[0]
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(
@@ -187,7 +221,7 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
             )),
             Line::from(crate::safety::text(&scope)),
         ]),
-        parts[0],
+        header,
     );
     state.page_size = parts[1].height.saturating_sub(3) as usize;
     let columns = state.columns();

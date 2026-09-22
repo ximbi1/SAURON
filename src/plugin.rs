@@ -353,9 +353,13 @@ mod tests {
         // own `pgrep -f` matches the actual grandchild specifically --
         // cargo test runs tests in parallel by default, and the sibling
         // process-group test below intentionally spawns an
-        // identical-looking "sleep 30" of its own concurrently. The
-        // duration itself never matters (both are killed well before it
-        // elapses); only its uniqueness does.
+        // identical-looking "sleep 30" of its own concurrently. Base 30
+        // is this file's own reserved prefix; `app::session`'s own
+        // equivalent test uses base 35 -- `std::process::id()` alone is
+        // NOT enough (it's identical for every test in one binary), a
+        // real collision found live in M12.8. The duration itself never
+        // matters (both are killed well before it elapses); only
+        // cross-test uniqueness does.
         let marker = format!("30.{}", std::process::id() % 1000);
         let c = config("/bin/sh", &["-c", &format!("sleep {marker} & wait")]);
         let handle =

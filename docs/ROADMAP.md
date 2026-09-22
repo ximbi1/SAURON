@@ -9,8 +9,16 @@ mutations, workspaces, bookmarks, configurable keymaps, themes, and config
 persistence, all reusing the unmodified M7/M8/M8B mutation gateway;
 M11.0–M11.8 accepted (tag `m11-accepted`) — Eye, Pulse, evidence bundle,
 blast radius, and context diff (reduced scope), all composing M1-M10's own
-evidence primitives rather than building new ones. M12 is
-next, not started. The table below states milestone goals,
+evidence primitives rather than building new ones. M12.0–M12.8 accepted
+(tag `m12-accepted`) — trust-gated plugin subprocess execution
+(process-group limits, env allowlist, timeout/cancellation, zero orphan
+proven under sustained churn); headless `schemaVersion` hardening;
+Linux x86_64 packaging built and live-verified locally, the other three
+platforms CI-defined but never executed; dual MIT/Apache-2.0 licensing
+with a full dependency license inventory; a performance campaign closing
+the cold-startup and large-object-count gaps. Providers remained
+evidence-backed DEFERRED (see `docs/SOFKA_PARITY.md`); this was the final
+milestone of the current roadmap. The table below states milestone goals,
 not claims of full feature parity; acceptance ledgers record shipped subsets.
 
 | Milestone | Deliverable | Acceptance |
@@ -27,7 +35,7 @@ not claims of full feature parity; acceptance ledgers record shipped subsets.
 | 9 | Flux/Argo/Helm | Actual CRD fixtures and Helm storage decode; no assumed suspend semantics; rollback explicitly scoped |
 | 10 | Bulk/workspaces/bookmarks/themes/keymaps | Invalid reload retains policy/keymap; per-context scope; effective help; mark identity |
 | 11 | Eye/Pulse/bundle/context diff/blast radius | Partial overview explicit; sensitive fixture redaction; local export permission/overwrite tests |
-| 12 | Plugins/providers/headless maturity/packaging/performance | Process limits/trust; four platform builds; checksums/license inventory; reproducible performance campaign |
+| 12 | Plugins/providers/headless maturity/packaging/performance | Process limits/trust (delivered, live-proven); four platform builds (Linux x86_64 delivered and live-proven, the other three CI-defined only); checksums/license inventory (delivered); reproducible performance campaign (delivered); providers evidence-backed DEFERRED |
 
 Headless inspection, health projections and tests are pulled forward to M1. Readonly and
 redaction are foundational. M4 interactive exec/attach/forward requires a conservative

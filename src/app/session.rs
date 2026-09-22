@@ -341,8 +341,14 @@ mod tests {
         // A unique duration (not a bare "sleep 30") so this test's own
         // `pgrep -f` can never collide with `plugin.rs`'s own identical-
         // looking fixtures running concurrently -- cargo test runs tests
-        // in parallel by default.
-        let marker = format!("30.{}", std::process::id() % 1000);
+        // in parallel by default. Base 35 (not 30): `std::process::id()`
+        // is the SAME for every test in this one binary, so a marker
+        // built only from the PID still collides with `plugin.rs`'s own
+        // `aborting_the_task_...` test, which uses the identical "30."
+        // formula -- a real collision found live in M12.8's own combined
+        // acceptance run. Distinct static bases make collision impossible
+        // regardless of PID.
+        let marker = format!("35.{}", std::process::id() % 1000);
         let config = crate::plugin::PluginConfig {
             executable: "/bin/sleep".into(),
             args: vec![marker.clone()],

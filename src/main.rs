@@ -144,7 +144,17 @@ async fn start() -> Result<()> {
                         // unchanged, so any consumer that already ignores
                         // unknown keys keeps working verbatim. Bump this
                         // only if a FUTURE change alters an existing key's
-                        // meaning, never for an addition.
+                        // meaning, never for an addition. `schemaVersion` is
+                        // listed first in this literal for readability, but
+                        // `serde_json::Value` (no `preserve_order` feature,
+                        // deliberately not enabled -- see M12.8's own
+                        // journal entry for why: it would make
+                        // `mutation::workflow::payload_hash`'s canonical-JSON
+                        // fingerprint depend on source key order instead of
+                        // being alphabetically stable) serializes object keys
+                        // alphabetically, so consumers must never assume
+                        // byte-position; only presence and value are
+                        // guaranteed.
                         let document=serde_json::json!({"schemaVersion":1,"context":runtime.state.context,"namespace":runtime.state.query.namespace,"resource":runtime.state.query.resource,"filter":runtime.state.filter_text,"unknownExcluded":runtime.state.filter_unknown,"labelSelector":runtime.state.query.labels,"fieldSelector":runtime.state.query.fields,"collectedAt":chrono::Utc::now().to_rfc3339(),"items":runtime.state.rows.iter().map(|o|&o.value).collect::<Vec<_>>()});
                         println!("{}",if cli.output=="json"{serde_json::to_string_pretty(&document)?}else{serde_yaml_ng::to_string(&document)?});
                     },

@@ -96,9 +96,15 @@ Config: XDG TOML, strict schema, exact cluster/context keys (avoid filesystem na
 collisions), recursive layer merge, validated limits. Failed reload retains prior config.
 Persistence initially absent except opt-in diagnostics; timeline/navigation session-local.
 Commands have structured parsing and one registry; effective help follows key bindings.
-Plugins are deferred: structured stdin, explicit executable/argv, bounded output and
-deadline, process-group cancellation, no sandbox claims. Providers are opt-in and may
-never receive kubeconfig credentials at arbitrary external URLs.
+Plugins (M12): structured JSON stdin (`protocolVersion:1` object projection), explicit
+executable/argv (no shell interpolation), trust-gated (Approved/Disabled, no warn-only
+state), env allowlist (PATH/HOME/LANG only — no kubeconfig path, no token, no Secret
+value ever reaches a child), bounded output (16 KiB/line, 500 lines), deadline (timeout),
+process-group cancellation via `app::session::Sessions`, no sandbox claims beyond that.
+Catalog/registry, live activity panel/stderr tail, bulk plugin invocation, and
+plugin-managed port-forwards remain deferred — see `docs/SOFKA_PARITY.md`. Providers are
+opt-in, remain fully deferred, and may never receive kubeconfig credentials at arbitrary
+external URLs.
 
 ## Repository ownership map
 
@@ -171,7 +177,14 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Blast radius | ACCEPTED (M11.5) | read-only safety lens over the same bounded Xray graph, grouped by Provenance; never causal language; no mutation path |
 | Context diff | ACCEPTED (M11.6, reduced scope) | bounded two-context comparison on a temporary second Connection; comparison key explicitly not identity |
 | M11.8 combined acceptance/soak | ACCEPTED | full M1-M10 regression + combined M11 acceptance run twice clean + 300s soak (103 cycles, flat RSS/fd/threads); docs/M11_ACCEPTANCE.md; local annotated m11-accepted |
-| Plugins/providers/fleet/packaging | DEFERRED | stable core first |
+| Plugins (trust-gated subprocess execution) | ACCEPTED (M12.1/M12.2) | env allowlist, bounded output, timeout, process-group cancellation via Sessions; live no-credential-leak/timeout/cancellation proof in M12.8 |
+| Providers | DEFERRED (M12.3) | evidence-backed: zero existing scaffolding, lowest ledger priority, not in this milestone's own acceptance contract; see docs/M12_ACCEPTANCE.md |
+| Headless maturity | ACCEPTED (M12.4) | `schemaVersion` added to `--output json\|yaml` (additive); live no-TTY/no-ANSI/exit-code proof |
+| Packaging | ACCEPTED (M12.5, Linux x86_64 subset) | dual MIT/Apache-2.0 license; deterministic archive built+extracted+run live; other 3 platforms CI-defined only (`workflow_dispatch`, never triggered) |
+| Checksums / license inventory | ACCEPTED (M12.6) | SHA-256 + manifest; tamper-detection proven live both directions; 305 deps, 0 unknown license, no forced copyleft — docs/LICENSE_INVENTORY.md |
+| Performance campaign | ACCEPTED (M12.7) | cold-startup + 20k-object tier added to benches/pipeline.rs, run live with hardware/rustc/OS context recorded |
+| M12.8 combined acceptance/soak | ACCEPTED | full M1-M11 regression + `scripts/accept-m12.py` run twice clean + 180s soak (64 cycles, flat RSS/fd/threads, zero orphan plugin processes); docs/M12_ACCEPTANCE.md; local annotated m12-accepted |
+| Plugin catalog/registry, activity panel, bulk invocation, fleet | DEFERRED | stable core first |
 
 Detailed capability status and acceptance plans live in `docs/SOFKA_PARITY.md`.
 
@@ -264,8 +277,13 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
 (Helm rollback/uninstall) is explicitly DEFERRED, not implemented.
 M10.0–M10.9 are ACCEPTED. M11.0–M11.8 are ACCEPTED (M11.6 context diff at
-a reduced scope, see its own journal entry). Local annotated `m11-accepted`
-points to the tip of this milestone's work; never pushed.
+a reduced scope, see its own journal entry). M12.0–M12.8 are ACCEPTED
+(M12.3 providers explicitly DEFERRED, evidence-backed, not implemented;
+M12.5 packaging proven live for Linux x86_64 only, the other 3 platforms
+CI-defined but never executed). Local annotated `m12-accepted` points to
+the tip of this milestone's work — the final milestone of the current
+roadmap; never pushed, matching every prior milestone tag in this
+project.
 
 Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
 tests; locked fmt/check/clippy/test green in the acceptance record. Combined
@@ -315,6 +333,47 @@ correct, the test scripts' assumption was not; fixed to source
 export and context diff throttled to every 5th cycle since both are real
 I/O, an M4 forward held alive and checked every cycle), flat RSS/fds/
 threads, zero reconnects/transient errors.
+
+Recorded M12 checks: 445 unit + 76 fake HTTP; locked fmt/check/clippy/test
+green. M12.1's plugin execution is genuinely new architecture (this
+codebase's first local-subprocess boundary), not composition, but task
+ownership/cancellation still fully reuses `app::session::Sessions`
+verbatim (`Kind::Plugin`) — "no orphan process after quit" falls out of
+`Sessions`'s own existing `Drop`/`shutdown` guarantees. A real bug was
+found live during M12.2 (not caught by unit tests alone): `Sessions::drop`
+calls `cancel.cancel()` then immediately `abort_all()` with no yield
+point, so a task-`abort()` (the real shutdown path) never reaches the
+running future's own `tokio::select!` cancellation branch — only in-scope
+`Drop` impls fire, and `Child`'s `kill_on_drop` only reaches the direct
+child, not a `sh -c "... & wait"` grandchild. Fixed with a dedicated
+`GroupKillGuard` held for the whole `run()` scope, so process-group
+termination happens on every exit path unconditionally; regression test
+`aborting_the_task_still_kills_the_whole_process_group_not_just_the_direct_child`
+added, failed before the fix, passed after, re-verified live against the
+real kind cluster. `scripts/accept-m12.py` (7 sequences: real plugin
+stdout/exit code, live no-credential-leak proof via `env` and a real
+parent-shell secret, live timeout with a real OS-process-table check,
+live mid-run cancellation with the same check — the exact GroupKillGuard
+scenario, headless `schemaVersion` presence, and packaged-archive
+extract+run) passed twice clean. Full M1-M11 regression (every existing
+`accept-m*.py`, unmodified) reconfirmed green — including cleaning up
+genuine fixture drift (9 stale zero-replica ReplicaSets accumulated across
+this long session's repeated `healthy` deployment applies, `revisionHistoryLimit=10`
+never pruned them, inflating `blast_radius`'s candidate scan and pushing
+its own safety disclaimer off a narrow pane) and correcting a real false
+claim from M12.4's own journal entry (`schemaVersion` was claimed to
+serialize as the object's first key; `serde_json::Value` has no
+`preserve_order` feature in this project, so keys serialize alphabetically
+— fixing the claim, not the ordering, since enabling `preserve_order`
+globally would make `mutation::workflow::payload_hash`'s canonical-JSON
+fingerprint depend on source key order instead of being alphabetically
+stable, a real risk to a safety-critical mutation-confirmation path).
+M12's bounded soak was **180 seconds**, 64 cycles (Eye/Pulse/blast-radius
+and a plugin run every cycle, timeout/cancel churn every 3rd/4th cycle,
+headless invocation every 6th), flat RSS/fds/threads, zero reconnects/
+transient errors, and an explicit `pgrep` sweep after shutdown confirming
+zero orphan plugin processes.
+
 These are recorded results, not tests rerun during this documentation update.
 
 Current architecture: M6 bounded Adjacent/Xray; M7 policy/confirmation/

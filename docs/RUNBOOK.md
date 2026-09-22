@@ -31,13 +31,16 @@ M9 uses a separate Docker kind cluster `sauron-m9`, node
 the Docker label and loopback API endpoint before fixture operations. Keep
 the two clusters and guards separate; production remains excluded.
 
-## Current checkpoint — reconciled 2026-09-21
+## Current checkpoint — reconciled 2026-09-22
 
 M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
 (Helm rollback/uninstall) is explicitly DEFERRED, not implemented.
 M10.0–M10.9 are ACCEPTED. M11.0–M11.8 are ACCEPTED (M11.6 context diff at
-a reduced scope). Local annotated `m11-accepted` points to
-the tip of this milestone's work; never pushed.
+a reduced scope). M12.0–M12.8 are ACCEPTED (M12.3 providers explicitly
+DEFERRED, evidence-backed; M12.5 packaging proven live for Linux x86_64
+only, the other 3 platforms CI-defined but never executed). Local
+annotated `m12-accepted` points to the tip of this milestone's work — the
+final milestone of the current roadmap; never pushed.
 
 Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
 tests; locked fmt/check/clippy/test green in the acceptance record. Combined
@@ -80,6 +83,32 @@ reconfirmed green, including finding and fixing a real pre-existing bug in
 assumption was not). M11's bounded soak was **300 seconds**, 103 cycles,
 flat RSS/fds/threads, zero reconnects/transient errors. See
 `docs/M11_ACCEPTANCE.md`'s M11.8 journal entry for full detail.
+
+Recorded M12 checks: 445 unit + 76 fake HTTP; locked fmt/check/clippy/test
+green. M12.1 plugin execution is genuinely new architecture (first local-
+subprocess boundary), reusing `app::session::Sessions` verbatim for task
+ownership/cancellation. A real live bug was found and fixed in M12.2: task
+`abort()` (the real shutdown path, distinct from cooperative cancel) never
+reached the running future's own cancellation branch, so a plugin's
+grandchild process (e.g. `sh -c "... & wait"`) could survive app quit;
+fixed with a `GroupKillGuard` held for the whole run scope, regression
+test added, re-verified live. `scripts/accept-m12.py` (real plugin stdout/
+exit code, live no-credential-leak proof, live timeout and live mid-run
+cancellation each confirmed via a real OS-process-table check, headless
+`schemaVersion`, packaged-archive extract+run) passed twice clean. Full
+M1-M11 regression reconfirmed green, including cleaning up genuine
+ReplicaSet fixture drift (accumulated across this long session,
+`revisionHistoryLimit=10` never pruned it) and correcting a false claim in
+M12.4's own journal (`schemaVersion` is present with value 1, but is NOT
+guaranteed to be the first serialized key — `serde_json::Value` has no
+`preserve_order` feature, deliberately not enabled since it would make
+`mutation::workflow::payload_hash`'s canonical-JSON fingerprint depend on
+source key order, a real risk to a safety-critical mutation-confirmation
+path). M12's bounded soak was **180 seconds**, 64 cycles, flat RSS/fds/
+threads, zero reconnects/transient errors, and an explicit post-shutdown
+`pgrep` sweep confirming zero orphan plugin processes. See
+`docs/M12_ACCEPTANCE.md`'s M12.8 journal entry for full detail.
+
 These are recorded results, not tests rerun during this documentation update.
 
 Current architecture: M6 bounded Adjacent/Xray; M7 policy/confirmation/
@@ -92,7 +121,13 @@ path `Config` has ever had: atomic, `0600`, temp-file-then-rename),
 configurable keymaps and themes (both fail safe on malformed config); M11
 read-only evidence composition -- Eye, Pulse, evidence bundle
 (`:bundle PATH [--force]`), blast radius (`:blast_radius`), context diff
-(`:context_diff CONTEXT`).
+(`:context_diff CONTEXT`); M12 trust-gated plugin subprocess execution
+(`:plugin NAME`, env-allowlisted, bounded output, timeout/process-group
+cancellation via `Sessions`), headless `schemaVersion` hardening, Linux
+x86_64 packaging (dual MIT/Apache-2.0, `scripts/package.sh`,
+`docs/INSTALL.md`), checksums/license inventory (`scripts/checksums.py`,
+`docs/LICENSE_INVENTORY.md`), and a performance campaign
+(`benches/pipeline.rs` cold-startup + 20k-object tier).
 Helm is inspection-only, with an
 explicit user-triggered, bounded, UID/type-checked Secret-body reader.
 Values masking is heuristic, manifest output is identities only, NOTES are
@@ -110,10 +145,11 @@ kubelet/API x509 trust failure after long uptime.
 The explicit mutation-test flag is a harness assertion, not automatic proof
 of cluster identity or permission to operate on production.
 
-M12 is next and has not started. Read the relevant acceptance ledger before
-continuing; preserve accepted behavior and the unresolved bounded terminal
-stdin limitation in `docs/EXEC.md`. No implementation is authorized merely
-by this status update.
+M12 is ACCEPTED and was the final milestone of the current roadmap. Read
+the relevant acceptance ledger before continuing any future work; preserve
+accepted behavior and the unresolved bounded terminal stdin limitation in
+`docs/EXEC.md`. No implementation is authorized merely by this status
+update.
 
 ## Historical milestone checkpoints
 

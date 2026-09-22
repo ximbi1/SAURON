@@ -1,13 +1,14 @@
 # M12 — Plugins/providers/headless maturity/packaging/performance: acceptance ledger
 
-Status: **PLANNED — NOT STARTED**. This document is M12.0: the scope-freeze
-contract written before any M12 implementation code, exactly like
-`docs/M11_ACCEPTANCE.md` was for M11. It records what reconnaissance found,
-the amended slice ledger, the trust/protocol/output/packaging/performance
-contracts, and the exact conditions for `m12-accepted`. Nothing in this
-file authorizes touching code, cluster, CI, or publication — only the
-slices marked ACCEPTED in the Journal, once this contract exists,
-authorize implementation work.
+Status: **ACCEPTED (M12.0-M12.8; M12.3 providers explicitly DEFERRED,
+evidence-backed)**. Local annotated tag `m12-accepted`; never pushed. This
+document began as M12.0: the scope-freeze contract written before any M12
+implementation code, exactly like `docs/M11_ACCEPTANCE.md` was for M11. It
+now also records the full Journal of every slice's own implementation and
+live acceptance evidence, the amended slice ledger, the trust/protocol/
+output/packaging/performance contracts, and the M12.8 combined-acceptance
+record that satisfied the "exact conditions for `m12-accepted`" this
+document itself originally set out.
 
 `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` remain separate,
 untouched, PLANNED — NOT STARTED ledgers; M12 does not depend on them.
@@ -166,7 +167,7 @@ roadmap's own acceptance line). **Amended scope**:
 | M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | ACCEPTED |
 | M12.6 | Checksums / license inventory / release manifest | ACCEPTED |
 | M12.7 | Performance — extend `benches/pipeline.rs`; startup + large-object-count campaign | ACCEPTED |
-| M12.8 | Combined acceptance / full M1-M11 regression / soak / docs / final tag | PLANNED |
+| M12.8 | Combined acceptance / full M1-M11 regression / soak / docs / final tag | ACCEPTED |
 
 ## Explicit non-goals for M12
 
@@ -538,12 +539,23 @@ None yet — implementation has not started. Updated per slice.
   this document's own contract promised, not a rebuild -- `--check`/
   `--snapshot`/`info`/`info --offline` were already P0 **TESTED** in
   `docs/SOFKA_PARITY.md` before this slice started. One additive change:
-  `--output json|yaml`'s document object gained `"schemaVersion": 1` as
-  its first key -- every existing key/shape is otherwise byte-for-byte
-  unchanged, so any consumer that already ignores unknown keys keeps
-  working verbatim; `scripts/accept-m3.py`'s own live `snapshot()` helper
-  (which only ever reads specific keys like `result['items']`) needed no
-  change, confirmed by inspection rather than assumed.
+  `--output json|yaml`'s document object gained a new `"schemaVersion": 1`
+  key -- every existing key/shape is otherwise byte-for-byte unchanged, so
+  any consumer that already ignores unknown keys keeps working verbatim;
+  `scripts/accept-m3.py`'s own live `snapshot()` helper (which only ever
+  reads specific keys like `result['items']`) needed no change, confirmed
+  by inspection rather than assumed. (Corrected in M12.8: this entry
+  originally claimed `schemaVersion` was serialized as the object's first
+  key. `scripts/accept-m12.py`'s own live check caught that this is false
+  -- `serde_json::Value` has no `preserve_order` feature enabled in this
+  project, so object keys serialize alphabetically for both `--output
+  json` and `--output yaml`. Enabling `preserve_order` was considered and
+  rejected: it would make `mutation::workflow::payload_hash`'s canonical-
+  JSON fingerprint depend on source key order instead of being
+  alphabetically stable, a real risk to a safety-critical mutation-
+  confirmation path, for a purely cosmetic gain. Fixed the claim, not the
+  ordering -- `src/main.rs`'s own comment now states the accurate
+  guarantee: presence and value, never byte position.)
 
   Every other headless guarantee was **verified live, not merely
   asserted**: `--snapshot --output json < /dev/null` against the real
@@ -695,58 +707,187 @@ None yet — implementation has not started. Updated per slice.
   `cargo clippy --all-targets`, and the full test suite (445 unit + 76
   fake-HTTP) all stayed clean after the bench change.
 
+- 2026-09-22: M12.8 (combined acceptance) implemented, mirroring M10.9's
+  and M11.8's own combined-acceptance precedent exactly.
+
+  **Full M1-M11 regression** (every existing `accept-m*.py`, unmodified)
+  passed. Two real issues found and fixed along the way, both correctly
+  classified before touching anything:
+  - `accept-m3.py` needs an explicit `filters`/`sorting` argument (not a
+    bug -- a harness usage detail, confirmed by reading the script; both
+    modes pass).
+  - `accept-m9.py`'s own internal re-run of `accept-m4.py` hit a
+    transient `previous_logs` fixture flake ("unable to retrieve
+    container logs" from containerd, a log-retention race on the
+    `crashloop` fixture pod, not a SAUR-ON defect) -- confirmed by
+    re-running `accept-m4.py` standalone immediately after, which passed
+    clean.
+  - `accept-m9.py`/`accept-m11.py` both failed once on `blast_radius`'s
+    own owner-chain grouping: the `healthy` Deployment fixture had
+    accumulated 9 stale zero-replica ReplicaSets across this long
+    session's own repeated fixture applies (`revisionHistoryLimit=10`
+    never pruned them), inflating the candidate scan and pushing the
+    safety disclaimer text below the visible pane in a narrower terminal
+    -- genuine fixture drift, not an app bug (`blast_radius` correctly
+    reported `PARTIAL EVIDENCE` when it hit a real bound). Fixed by
+    deleting the stale ReplicaSets on the isolated `kind-sauron-test`
+    cluster; both scripts passed clean on retry.
+
+  **New `scripts/accept-m12.py`** (7 sequences, modeled on
+  `accept-m11.py`'s own tmux/expect/kubectl pattern via `accept-m4.py`'s
+  helpers): a real approved plugin (`/usr/bin/env`) runs end-to-end with
+  real captured stdout and exit code 0; a live no-credential-leak proof
+  (the launched shell exports a real `KUBECONFIG` path and a real
+  fixture secret value; the plugin's own captured environment output is
+  grepped and neither appears -- `ENV_ALLOWLIST` proven live, not just
+  unit-tested); a live timeout (`timeout_secs=1` against a ~2.5s sleep)
+  confirmed `TimedOut` and a real `pgrep` sweep confirming the process is
+  actually gone; a live mid-run cancellation (Escape during a 30s sleep)
+  confirmed via the same real `pgrep` sweep -- the exact scenario that
+  surfaced the `GroupKillGuard` bug in M12.2, re-verified still fixed
+  under this fresh harness; headless `--output json` schema/ANSI/exit
+  checks; and the M12.5 packaged archive re-verified to extract and run.
+  Run **twice, back to back, zero flakes both times**.
+
+  A **real bug was found and fixed** while writing `accept-m12.py`'s own
+  headless check: the original assertion (`schemaVersion` is the JSON
+  object's first key) failed on a real invocation. Root-caused: this
+  project's `serde_json` dependency has no `preserve_order` feature
+  enabled, so `serde_json::Value`'s object type serializes keys
+  alphabetically for both `--output json` and `--output yaml` -- meaning
+  M12.4's own journal entry's claim ("gained `schemaVersion: 1` as its
+  first key") was factually wrong, though the field's presence and value
+  were always correct (a documentation/comment-accuracy defect, not a
+  functional one; no consumer that reads JSON structurally was ever
+  affected). Considered and **rejected** enabling `preserve_order`
+  globally: `mutation::workflow::payload_hash`'s own "stable fingerprint"
+  comment depends on `serde_json::to_string(value)` being deterministic
+  regardless of the source object's own key order (today guaranteed by
+  alphabetical canonicalization); switching to insertion-order
+  serialization would make that fingerprint depend on the *source* JSON's
+  own key order instead, a real risk to a safety-critical
+  mutation-confirmation binding, for a purely cosmetic gain. Fixed the
+  claim, not the ordering: `src/main.rs`'s own comment and this
+  document's own M12.4 entry now state the accurate guarantee (presence
+  and value, never byte position); `accept-m12.py`'s own check was
+  updated to match. `cargo fmt`/`clippy --all-targets`/`test` all stayed
+  clean after the fix; full regression re-confirmed unaffected (a
+  comment-only production change).
+
+  **New `scripts/soak-m12.py`** (modeled on `soak-m11.py`'s own shape):
+  180 bounded seconds, 64 cycles of Eye/Pulse/blast-radius churn plus a
+  plugin run every cycle (a fast-completing `echo`), a timeout cycle
+  every 3rd iteration and a cancellation cycle every 4th, a real headless
+  `--output json` invocation every 6th cycle, and an `:info` active-
+  session-count check every 10th cycle (stayed at `0` throughout, as
+  expected between cycles). RSS/fd/thread counts sampled every cycle
+  stayed exactly flat (`49944 KiB` / `15` fds / `4` threads, start to
+  finish) across 21 timeouts and 16 cancellations. Zero reconnects, zero
+  transient errors. **A real harness bug was found and fixed** in the
+  soak script's own shutdown sequence (not an app bug): since `sauron` is
+  the tmux pane's own direct command (not wrapped in a shell), sending
+  `C-c` to gracefully quit the app already ends the pane/session/server
+  on its own, so a subsequent unconditional `tmux kill-server` call
+  legitimately errors (server already gone) -- fixed by tolerating that
+  exit code (matching `soak-m11.py`'s own precedent of a tolerant
+  shutdown). After shutdown, an explicit `pgrep` sweep for both this
+  run's unique plugin-fixture markers found **zero** orphan processes.
+
+  **A second real test-flake was found and fixed** while running the
+  final pre-commit `cargo test` pass (test-harness bug, not an app bug,
+  classified before touching anything): `app::session::tests::
+  dropping_sessions_leaves_no_real_child_process_running` and `plugin::
+  tests::aborting_the_task_still_kills_the_whole_process_group_not_just_
+  the_direct_child` both compute their own "unique" sleep-duration marker
+  as `format!("30.{}", std::process::id() % 1000)` -- an identical
+  formula. `std::process::id()` is the SAME value for every test running
+  inside one `cargo test` binary, so the two tests always produce the
+  exact same marker string and, whenever `cargo test`'s default
+  parallelism runs them concurrently, one test's own `pgrep -f` sees the
+  *other* test's still-running (or just-dropped) sleep process, causing a
+  spurious pass or fail depending on timing. This is the same class of
+  flake fixed twice earlier in M12 (M12.2, M12.4) — a per-process marker
+  is not sufficient when two call sites share the exact same formula
+  within one binary; only distinct static markers guarantee no collision
+  regardless of PID. Fixed by giving `app::session`'s own test a
+  different reserved base ("35." instead of "30."), leaving
+  `plugin.rs`'s own tests on "30.". Confirmed stable across 4 consecutive
+  full-suite runs afterward (445 unit + 76 fake-HTTP, all green every
+  time).
+
+  **Docs reconciled**: `HANDBOOK.md` (Feature status table, Current
+  milestone/continuation instructions, a new Recorded M12 checks
+  paragraph matching the M9/M10/M11 precedent), `docs/RUNBOOK.md`
+  (Current checkpoint, architecture summary, the stale "M12 is next and
+  has not started" line), `README.md` (Status table, a new full M12
+  section matching M9/M10/M11's own style, explicit DEFERRED/packaging-
+  subset callouts), `docs/ROADMAP.md` (checkpoint line, M12 row),
+  `docs/SOFKA_PARITY.md` (Plugins rows split into what M12 actually
+  delivered -- TESTED -- versus what remains DEFERRED; Distribution row
+  moved to TESTED (subset); Performance and Headless rows updated with
+  M12.7/M12.4 evidence; Providers rows left untouched, still DEFERRED,
+  never silently upgraded). `docs/M9B_A_ACCEPTANCE.md`/
+  `docs/M9B_B_ACCEPTANCE.md` confirmed untouched (`git diff --stat`
+  empty).
+
+  Production received zero writes across the entire milestone -- every
+  live check ran against `kind-sauron-test` (and `kind-sauron-m9` via
+  `accept-m9.py`'s own regression). Worktree is clean except for this
+  milestone's own intended changes. This is the final milestone of the
+  current roadmap.
+
 ## Final acceptance checklist
 
-- [ ] Every M12.1-M12.8 slice implemented and individually ACCEPTED in this
+- [x] Every M12.1-M12.8 slice implemented and individually ACCEPTED in this
       document's own Journal (or, for providers only, explicitly
       evidence-backed DEFERRED, mirroring M9.6/M11.6's precedent — never
       silently dropped).
-- [ ] No second task-supervision system, config file, redaction function,
+- [x] No second task-supervision system, config file, redaction function,
       or benchmark harness exists anywhere in the M12 diff.
-- [ ] Plugin execution: explicit argv only, no implicit shell; process-
+- [x] Plugin execution: explicit argv only, no implicit shell; process-
       group termination proven live; timeout proven live; bounded stdout/
       stderr proven live; no orphan process survives quit/cancellation.
-- [ ] Plugin trust: default is `disabled`; only explicitly `approved`
+- [x] Plugin trust: default is `disabled`; only explicitly `approved`
       plugins run; no credential (kubeconfig/token/Secret) reaches a
       plugin by default, proven by an explicit test inspecting the actual
       child environment.
-- [ ] Plugin protocol: malformed output, oversized output, non-zero exit,
+- [x] Plugin protocol: malformed output, oversized output, non-zero exit,
       and a missing executable all produce an explicit failure outcome,
       never a crash and never a silent retry.
-- [ ] Providers (if shipped): partial/unavailable/stale stays explicit;
+- [x] Providers (if shipped): partial/unavailable/stale stays explicit;
       native evidence remains usable when a provider fails; no credential
       sent to an unapproved endpoint; provider evidence is always
       provenance-labeled, never presented as native Kubernetes truth.
-- [ ] Headless output: explicit `schemaVersion`; no ANSI; no prompt;
+- [x] Headless output: explicit `schemaVersion`; no ANSI; no prompt;
       deterministic ordering; correct non-zero exit codes; confirmed live
       with no TTY attached.
-- [ ] Packaging: Linux x86_64 built and locally accepted; the CI matrix
+- [x] Packaging: Linux x86_64 built and locally accepted; the CI matrix
       for the other three platforms is defined and documented, never
       falsely claimed as executed/proven this session.
-- [ ] Checksums verify for every artifact actually produced; one modified
+- [x] Checksums verify for every artifact actually produced; one modified
       byte fails verification; every produced artifact appears in the
       manifest.
-- [ ] License inventory exists for the actual dependency graph; any
+- [x] License inventory exists for the actual dependency graph; any
       unknown/unparseable license is explicit, never silently dropped.
-- [ ] Performance: methodology documented (hardware/OS/Rust
+- [x] Performance: methodology documented (hardware/OS/Rust
       version/profile/repetitions); startup and large-object-count
       measurements recorded; no comparative claim against another tool;
       any optimization made records its own before/after numbers.
-- [ ] Production sees zero writes across the entire milestone.
-- [ ] All work stays bounded and cancellable.
-- [ ] Full M1-M11 regression (`accept-m*.py`, unmodified) passes,
+- [x] Production sees zero writes across the entire milestone.
+- [x] All work stays bounded and cancellable.
+- [x] Full M1-M11 regression (`accept-m*.py`, unmodified) passes,
       including recreating either isolated kind cluster if drift is
       found.
-- [ ] Combined M12 acceptance (`accept-m12.py`) run twice clean.
-- [ ] M12 soak completes with recorded observations under the "observed
+- [x] Combined M12 acceptance (`accept-m12.py`) run twice clean.
+- [x] M12 soak completes with recorded observations under the "observed
       stability only" honesty standard — no leak-freedom claims — and
       confirms no orphan child process remains afterward.
-- [ ] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
+- [x] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
       `README.md`, `docs/ROADMAP.md` checkpoint line, `docs/SOFKA_PARITY.md`
       rows for every slice actually shipped, packaging/install docs.
-- [ ] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed still
+- [x] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed still
       untouched.
-- [ ] Worktree clean.
-- [ ] Local annotated tag `m12-accepted` created — nothing pushed/
+- [x] Worktree clean.
+- [x] Local annotated tag `m12-accepted` created — nothing pushed/
       published without explicit authorization beyond what was already
       given.

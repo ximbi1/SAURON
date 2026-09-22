@@ -23,14 +23,14 @@ action without passing explicit safety and policy boundaries.
 
 ## Status
 
-SAURON is being built as a 12-milestone project.
+SAURON was built as a 12-milestone project.
 
-M1 through M11 are currently **ACCEPTED** (M9.6 explicitly deferred, see
+M1 through M12 are **ACCEPTED** (M9.6 and M12.3 explicitly deferred, see
 below), with local annotated milestone tags (`m1-accepted` through
-`m11-accepted`) and live verification against isolated Kubernetes `kind`
+`m12-accepted`) and live verification against isolated Kubernetes `kind`
 clusters.
 
-M12 is the next milestone and has not started yet.
+M12 was the final milestone of the current roadmap.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -46,11 +46,26 @@ M12 is the next milestone and has not started yet.
 | M9 | Flux, Argo CD and Helm integrations | ACCEPTED (M9.6 Helm rollback/uninstall DEFERRED — see below) |
 | M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | ACCEPTED |
 | M11 | Eye, Pulse, evidence bundles, context diff and blast-radius analysis | ACCEPTED |
-| M12 | Plugins, providers, headless workflows, packaging and performance hardening | NOT STARTED |
+| M12 | Trust-gated plugin execution, headless hardening, packaging and performance | ACCEPTED (providers explicitly DEFERRED — see below) |
 
-See [`HANDBOOK.md`](HANDBOOK.md) for the full engineering record and
-[`docs/`](docs/) for architecture notes, feature contracts and milestone
-acceptance ledgers.
+See [`HANDBOOK.md`](HANDBOOK.md) for the full engineering record,
+[`docs/M12_ACCEPTANCE.md`](docs/M12_ACCEPTANCE.md) for M12's own detailed
+journal, [`docs/INSTALL.md`](docs/INSTALL.md) for installing a packaged
+release, and [`docs/`](docs/) for architecture notes, feature contracts
+and milestone acceptance ledgers.
+
+**M12.3 (providers: Prometheus/VictoriaMetrics/VictoriaLogs adapters) is
+explicitly DEFERRED**, not implemented — investigated and found to be a
+genuinely large new integration surface with zero existing scaffolding,
+at this project's own lowest priority tier, not named in this milestone's
+own acceptance contract. See `docs/M12_ACCEPTANCE.md`'s M12.3 journal
+entry.
+
+**M12.5 (packaging) is proven live for Linux x86_64 only.** The other
+three platforms (Linux aarch64, macOS x86_64, macOS aarch64) are defined
+in `.github/workflows/release.yml` (`workflow_dispatch`-only, never
+triggered) but not built or verified this milestone — this development
+machine has no cross-linker toolchain and no macOS hardware.
 
 ---
 
@@ -1218,22 +1233,65 @@ and zero transient errors, flat RSS/fd/thread.
 
 ### M12 — Extensibility and distribution
 
-Not started.
+ACCEPTED: M12.0-M12.8 (M12.3 providers explicitly DEFERRED — see below).
+Full record in [`docs/M12_ACCEPTANCE.md`](docs/M12_ACCEPTANCE.md). The
+final milestone of the current roadmap.
 
-Planned scope includes:
+- **Plugins** (`:plugin NAME`) — the first local-subprocess boundary this
+  codebase has ever had. A plugin is an explicit, user-approved executable
+  with a fixed argv template — never an ad-hoc shell string; no `sh -c`/
+  `eval`/shell interpolation. `Trust::{Approved, Disabled}` defaults to
+  `Disabled`; there is deliberately no "warn but run" state, mirroring
+  `readonly = false`'s own explicit-approval gesture. A child process gets
+  an explicit environment allowlist (`PATH`, `HOME`, `LANG` only) — no
+  kubeconfig path, bearer token, or Secret value ever reaches it, proven
+  live by approving a plugin that dumps its own environment and grepping
+  its real captured output for a live fixture secret. Output is bounded
+  (16 KiB/line, 500 lines total, matching `kube::logs`'s own clip
+  convention); a configurable timeout and cancellation both kill the
+  plugin's entire process group, not just the direct child — closing a
+  real bug found live during development (`Sessions::drop`'s task-`abort()`
+  path never reached the running future's own cooperative-cancel branch,
+  so a `sh -c "... & wait"` grandchild could survive app quit; fixed with
+  a dedicated `GroupKillGuard`). Task ownership/cancellation fully reuses
+  `app::session::Sessions` verbatim.
+- **Providers** — investigated, evidence-backed **DEFERRED**, not
+  implemented. Zero existing scaffolding, no HTTP client dependency
+  beyond `kube`'s own transitive plumbing, no Prometheus/VictoriaMetrics/
+  VictoriaLogs instance in either isolated test cluster, and this
+  project's own lowest priority tier. See `docs/M12_ACCEPTANCE.md`'s
+  M12.3 journal entry.
+- **Headless maturity** — `--output json|yaml` gained a `schemaVersion`
+  key (additive only). Live-proven: no TTY needed, zero ANSI bytes,
+  correct exit codes, `PARTIAL DISCOVERY` on stderr while data stays on
+  stdout.
+- **Packaging** — dual-licensed `MIT OR Apache-2.0`. `scripts/package.sh`
+  produces a deterministic archive (binary + both LICENSE files +
+  `docs/INSTALL.md`); proven live end-to-end for Linux x86_64 only —
+  built, packaged, extracted, and run (`--version`, `info --offline`).
+  The other three platforms (Linux aarch64, macOS x86_64/aarch64) are
+  defined in `.github/workflows/release.yml` (`workflow_dispatch`-only,
+  never triggered) but not built this milestone — no cross-linker
+  toolchain or macOS hardware on the development machine.
+- **Checksums / license inventory** — `scripts/checksums.py` produces
+  `SHA256SUMS.txt`/`manifest.json`; tamper detection proven live in both
+  directions. `scripts/license_inventory.py` audits all 305 dependencies
+  via `cargo license`: 0 with a missing license, all permissive, no
+  forced copyleft. See [`docs/LICENSE_INVENTORY.md`](docs/LICENSE_INVENTORY.md).
+- **Performance** — `benches/pipeline.rs` gained a real cold-startup
+  measurement (spawns the built binary, median of 5) and a 20,000-object
+  sweep tier, every run now printing its own hardware/rustc/OS context.
+  No comparative claims.
 
-- plugins
-- external providers
-- structured plugin protocol
-- bounded plugin execution
-- headless workflows
-- machine-readable output
-- packaging
-- installation paths
-- compatibility hardening
-- performance campaigns
-- larger-scale benchmarks
-- release engineering
+Live-verified against `kind-sauron-test`: `scripts/accept-m12.py` (7
+sequences: real plugin stdout/exit code, live no-credential-leak proof,
+live timeout and live mid-run cancellation each confirmed via a real
+OS-process-table check, headless `schemaVersion`, packaged-archive
+extract+run) passed twice clean; a 180-second bounded soak
+(`scripts/soak-m12.py`) ran 64 cycles of Eye/Pulse/blast-radius/plugin
+churn with zero reconnects and zero transient errors, flat RSS/fd/thread,
+and an explicit post-shutdown process sweep confirming zero orphan
+plugin processes.
 
 ---
 

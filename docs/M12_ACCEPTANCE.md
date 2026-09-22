@@ -163,8 +163,8 @@ roadmap's own acceptance line). **Amended scope**:
 | M12.2 | Plugin protocol (smallest safe shape) + command registry wiring | ACCEPTED |
 | M12.3 | Providers — investigated; evidence-backed DEFERRED | DEFERRED |
 | M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | ACCEPTED |
-| M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | PLANNED |
-| M12.6 | Checksums / license inventory / release manifest | PLANNED |
+| M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | ACCEPTED |
+| M12.6 | Checksums / license inventory / release manifest | ACCEPTED |
 | M12.7 | Performance — extend `benches/pipeline.rs`; startup + large-object-count campaign | PLANNED |
 | M12.8 | Combined acceptance / full M1-M11 regression / soak / docs / final tag | PLANNED |
 
@@ -579,6 +579,80 @@ None yet — implementation has not started. Updated per slice.
   main.rs-testing harness for one additive field would be more new
   architecture than the change itself, not proportionate to a hardening
   pass. 445 unit + 76 fake-HTTP total, fmt/clippy clean.
+
+- 2026-09-22: M12.5 (packaging) implemented per the user's own explicit
+  decision on the packaging strategy question: define the CI build matrix,
+  do not execute it, and prove the one platform this machine can honestly
+  build (Linux x86_64) with a real local build and full acceptance. Before
+  packaging could produce a complete archive, a real gap surfaced: the
+  project had no `LICENSE` file and no `license` field in `Cargo.toml` --
+  asked the user directly rather than presuming a legal choice; the user
+  chose dual `MIT OR Apache-2.0`. Added `LICENSE-MIT` and `LICENSE-APACHE`
+  at the repo root and `license = "MIT OR Apache-2.0"` in `Cargo.toml`.
+
+  Added `scripts/package.sh` (stages the binary + both LICENSE files +
+  `docs/INSTALL.md` into `target/package/sauron-<version>-<target>/`, then
+  produces a deterministic `.tar.gz` via `tar --sort=name
+  --mtime='1970-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner` in
+  `target/dist/` -- no embedded timestamps or host-specific owner/group IDs,
+  so repeated packaging of byte-identical inputs is byte-identical output).
+  Added `docs/INSTALL.md` (platform table, extraction, checksum
+  verification, PATH install, from-source build, `info --offline`/
+  `--check` as the two safe first commands to run). Added
+  `.github/workflows/release.yml`: `workflow_dispatch`-only trigger (never
+  fires on push/PR), a 4-target build matrix (`x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu` via a cross linker, `x86_64-apple-darwin`,
+  `aarch64-apple-darwin`), packaging + native-only basic-acceptance steps,
+  and a `manifest` job that runs `scripts/checksums.py` (below) over every
+  uploaded archive. The workflow's own header comment states plainly that
+  it has never been executed -- this machine has no rustup cross-target
+  toolchain and no macOS hardware, and triggering CI beyond what was
+  already authorized for `main`/tags needs its own explicit go-ahead,
+  neither of which this slice has.
+
+  **Proven live, not merely asserted**, for Linux x86_64: `cargo build
+  --release` produced `target/release/sauron` (17 MiB); `bash
+  scripts/package.sh x86_64-unknown-linux-gnu target/release/sauron`
+  produced `target/dist/sauron-0.1.0-x86_64-unknown-linux-gnu.tar.gz`
+  containing exactly `sauron`, `LICENSE-MIT`, `LICENSE-APACHE`,
+  `INSTALL.md`; extracted into a scratch directory, confirmed permissions
+  (`sauron` 0755, the three docs 0644); ran the extracted binary's
+  `--version` (`sauron 0.1.0`) and `info --offline` (prints config
+  directory, read-only enforcement, theme, max-objects, cache budget,
+  makes no Kubernetes request) -- the same two checks the CI workflow's
+  own "Basic acceptance" step performs.
+
+- 2026-09-22: M12.6 (checksums / license inventory) implemented.
+  `scripts/checksums.py` (already written in M12.5's own slice) run
+  against the real `target/dist` archive: produced `SHA256SUMS.txt` in
+  the exact `sha256sum -c` format and `manifest.json`
+  (`schemaVersion: 1`, one entry per archive: file/bytes/sha256, no
+  embedded timestamp in the entries themselves so two runs over an
+  unchanged archive produce byte-identical entries). **Verified live,
+  both directions**: `sha256sum -c SHA256SUMS.txt` against the real
+  archive reports it matches; a copy of the same archive with a single
+  byte flipped (via `dd`, offset 100) against the *original* archive's
+  own recorded checksum is correctly reported as **not** matching --
+  proving the check actually detects tampering rather than trivially
+  passing.
+
+  Added `scripts/license_inventory.py`, generating a license inventory
+  from `cargo license --json`'s own output against the locked dependency
+  graph -- never hand-classified. Any dependency with an empty/missing
+  license field is surfaced explicitly (a dedicated "Unknown/unparseable
+  license" section), never silently dropped, mirroring this project's own
+  established "UNKNOWN != ZERO" discipline. Writes
+  `docs/LICENSE_INVENTORY.md` (human-readable table) and
+  `target/dist/license-inventory.json` (machine-readable, same
+  `schemaVersion: 1` shape as `checksums.py`'s own manifest). Run live
+  against this project's real `Cargo.lock`: **305 dependencies, 0 with an
+  unknown/missing license**, all permissive (`Apache-2.0 OR MIT` dominant
+  at 201 occurrences; the remainder MIT/BSD/ISC/Zlib/Unlicense/
+  BSL-1.0/CDLA-Permissive-2.0/Unicode-3.0 in various OR combinations; one
+  `Apache-2.0 OR LGPL-2.1-or-later OR MIT` entry where the LGPL term is
+  only one of three alternatives, not a forced obligation) -- no forced
+  copyleft, no legal red flag, confirmed by inspection of the actual
+  output rather than assumed from the crate ecosystem's usual reputation.
 
 ## Final acceptance checklist
 

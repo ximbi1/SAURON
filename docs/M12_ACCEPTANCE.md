@@ -162,7 +162,7 @@ roadmap's own acceptance line). **Amended scope**:
 | M12.1 | Plugin execution foundation: subprocess trust/process-group/bounds, reusing `app::session::Sessions` | ACCEPTED |
 | M12.2 | Plugin protocol (smallest safe shape) + command registry wiring | ACCEPTED |
 | M12.3 | Providers — investigated; evidence-backed DEFERRED | DEFERRED |
-| M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | PLANNED |
+| M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | ACCEPTED |
 | M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | PLANNED |
 | M12.6 | Checksums / license inventory / release manifest | PLANNED |
 | M12.7 | Performance — extend `benches/pipeline.rs`; startup + large-object-count campaign | PLANNED |
@@ -533,6 +533,52 @@ None yet — implementation has not started. Updated per slice.
   not implemented, not half-built. `PROVIDER EVIDENCE != KUBERNETES TRUTH`
   and the rest of this document's own provider trust-model section remain
   as a frozen contract for whichever future milestone takes this on.
+
+- 2026-09-22: M12.4 (headless maturity) implemented as the hardening pass
+  this document's own contract promised, not a rebuild -- `--check`/
+  `--snapshot`/`info`/`info --offline` were already P0 **TESTED** in
+  `docs/SOFKA_PARITY.md` before this slice started. One additive change:
+  `--output json|yaml`'s document object gained `"schemaVersion": 1` as
+  its first key -- every existing key/shape is otherwise byte-for-byte
+  unchanged, so any consumer that already ignores unknown keys keeps
+  working verbatim; `scripts/accept-m3.py`'s own live `snapshot()` helper
+  (which only ever reads specific keys like `result['items']`) needed no
+  change, confirmed by inspection rather than assumed.
+
+  Every other headless guarantee was **verified live, not merely
+  asserted**: `--snapshot --output json < /dev/null` against the real
+  `kind-sauron-test` cluster exits `0`, needs no TTY (stdin genuinely
+  closed), writes zero ANSI escape bytes to stdout (`grep -c $'\x1b'`
+  found none), and correctly puts `PARTIAL DISCOVERY` on stderr while data
+  stays on stdout; a request for a nonexistent resource kind exits `1`
+  with a clear message; `info --offline` makes zero Kubernetes requests
+  and needs no TTY either.
+
+  **A real test-flake found and fixed during this slice's own `cargo
+  test` run** (test-harness bug, not an app bug -- classified before
+  touching anything, matching this project's own bug discipline):
+  `app::session::tests::dropping_sessions_leaves_no_real_child_process_
+  running` (written in M12.1) failed intermittently once M12.2 added its
+  own `plugin.rs` tests that spawn an identically-shaped `sleep 30`
+  fixture -- `cargo test` runs tests in parallel by default, so one
+  test's own `pgrep -f "sleep 30"` could match the *other* test's
+  concurrently-running process. Root-caused by re-running the failing
+  test in isolation (passed every time) versus the full suite (flaked),
+  confirming it was a fixture-uniqueness problem, not a real ordering bug
+  in `Sessions`/`GroupKillGuard` themselves. Fixed by giving the session
+  test's own fixture a unique sleep duration derived from the test
+  process's own PID, exactly the same fix already applied to `plugin.rs`'s
+  own abort-path regression test earlier in this milestone. Confirmed
+  stable across 4 consecutive full-suite runs afterward.
+
+  No new Rust-level unit test was added for the `schemaVersion` field
+  itself: `main.rs` is the binary entrypoint, not library code, and this
+  project has no existing pattern for unit-testing it directly (headless
+  behavior is proven live, via `scripts/accept-m3.py`'s own
+  `snapshot()` calls and this slice's own live checks above) -- adding a
+  main.rs-testing harness for one additive field would be more new
+  architecture than the change itself, not proportionate to a hardening
+  pass. 445 unit + 76 fake-HTTP total, fmt/clippy clean.
 
 ## Final acceptance checklist
 

@@ -338,18 +338,23 @@ mod tests {
     #[tokio::test]
     async fn dropping_sessions_leaves_no_real_child_process_running() {
         let mut sessions = Sessions::default();
+        // A unique duration (not a bare "sleep 30") so this test's own
+        // `pgrep -f` can never collide with `plugin.rs`'s own identical-
+        // looking fixtures running concurrently -- cargo test runs tests
+        // in parallel by default.
+        let marker = format!("30.{}", std::process::id() % 1000);
         let config = crate::plugin::PluginConfig {
             executable: "/bin/sleep".into(),
-            args: vec!["30".into()],
+            args: vec![marker.clone()],
             trust: crate::plugin::Trust::Approved,
             timeout_secs: 30,
         };
         // The outer Sessions-level token is deliberately never cancelled in
         // this test: what's under test is that dropping `Sessions` itself
         // (which aborts the underlying tokio task outright) still leaves
-        // `plugin::run`'s own `tokio::process::Child` -- `kill_on_drop`
-        // set -- no chance to leak, not the cooperative-cancel path
-        // `plugin.rs`'s own unit tests already cover in isolation.
+        // `plugin::run`'s own process-group `GroupKillGuard` no chance to
+        // leak, not the cooperative-cancel path `plugin.rs`'s own unit
+        // tests already cover in isolation.
         sessions
             .spawn(
                 Kind::Plugin,
@@ -369,7 +374,7 @@ mod tests {
         // Let the child actually start before we drop the owner.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let before = std::process::Command::new("pgrep")
-            .args(["-f", "sleep 30"])
+            .args(["-f", &marker])
             .output()
             .expect("pgrep");
         assert!(
@@ -379,7 +384,7 @@ mod tests {
         drop(sessions);
         tokio::time::sleep(Duration::from_millis(300)).await;
         let after = std::process::Command::new("pgrep")
-            .args(["-f", "sleep 30"])
+            .args(["-f", &marker])
             .output()
             .expect("pgrep");
         assert!(

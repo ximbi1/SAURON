@@ -140,7 +140,12 @@ async fn start() -> Result<()> {
                 anyhow::ensure!(!runtime.state.store.incomplete,"Snapshot exceeds cache limits; narrow the namespace/selectors");
                 match cli.output.as_str(){
                     "json"|"yaml"=>{
-                        let document=serde_json::json!({"context":runtime.state.context,"namespace":runtime.state.query.namespace,"resource":runtime.state.query.resource,"filter":runtime.state.filter_text,"unknownExcluded":runtime.state.filter_unknown,"labelSelector":runtime.state.query.labels,"fieldSelector":runtime.state.query.fields,"collectedAt":chrono::Utc::now().to_rfc3339(),"items":runtime.state.rows.iter().map(|o|&o.value).collect::<Vec<_>>()});
+                        // M12.4: additive only -- every existing key/shape is
+                        // unchanged, so any consumer that already ignores
+                        // unknown keys keeps working verbatim. Bump this
+                        // only if a FUTURE change alters an existing key's
+                        // meaning, never for an addition.
+                        let document=serde_json::json!({"schemaVersion":1,"context":runtime.state.context,"namespace":runtime.state.query.namespace,"resource":runtime.state.query.resource,"filter":runtime.state.filter_text,"unknownExcluded":runtime.state.filter_unknown,"labelSelector":runtime.state.query.labels,"fieldSelector":runtime.state.query.fields,"collectedAt":chrono::Utc::now().to_rfc3339(),"items":runtime.state.rows.iter().map(|o|&o.value).collect::<Vec<_>>()});
                         println!("{}",if cli.output=="json"{serde_json::to_string_pretty(&document)?}else{serde_yaml_ng::to_string(&document)?});
                     },
                     _=>{let columns=runtime.state.columns();println!("{}",columns.join("\t"));for object in &runtime.state.rows{println!("{}",columns.iter().map(|c|sauron::safety::text(&if c=="AGE"{sauron::resources::age_text(object.age(chrono::Utc::now()))}else{object.field(c,chrono::Utc::now()).unwrap_or_else(||"-".into())}).replace(['\n','\t']," ")).collect::<Vec<_>>().join("\t"));}}

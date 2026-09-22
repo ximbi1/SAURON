@@ -725,6 +725,7 @@ impl Runtime {
                     None
                 };
                 self.state.context = connection.context.clone();
+                self.state.server = connection.server.clone();
                 self.state.settings = connection.settings.clone();
                 match Keymap::compile(&connection.settings.keys) {
                     Ok(k) => self.state.keymap = k,
@@ -4304,6 +4305,7 @@ mod tests {
             .expect("client"),
             context: "test".into(),
             cluster: "test".into(),
+            server: "https://127.0.0.1:1".into(),
             namespace: "test".into(),
             contexts: vec![],
             catalog: crate::kube::discovery::Catalog {
@@ -4813,6 +4815,7 @@ mod tests {
             .expect("client"),
             context: "test".into(),
             cluster: "test".into(),
+            server: "https://127.0.0.1:1".into(),
             namespace: "test".into(),
             contexts: vec![],
             catalog: crate::kube::discovery::Catalog {

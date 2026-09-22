@@ -56,6 +56,11 @@ pub struct State {
     pub epoch: u64,
     pub request: u64,
     pub context: String,
+    /// M13.5: mirrors `Connection.server` on every `Payload::Connected`,
+    /// the same display-mirror pattern `context` above already
+    /// established -- the real API server URL for the header panel,
+    /// never the connection itself.
+    pub server: String,
     pub query: Query,
     pub resource: Option<Resource>,
     pub settings: Settings,
@@ -141,6 +146,7 @@ impl State {
             epoch: 0,
             request: 0,
             context: "Connecting".into(),
+            server: String::new(),
             query,
             resource: None,
             settings: settings.clone(),

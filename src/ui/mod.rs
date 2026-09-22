@@ -138,9 +138,25 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
     }
     let fullscreen =
         matches!(&state.mode, Mode::Document(doc) | Mode::Search(doc, _) if doc.fullscreen);
+    // M13.5: a taller, informational header (bordered box: Context/
+    // Cluster/Namespace/Resource/Objects) replaces the plain 2-line
+    // heading, but only on a genuinely large terminal -- deliberately
+    // well above every existing acceptance script's own standard
+    // terminal size (180x40, used throughout M3-M12's own `accept-*.py`
+    // scripts, several of which assert the plain "ctx:X" breadcrumb text
+    // verbatim). Raising this threshold above that established size,
+    // rather than reusing `show_banner`'s own lower one below, keeps
+    // every existing script's assertions -- and every real user's
+    // experience at that already-common size -- completely unchanged;
+    // only a terminal meaningfully larger than that convention (like the
+    // user's own real 237x61 terminal this slice was verified against)
+    // gets the fuller panel.
+    let expanded_header = !fullscreen && area.height >= 45 && area.width >= 200;
     let parts = Layout::vertical([
         Constraint::Length(if fullscreen {
             0
+        } else if expanded_header {
+            7
         } else if area.height < 16 {
             2
         } else {
@@ -151,17 +167,6 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         Constraint::Length(1),
     ])
     .split(area);
-    let heading = format!(
-        "{} {}  ·  {} · PF {}",
-        crate::brand::MARK,
-        crate::brand::NAME,
-        if state.settings.readonly {
-            "READ ONLY"
-        } else {
-            "OPERATIONAL (exec/shell/attach/forward enabled)"
-        },
-        state.forward_count,
-    );
     // Short, canonical breadcrumb for the current scope: ctx:X › ns:Y › resource, or
     // ctx:X › resource with no ns segment for a cluster-scoped resource. Always the
     // resolved GVK's qualified name, never the raw alias the user may have typed.
@@ -171,58 +176,118 @@ pub fn render(frame: &mut Frame, state: &mut State, suggestions: &[String]) {
         .as_ref()
         .map(Resource::qualified)
         .unwrap_or_else(|| state.query.resource.clone());
-    let scope = if cluster_scoped {
-        format!("ctx:{} › {resource_label}", state.context)
-    } else {
-        let ns = state.query.namespace.as_deref().unwrap_or("*");
-        format!("ctx:{} › ns:{ns} › {resource_label}", state.context)
-    };
-    // M13.3: the decorative banner only ever occupies space the header
-    // already reserved (4 lines tall whenever the terminal isn't
-    // narrow) but never used -- the heading+scope text below only fills
-    // 2 of those 4 lines. Gated on width too, well above the `32x9`
-    // narrow-terminal floor this project's own acceptance scripts
-    // already enforce everywhere, so it never competes with real
-    // content for space.
+    // M13.3: the decorative banner sits to the right of the header text.
+    // Deliberately its OWN, lower threshold -- unchanged since M13.3's own
+    // live-verified acceptance -- independent of `expanded_header`'s much
+    // higher one above, so a terminal that shows the banner but not yet
+    // the full box (e.g. every existing accept-*.py script's own 180x40)
+    // keeps behaving exactly as M13.3 already shipped.
     let show_banner =
         !fullscreen && area.height >= 16 && area.width >= 100 && state.settings.banner;
-    let header = if show_banner {
+    let (info_area, banner_area) = if show_banner {
         let cols = Layout::horizontal([
             Constraint::Min(1),
             Constraint::Length(crate::brand::BANNER_WIDTH + 2),
         ])
         .split(parts[0]);
+        (cols[0], Some(cols[1]))
+    } else {
+        (parts[0], None)
+    };
+    if let Some(banner_area) = banner_area {
+        // Matches the website's own `.terminal-eye` styling verbatim: the
+        // shield outline (top/bottom lines) in the "red" role, the eye
+        // mark's own line in "amber", and the "SAUR-ON" label muted --
+        // never one flat color for the whole mark.
         frame.render_widget(
             Paragraph::new(
                 crate::brand::BANNER
                     .iter()
-                    .map(|line| {
-                        Line::from(Span::styled(
-                            format!("{line:^w$}", w = crate::brand::BANNER_WIDTH as usize),
-                            Style::default().fg(theme.muted),
-                        ))
+                    .enumerate()
+                    .map(|(i, line)| {
+                        let color = match i {
+                            0 | 2 => theme.critical,
+                            1 => theme.warning,
+                            _ => theme.muted,
+                        };
+                        Line::from(Span::styled(*line, Style::default().fg(color)))
                     })
                     .collect::<Vec<_>>(),
             )
             .alignment(ratatui::layout::Alignment::Center),
-            cols[1],
+            banner_area,
         );
-        cols[0]
+    }
+    if expanded_header {
+        let ns_label = state.query.namespace.as_deref().unwrap_or("<all>");
+        let server = if state.server.is_empty() {
+            "Not connected"
+        } else {
+            state.server.as_str()
+        };
+        let objects = if state.synced {
+            format!("{} synchronized", state.rows.len())
+        } else {
+            format!("{} (syncing…)", state.rows.len())
+        };
+        let field = |label: &'static str, value: String| {
+            Line::from(vec![
+                Span::styled(format!("{label:<12}"), Style::default().fg(theme.muted)),
+                Span::styled(value, Style::default().fg(theme.accent)),
+            ])
+        };
+        let context_value = if state.settings.readonly {
+            format!("{} [read-only]", state.context)
+        } else {
+            state.context.clone()
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                field("Context:", context_value),
+                field("Cluster:", server.to_string()),
+                field("Namespace:", ns_label.to_string()),
+                field("Resource:", resource_label.clone()),
+                field("Objects:", objects),
+            ])
+            .block(
+                Block::bordered()
+                    .title(format!(" {} ", crate::brand::BINARY))
+                    .border_style(Style::default().fg(theme.muted))
+                    .padding(ratatui::widgets::Padding::horizontal(1)),
+            ),
+            info_area,
+        );
     } else {
-        parts[0]
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                heading,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(crate::safety::text(&scope)),
-        ]),
-        header,
-    );
+        let heading = format!(
+            "{} {}  ·  {} · PF {}",
+            crate::brand::MARK,
+            crate::brand::NAME,
+            if state.settings.readonly {
+                "READ ONLY"
+            } else {
+                "OPERATIONAL (exec/shell/attach/forward enabled)"
+            },
+            state.forward_count,
+        );
+        let scope = if cluster_scoped {
+            format!("ctx:{} › {resource_label}", state.context)
+        } else {
+            let ns = state.query.namespace.as_deref().unwrap_or("*");
+            format!("ctx:{} › ns:{ns} › {resource_label}", state.context)
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    heading,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(crate::safety::text(&scope)),
+            ]),
+            info_area,
+        );
+    }
     state.page_size = parts[1].height.saturating_sub(3) as usize;
     let columns = state.columns();
     match &mut state.mode {

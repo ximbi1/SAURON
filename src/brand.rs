@@ -12,11 +12,15 @@ pub const WEBSITE: Option<&str> = None;
 pub const MARK: &str = "◉";
 pub const USER_AGENT: &str = concat!("sauron", "/", env!("CARGO_PKG_VERSION"));
 
-/// M13.3: the same 4-line ASCII mark already shown in the project's own
-/// marketing website (`sauron-s-command-center`'s decorative
-/// `.terminal-eye` block) -- reused verbatim here so the real TUI and the
-/// website agree on one look, not two. Lines are ragged on purpose
-/// (matching the website's own markup); the renderer centers each one
-/// within `BANNER_WIDTH`, the widest line's own character count.
-pub const BANNER: [&str; 4] = ["╭──────╮", "╲  ◉  ╱", " ╲──╱ ", "SAUR-ON"];
-pub const BANNER_WIDTH: u16 = 8;
+/// M13.3: the same ASCII eye mark already shown in the project's own
+/// marketing website, redrawn (not copy-pasted) so every line's own
+/// diagonal is mathematically symmetric within a single fixed-width
+/// (9, deliberately odd) field -- an even total width forced an
+/// unavoidable 1-column rounding asymmetry on any line whose own
+/// content had odd length, found live across two real-screenshot
+/// review rounds. Width 9 lets every line's content also be an odd
+/// length (7 -> 9, 5 -> 9, 3 -> 9), so every diagonal lands on an exact
+/// integer column with equal padding both sides -- no rounding case
+/// left to get wrong.
+pub const BANNER: [&str; 4] = ["╭───────╮", "  ╲ ◉ ╱  ", "   ╲─╱   ", " SAUR-ON "];
+pub const BANNER_WIDTH: u16 = 9;

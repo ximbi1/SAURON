@@ -3120,6 +3120,7 @@ fn connection_with(client: Client, resources: Vec<Resource>) -> Connection {
         client,
         context: "fake".into(),
         cluster: "fake".into(),
+        server: "https://fake".into(),
         namespace: "default".into(),
         contexts: vec![],
         catalog: Catalog {
@@ -3135,6 +3136,7 @@ fn connection(client: Client) -> Connection {
         client,
         context: "fake".into(),
         cluster: "fake".into(),
+        server: "https://fake".into(),
         namespace: "default".into(),
         contexts: vec![],
         catalog: Catalog {

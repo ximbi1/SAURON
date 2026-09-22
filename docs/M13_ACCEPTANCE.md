@@ -289,6 +289,87 @@ Journal → continue.
   on the same wide 180x40 terminal, keeps it fully hidden. Full suite
   (452 unit + 76 fake-HTTP) + `fmt`/`clippy -D warnings` clean.
 
+- 2026-09-22: M13.4 (banner selection between variants) investigated,
+  not assumed, and **explicitly DEFERRED with evidence** — the user
+  confirmed directly that a single fixed design (the one M13.3 already
+  ships, matching the website) is sufficient, and no second variant was
+  ever requested or designed. Inventing extra banner styles with no real
+  demand would be exactly the kind of unrequested scope this project's
+  own discipline avoids ("don't design for hypothetical future
+  requirements"). If a genuine need for a second variant ever surfaces,
+  M13's own Non-goals section already states the constraint any future
+  variant must respect: closed, fixed, shipped choices only, selected by
+  name like the 3 themes already are — never free-form user-authored
+  text or art.
+
+- 2026-09-22: M13.5 (expanded info panel) implemented and **ACCEPTED**,
+  requested directly by the user after seeing this milestone's own
+  banner working: a bordered panel (Context/Cluster/Namespace/Resource/
+  Objects) matching the website's own mockup, deliberately WITHOUT the
+  mockup's keybinding-legend grid (the user's own explicit scope
+  decision — that information already exists on the `?` help screen,
+  duplicating it would be unrequested scope).
+
+  **New plumbing, not just cosmetics**: the real Kubernetes API server
+  URL was never captured anywhere in this codebase before —
+  `kube::Connection.cluster` is only the kubeconfig's own cluster
+  *alias*, never the address actually being talked to. Added
+  `Connection.server: String`, captured from `kube::Config::cluster_url`
+  in `connect()` *before* `Client::try_from` consumes the config (that
+  type has no accessor once turned into a `Client`). Mirrored onto
+  `State.server`, the same display-mirror pattern `State.context`
+  already established, updated on every `Payload::Connected`.
+
+  **A real regression found and fixed before it shipped**: the panel's
+  first draft gated on `area.height >= 22 && area.width >= 100` and
+  *replaced* `show_banner`'s own condition. Every `accept-*.py` script
+  since M3 launches at the standard 180x40 and several assert the plain
+  `"ctx:X › ns:Y › resource"` breadcrumb text verbatim
+  (`accept-m4.py`, `accept-m5.py`, `accept-m5-combined.py`,
+  `accept-m4-forward.py`, `accept-m6.py`) — 180x40 satisfies
+  height>=22, so the first draft would have silently broken all of them
+  by swapping that exact text for the new panel. Classified as an app
+  design mistake, not a harness bug (a real user's already-common
+  terminal size would have seen an unrequested layout change too).
+  Fixed by giving the panel its **own**, much higher threshold
+  (`area.height >= 45 && area.width >= 200`, well above the established
+  180x40 convention and the user's own real 237x61 terminal) while
+  restoring `show_banner` to its original, independent M13.3 condition
+  (`height >= 16 && width >= 100`) — verified live that 180x40 now shows
+  banner-without-panel exactly as M13.3 shipped, and re-ran
+  `accept-m4.py`/`accept-m5.py`/`accept-m5-combined.py`/
+  `accept-m4-forward.py`/`accept-m6.py` to confirm.
+
+  **Two rounds of banner-alignment fixes, found from real screenshots
+  the user sent, not assumed**: (1) the original ragged eye line
+  (`"╲  ◉  ╱"`, 7 chars) centered via runtime `{:^8}` put its one odd
+  padding character on the right only, leaving the left `╲` flush
+  against the frame while the right `╱` sat correctly inset — visible
+  asymmetry in a live screenshot. (2) After a first fix (manually
+  pre-baked, width-8 strings), the user asked for the eye line's
+  diagonals moved one column further inward to match the point line's
+  own inset. Rather than keep patching an even total width (which
+  mathematically cannot center an odd-length line without a 1-column
+  rounding choice), the banner was redrawn at `BANNER_WIDTH = 9`
+  (deliberately odd) with every line's own content also odd-length (9,
+  5, 3 characters respectively) — every diagonal now lands on an exact
+  integer column with equal padding both sides, no rounding case left to
+  get wrong. Verified live via raw ANSI capture (`tmux capture-pane -e`)
+  that the shield outline renders in the "red"/critical role, the eye
+  line in "amber"/warning, and the "SAUR-ON" label muted, matching the
+  website's own `.terminal-eye` CSS (`--primary`/`--secondary`/
+  `--muted-foreground`) exactly.
+
+  **Verified live**, not merely asserted, via `scripts/accept-m13.py`
+  (extended with `seq4`, run twice clean): the standard 180x40 keeps the
+  plain breadcrumb and never shows the panel; a genuinely large 220x50
+  terminal shows the full panel with the real live API server URL
+  (`https://...`) in the Cluster field, correct Namespace/Resource
+  values, and the banner beside it. Full suite (452 unit + 76
+  fake-HTTP) + `fmt`/`clippy -D warnings` clean; full M3-M12 regression
+  (every existing `accept-m*.py`, unmodified) re-run and green after this
+  slice's own header-layout change.
+
 ## Final acceptance checklist
 
 - [x] M13.1 (live theme switching) implemented, unit + live-terminal
@@ -299,12 +380,16 @@ Journal → continue.
 - [x] M13.3 (banner rendering) implemented and accepted; 32x9
       narrow-terminal regression re-run and still green; `banner = false`
       proven to fully disable it.
-- [ ] M13.4 (banner selection) either implemented-and-accepted with
-      evidence, or explicitly, evidence-backed DEFERRED — never silently
-      dropped.
-- [ ] Full fmt/clippy/test clean.
-- [ ] Full M1-M12 regression (every existing `accept-m*.py` unmodified)
-      still green.
+- [x] M13.4 (banner selection) explicitly, evidence-backed **DEFERRED** —
+      see Journal entry below.
+- [x] M13.5 (expanded info panel: Context/Cluster/Namespace/Resource/
+      Objects, real API server URL, symmetric banner realignment)
+      implemented and accepted; `scripts/accept-m13.py` covers it, run
+      twice clean.
+- [x] Full fmt/clippy/test clean.
+- [x] Full M1-M12 regression (every existing `accept-m*.py` unmodified)
+      still green (re-run after M13.5's own header-layout change, since
+      it touches every milestone's own standard 180x40 terminal size).
 - [ ] Docs reconciled (`HANDBOOK.md`, `docs/RUNBOOK.md`,
       `docs/SOFKA_PARITY.md` if theme/banner rows exist there, website
       copy if it claims something no longer accurate).

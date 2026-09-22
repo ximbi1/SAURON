@@ -44,6 +44,11 @@ pub struct Connection {
     pub client: Client,
     pub context: String,
     pub cluster: String,
+    /// M13.5: the real API server URL (`kube::Config::cluster_url`,
+    /// captured before `Client::try_from` consumes the config) -- `cluster`
+    /// above is only the kubeconfig's own cluster *alias*, never the
+    /// address actually being talked to.
+    pub server: String,
     pub namespace: String,
     pub contexts: Vec<String>,
     pub catalog: Catalog,
@@ -105,6 +110,7 @@ pub async fn connect(options: ConnectOptions, app_config: AppConfig) -> Result<C
         .namespace
         .clone()
         .unwrap_or_else(|| config.default_namespace.clone());
+    let server = config.cluster_url.to_string();
     let client = Client::try_from(config).map_err(|_| {
         anyhow::anyhow!("Cannot initialize Kubernetes client; check TLS and authentication")
     })?;
@@ -122,6 +128,7 @@ pub async fn connect(options: ConnectOptions, app_config: AppConfig) -> Result<C
         client,
         context,
         cluster,
+        server,
         namespace,
         contexts,
         catalog,

@@ -1,11 +1,27 @@
 [package]
-name = "sauron"
+# crates.io's own "sauron" name is already taken by an unrelated web
+# framework (published since 2019) -- "saur-on" is only the crates.io
+# publish identifier. The actual binary/lib crate name stays "sauron"
+# (see [lib]/[[bin]] below and src/brand.rs), so nothing else -- config
+# directory, docs, scripts, `use sauron::` imports -- needs to change.
+name = "saur-on"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 publish = false
 description = "An evidence-driven Kubernetes terminal operations console"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ximbi1/SAURON"
+readme = "README.md"
+keywords = ["kubernetes", "tui", "terminal", "k8s", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "sauron"
+
+[[bin]]
+name = "sauron"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

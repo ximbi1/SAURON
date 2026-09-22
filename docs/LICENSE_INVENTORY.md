@@ -215,7 +215,7 @@ python3 scripts/license_inventory.py
 | `rustversion` | 1.0.23 | Apache-2.0 OR MIT |
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 |
 | `same-file` | 1.0.6 | MIT OR Unlicense |
-| `sauron` | 0.1.0 | Apache-2.0 OR MIT |
+| `saur-on` | 0.1.0 | Apache-2.0 OR MIT |
 | `schannel` | 0.1.29 | MIT |
 | `scopeguard` | 1.2.0 | Apache-2.0 OR MIT |
 | `secrecy` | 0.10.3 | Apache-2.0 OR MIT |

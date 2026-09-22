@@ -339,9 +339,35 @@ SAUR-ON defect. M10's `startup_warning` finding and M11's
 `accept-m9.py` rollback-revision finding are both restated here as the
 concrete precedent this discipline is built from.
 
-## Bugs / limitations (placeholder)
+## Bugs / limitations
 
-None yet — implementation has not started. Updated per slice.
+- **Found after `m12-accepted` was tagged and the repo made public**, via
+  the real `ci.yml` GitHub Actions run (`ubuntu-latest`, a genuinely fresh
+  runner with no prior `~/.config/sauron`) — a class of environment this
+  session's own dev machine could never exercise, since every prior local
+  test run had already caused `~/.config/sauron` to exist (created by
+  earlier M10.8 workspace/bookmark saves). Classified as an **app bug**,
+  not a CI/harness bug: a fresh machine with no prior SAUR-ON config is a
+  completely ordinary real-world first-run scenario, not a CI quirk.
+  `plugin::run()` used `config::directory()` (`~/.config/sauron`) as the
+  spawned child's `current_dir` unconditionally; that directory is only
+  ever created lazily by `Config::save()`, so on a machine where nothing
+  has been saved yet, `Command::spawn()` failed with `ENOENT`, misreported
+  as `"cannot start plugin: No such file or directory (os error 2)"` as if
+  the executable itself were missing. Broke 10 tests in CI (all passed
+  locally, for the reason above). Fixed by calling
+  `std::fs::create_dir_all` on that directory before using it as
+  `current_dir` — the exact same convention `Config::save()` itself
+  already uses. Verified by reproducing the failure locally first
+  (`XDG_CONFIG_HOME` pointed at a fresh empty temp directory, confirmed
+  the same 10 tests fail with the fix reverted), then confirming the fix:
+  full `cargo test --locked --all-targets` (521 tests) plus `cargo fmt
+  --check` and `cargo clippy --locked --all-targets -- -D warnings`, all
+  clean, all with `XDG_CONFIG_HOME` pointed at a fresh directory to match
+  CI's own environment exactly. `docs/M12_ACCEPTANCE.md`'s own M12.8
+  Journal entry (below) is left unmodified — this fix lands as its own
+  dated entry and commit, after the tag, per this project's own "never
+  amend an already-tagged milestone; land a fix as a new entry" precedent.
 
 ## Journal
 
@@ -835,6 +861,25 @@ None yet — implementation has not started. Updated per slice.
   `accept-m9.py`'s own regression). Worktree is clean except for this
   milestone's own intended changes. This is the final milestone of the
   current roadmap.
+
+- 2026-09-22: post-tag fix, landed after `m12-accepted` and after the repo
+  was made public in preparation for a `crates.io` publish + GitHub
+  Release. The real `ci.yml` workflow ran for the first time on a genuine
+  `ubuntu-latest` runner (this session's own dev machine could never
+  surface this: `~/.config/sauron` already existed locally from earlier
+  M10.8 testing, so `plugin::run()`'s `current_dir` call never hit a
+  missing directory here). Full root cause, fix, and verification are in
+  this document's own "Bugs / limitations" section above. Also in this
+  same pass: `Cargo.toml`'s `[package].name` was split from the actual
+  binary/lib name ("sauron" is already registered on crates.io by an
+  unrelated project) -- `[package].name = "saur-on"` is now only the
+  crates.io publish identifier; `[lib]`/`[[bin]]` explicitly pin the real
+  crate/binary name back to `"sauron"`, and `src/brand.rs`'s `BINARY`
+  constant became a literal instead of `env!("CARGO_PKG_NAME")` so the
+  config directory, `--version` output, and user agent are all
+  unaffected. `repository`/`readme`/`keywords`/`categories` metadata was
+  added for the eventual `cargo publish`. `publish = false` is
+  deliberately still set; removing it is its own explicit future step.
 
 ## Final acceptance checklist
 

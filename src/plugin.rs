@@ -188,7 +188,16 @@ pub async fn run(
             cmd.env(key, value);
         }
     }
-    cmd.current_dir(crate::config::directory());
+    // config::directory() is only created lazily by Config::save() -- on a
+    // fresh machine/CI runner where nothing has ever been saved, it does
+    // not exist yet, and Command::spawn() would fail with the misleading
+    // "No such file or directory" (as if the executable were missing).
+    // Same create_dir_all convention Config::save() itself already uses.
+    let working_dir = crate::config::directory();
+    if let Err(e) = std::fs::create_dir_all(&working_dir) {
+        return Status::Failed(format!("cannot create config directory: {e}"));
+    }
+    cmd.current_dir(&working_dir);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

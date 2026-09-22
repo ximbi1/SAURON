@@ -655,6 +655,13 @@ pub enum Command {
     BookmarkOpen(String),
     BookmarkDelete(String),
     BookmarkList,
+    /// M11.4: local, redacted evidence export for the selected row.
+    /// `force` is the one required explicit-confirmation gate for an
+    /// existing non-empty destination -- never a silent overwrite.
+    Bundle {
+        path: String,
+        force: bool,
+    },
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -721,10 +728,14 @@ pub fn parse(s: &str) -> Result<Command> {
     // remain intact for the filter parser. Detect outside quotes only. exec/shell's
     // own arguments have their own "--" separator and routinely contain absolute
     // paths (a bare "/bin/sh" starts with exactly this same whitespace-slash
-    // shape), so they must never be misread as a filter boundary.
+    // shape), so they must never be misread as a filter boundary. `:bundle`'s own
+    // destination argument is routinely an absolute path for the exact same
+    // reason (M11.4 live acceptance found this the same way M4's exec/shell
+    // case was originally found -- a real absolute-path argument, not a
+    // hypothetical).
     let is_exec = matches!(
         s.trim_start_matches(':').split_whitespace().next(),
-        Some("exec" | "shell")
+        Some("exec" | "shell" | "bundle")
     );
     let mut quote = None;
     let mut escaped = false;
@@ -1043,6 +1054,19 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.is_empty(), "Use :helm");
             return Ok(Command::Helm);
         }
+        "bundle" => {
+            ensure!(
+                matches!(tail.len(), 1 | 2) && !tail[0].is_empty(),
+                "Use :bundle PATH [--force]"
+            );
+            if tail.len() == 2 {
+                ensure!(tail[1] == "--force", "Use :bundle PATH [--force]");
+            }
+            return Ok(Command::Bundle {
+                path: tail[0].clone(),
+                force: tail.len() == 2,
+            });
+        }
         "workspace_save" => {
             ensure!(
                 tail.len() == 1 && !tail[0].is_empty(),
@@ -1201,6 +1225,7 @@ pub fn command_names() -> Vec<&'static str> {
         "bookmark_open",
         "bookmark_delete",
         "bookmarks",
+        "bundle",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names
@@ -1235,6 +1260,22 @@ mod tests {
             Ok(Command::Exec { container: None, command })
                 if command == vec!["/nonexistent-binary"]
         ));
+    }
+    #[test]
+    fn bundle_absolute_path_is_never_misread_as_a_filter_boundary() {
+        // Found live (M11.4 acceptance): "bundle /tmp/x" has the exact same
+        // whitespace-slash shape the filter-boundary heuristic looks for --
+        // without the exec/shell exception, this silently became a filter
+        // expression instead of a destination path.
+        assert!(matches!(
+            parse("bundle /tmp/scratch/bundle-out"),
+            Ok(Command::Bundle { path, force: false }) if path == "/tmp/scratch/bundle-out"
+        ));
+        assert!(matches!(
+            parse("bundle /tmp/scratch/bundle-out --force"),
+            Ok(Command::Bundle { path, force: true }) if path == "/tmp/scratch/bundle-out"
+        ));
+        assert!(parse("bundle").is_err());
     }
     #[test]
     fn effective_bindings_detect_conflicts() {

@@ -1657,6 +1657,7 @@ impl Runtime {
                 self.open_bookmarks_view();
                 Ok(())
             }
+            Command::Bundle { path, force } => self.open_bundle(path, force),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2676,6 +2677,136 @@ impl Runtime {
         }
         let text = crate::pulse::report(&self.state.rows, &caveats, &self.state.metrics.summary());
         self.open_static("Pulse", text);
+    }
+    /// M11.4: local, bounded, redacted evidence export. Reuses the exact
+    /// same collectors Explain/Events/Adjacent already use for their own
+    /// network calls (`kube::evidence::document`,
+    /// `kube::relationships::report::adjacent`) -- nothing here re-derives
+    /// evidence. Health/Timeline/metrics sections are captured
+    /// synchronously before the spawn (same "snapshot now, not stale-baked"
+    /// discipline `refresh_document`'s own metrics capture already
+    /// establishes) since they need no network round trip at all. The
+    /// filesystem write happens inside the spawned task (bounded, small,
+    /// same tolerance this project already gives `Config::save`), and the
+    /// result reaches the document via the existing
+    /// `Payload::Document`/`Payload::DocumentError` events -- no new
+    /// payload variant needed.
+    fn open_bundle(&mut self, path: String, force: bool) -> Result<()> {
+        let object = self.state.selected_object().context("Select a row first")?;
+        let resource = self
+            .state
+            .resource
+            .clone()
+            .context("No resource selected")?;
+        let connection = self.connection.clone().context("Not connected")?;
+        let dest = std::path::PathBuf::from(&path);
+        let health_text = format!(
+            "Status: {}\nSeverity: {:?}\nEvidence:\n{}",
+            object.health.status,
+            object.health.severity,
+            if object.health.evidence.is_empty() {
+                "(none)".to_string()
+            } else {
+                object.health.evidence.join("\n")
+            }
+        );
+        let timeline_text = self.timeline_text(&object.uid);
+        let metrics_text = self.state.metrics.report(&object);
+        let identity = crate::bundle::Identity {
+            kind: object.kind.clone(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let mut doc = Document::new(
+            format!("Bundle: {}", object.name),
+            format!("Collecting evidence and exporting to {path} ...\n"),
+        );
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let scope = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        self.tasks.spawn(async move {
+            let outcome: Result<String> = async {
+                let explain = crate::kube::evidence::document(
+                    &connection,
+                    &resource,
+                    &object,
+                    Action::Explain,
+                    false,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| format!("UNAVAILABLE: {e}"));
+                let events = crate::kube::evidence::document(
+                    &connection,
+                    &resource,
+                    &object,
+                    Action::Events,
+                    false,
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| format!("UNAVAILABLE: {e}"));
+                let relationships = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Ok(String::new()),
+                    result = crate::kube::relationships::report::adjacent(&connection, scope, &resource, &object, &cancel) => result,
+                };
+                let relationships_text = match relationships {
+                    Ok(report) => crate::adjacent::report(&report).0,
+                    Err(e) => format!("UNAVAILABLE: {e}"),
+                };
+                let section = |name, text: String| {
+                    let (bounded, status) = crate::bundle::bounded(64 * 1024, text);
+                    let status = if bounded.starts_with("UNAVAILABLE:") {
+                        crate::bundle::Status::Unavailable
+                    } else {
+                        status
+                    };
+                    crate::bundle::Section { name, status, text: bounded }
+                };
+                let sections = vec![
+                    section("health", health_text),
+                    section("explain", explain),
+                    section("events", events),
+                    section("relationships", relationships_text),
+                    section("timeline", timeline_text),
+                    section("metrics", metrics_text),
+                ];
+                let written = crate::bundle::write(&dest, &identity, &sections, force)?;
+                Ok(format!(
+                    "Bundle exported to {}\n{} section(s) written; see manifest.json for the exact inventory.\n",
+                    written.display(),
+                    sections.len(),
+                ))
+            }
+            .await;
+            let payload = match outcome {
+                Ok(text) => Payload::Document {
+                    request,
+                    title: format!("Bundle: {}", object.name),
+                    text,
+                    adjacent: vec![],
+                },
+                Err(e) => Payload::DocumentError {
+                    request,
+                    error: e.to_string(),
+                },
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tx.send(Event { epoch, payload }) => {},
+            }
+        });
+        doc.freshness = document::Freshness::Refreshing;
+        self.state.mode = Mode::Document(doc);
+        self.state.dirty = true;
+        Ok(())
     }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;

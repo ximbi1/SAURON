@@ -1,6 +1,7 @@
 pub mod adjacent;
 pub mod app;
 pub mod brand;
+pub mod bundle;
 pub mod command;
 pub mod config;
 pub mod evidence;

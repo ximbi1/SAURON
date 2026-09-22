@@ -206,7 +206,7 @@ investigation.
 | M11.1 | Shared evidence snapshot foundation (formalize what already exists; the one new piece: a pure priority-ordering helper) | ACCEPTED |
 | M11.2 | Eye — problem-priority current-context overview | ACCEPTED |
 | M11.3 | Pulse — bounded refreshed operational overview | ACCEPTED |
-| M11.4 | Evidence bundle — redacted local incident export | PLANNED |
+| M11.4 | Evidence bundle — redacted local incident export | ACCEPTED |
 | M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | PLANNED |
 | M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | PLANNED |
 | M11.7 | Cross-feature navigation / UX integration (command registry wiring for all of the above) | PLANNED |
@@ -691,6 +691,77 @@ every prior milestone's own section.
   sampled"), and "No caveats" for a fully synced scope; 32x9 rendered
   without corruption; quit restored the terminal cleanly. 407 unit + 76
   fake-HTTP total, fmt/clippy clean.
+
+- 2026-09-22: M11.4 (evidence bundle) implemented. New `src/bundle.rs` owns
+  only the manifest shape and the atomic multi-file write (`bundle::write`,
+  reusing `Config::save`'s exact temp-file/`0600`/`rename()` pattern per
+  file, `0700` on the destination directory; refuses a non-empty existing
+  destination unless `overwrite`; a failed write cleans up only the files
+  *this call* wrote; `bundle::bounded` caps any one section and marks it
+  `Partial` rather than silently truncating without saying so) -- it does
+  not collect evidence or redact by itself, both already-accepted
+  responsibilities it only trusts. `Runtime::open_bundle` is the actual
+  evidence collector: it reuses `kube::evidence::document` (Explain, Events)
+  and `kube::relationships::report::adjacent` verbatim -- the exact same
+  async calls Explain/Events/Adjacent already make -- plus three
+  already-synchronous local reads (`object.health`, `Runtime::timeline_text`,
+  `app::metrics::Cache::report`) captured before the async spawn, matching
+  `refresh_document`'s own "snapshot now" discipline for its metrics
+  capture. The result reaches the document via the *existing*
+  `Payload::Document`/`Payload::DocumentError` events -- no new payload
+  variant. New `Command::Bundle { path, force }` / `:bundle PATH [--force]`
+  grammar, requiring a selected row.
+
+  **Real bug found and fixed during this slice's own live acceptance work**
+  (not a shipped regression -- caught before any other verification): a
+  bare `:bundle /abs/path` was silently misparsed as a *filter expression*
+  instead of a destination argument, because `parse()`'s own filter-boundary
+  heuristic ("a whitespace-preceded `/` starts a local filter") already had
+  one documented, tested exception for exactly this shape --
+  `exec`/`shell`'s own absolute-path arguments -- and `bundle` needed the
+  identical exception but didn't have it. Root-caused live (the destination
+  path silently became the current view's filter text instead of being
+  exported to), fixed by adding `"bundle"` to the same `is_exec`-style
+  allow-list `exec`/`shell` already use, with a new regression test
+  (`bundle_absolute_path_is_never_misread_as_a_filter_boundary`) mirroring
+  the existing `exec_argv_with_an_absolute_path_is_never_misread_as_a_
+  filter_boundary` test that already covers this exact heuristic for
+  exec/shell.
+
+  Explicitly reduced v1 scope, documented rather than silently dropped: no
+  dedicated GitOps/Helm section in the bundle. The frozen M11.0 contract
+  listed this as "if the target has any," and adding it safely would need
+  new correlation logic (deciding whether an arbitrary target has
+  Flux/Argo/Helm-managed evidence) beyond this slice's actual reuse
+  boundary; a target that IS itself a Flux/Argo/Helm-managed kind can
+  already be `:bundle`d like any other object (Explain/Events/relationships
+  sections apply uniformly), it just does not get a dedicated GitOps
+  section yet. No raw logs (per the frozen contract's own default
+  exclusion, unchanged).
+
+  9 new unit tests (`bundle::tests`: manifest/inventory correctness,
+  refuse-then-explicit-overwrite, path-traversal rejection, `0600`/`0700`
+  permissions, empty-pre-existing-directory is not "occupied", bounded
+  truncation marks Partial, a failed mid-export cleans up its own partial
+  output; `command::tests::bundle_absolute_path_is_never_misread_as_a_
+  filter_boundary`). **Live evidence** against
+  `kind-sauron-test`/`sauron-fixtures`'s own pre-existing `redaction-
+  sentinel` Secret fixture (`stringData.test =
+  SAURON_TEST_SENTINEL_NEVER_DISPLAY`, the same sentinel-fixture convention
+  this project's own M9.5 Helm-Secret work established): `:bundle
+  <path>` exported 6 sections (health/explain/events/relationships/
+  timeline/metrics) plus `manifest.json`; `grep -r
+  SAURON_TEST_SENTINEL_NEVER_DISPLAY <bundle dir>` found **zero matches**
+  across every exported file -- the acceptance-critical claim, proven
+  against actual bytes on disk, not a unit-level mock; `explain.txt`
+  correctly showed `Secret/redaction-sentinel` identity with no `data`/
+  `stringData` field anywhere; file permissions confirmed `0600`
+  (`ls -la`), directory `0700`; re-running `:bundle` on the same
+  destination without `--force` was refused with an explicit "destination
+  already exists and is not empty" error (no partial silent overwrite);
+  the same command with `--force` succeeded and replaced the prior
+  contents; 32x9 rendered without corruption; quit restored the terminal
+  cleanly. 416 unit + 76 fake-HTTP total, fmt/clippy clean.
 
 ## Final acceptance checklist
 

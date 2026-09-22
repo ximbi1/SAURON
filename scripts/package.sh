@@ -32,9 +32,22 @@ archive="$dist_dir/$name.tar.gz"
 # Deterministic member order and no embedded timestamps/owner IDs, so
 # repeated packaging of byte-identical inputs produces byte-identical
 # archives -- the exact property scripts/checksums.py's own manifest
-# comparison (M12.6) relies on.
-tar --sort=name --mtime='1970-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner \
-    -C "$repo_dir/target/package" -czf "$archive" "$name"
+# comparison (M12.6) relies on. GNU tar's --sort/--mtime/--owner/--group
+# flags don't exist on macOS's default bsdtar (libarchive) -- found live
+# when the macOS release-workflow runners failed with "tar: Option
+# --sort=name is not supported". Fixed portably: pin every staged file's
+# mtime first (`touch -t`, supported by both GNU and BSD touch), then
+# feed tar an explicitly pre-sorted member list via -T/--files-from
+# (supported by both GNU tar and bsdtar) instead of relying on a
+# sort/mtime/owner flag that only one of them has.
+find "$stage_dir" -exec touch -t 197001010000 {} +
+(
+    cd "$repo_dir/target/package"
+    find "$name" | LC_ALL=C sort > "$dist_dir/.members-$name.txt"
+)
+COPYFILE_DISABLE=1 tar -C "$repo_dir/target/package" -czf "$archive" \
+    -T "$dist_dir/.members-$name.txt"
+rm -f "$dist_dir/.members-$name.txt"
 
 echo "packaged: $archive"
 tar -tzf "$archive"

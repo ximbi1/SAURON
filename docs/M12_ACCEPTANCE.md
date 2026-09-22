@@ -369,6 +369,33 @@ concrete precedent this discipline is built from.
   dated entry and commit, after the tag, per this project's own "never
   amend an already-tagged milestone; land a fix as a new entry" precedent.
 
+- **Found via the first real `release.yml` run** (also after
+  `m12-accepted`, once the repo was public and the workflow was actually
+  triggered for the first time): both macOS jobs
+  (`x86_64-apple-darwin`/`aarch64-apple-darwin`) failed at the packaging
+  step with `tar: Option --sort=name is not supported`. Classified as a
+  **platform-portability bug**, not a CI misconfiguration: `scripts/
+  package.sh` used GNU tar's `--sort=name --mtime=... --owner=0
+  --group=0 --numeric-owner` flags unconditionally, but macOS ships
+  `bsdtar` (libarchive) by default, which has none of those flags. This
+  is exactly the gap M12.5's own "CI-defined, not executed" packaging
+  decision left unverified — the Linux x86_64 path was proven locally,
+  the other three were only ever exercised for the first time by this
+  real run. Fixed portably: pin every staged file's mtime with `touch -t`
+  (supported identically by GNU and BSD touch) before archiving, then
+  feed `tar` a pre-sorted member list via `-T`/`--files-from` (supported
+  by both GNU tar and bsdtar) instead of a `--sort` flag only one of them
+  has; `COPYFILE_DISABLE=1` suppresses bsdtar's macOS resource-fork
+  (`._*`) files, a no-op on Linux. Verified locally on Linux (the only
+  platform buildable here): two consecutive packaging runs produce a
+  byte-identical archive (same SHA-256), and the archive still extracts
+  and runs correctly. The macOS side of this fix could not be verified
+  live on this machine (no macOS hardware, per M12.0's own
+  reconnaissance) — it is verified only by inspection (both `touch -t`
+  and `-T`/`--files-from` are POSIX-adjacent, long-documented flags on
+  both GNU coreutils/tar and BSD/libarchive) and will be confirmed for
+  real the next time `release.yml` runs to completion.
+
 ## Journal
 
 - 2026-09-22: M12.0 (acceptance contract / architecture freeze) written.

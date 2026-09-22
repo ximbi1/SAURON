@@ -161,7 +161,7 @@ roadmap's own acceptance line). **Amended scope**:
 | M12.0 | Acceptance contract / architecture freeze (this document) | ACCEPTED |
 | M12.1 | Plugin execution foundation: subprocess trust/process-group/bounds, reusing `app::session::Sessions` | ACCEPTED |
 | M12.2 | Plugin protocol (smallest safe shape) + command registry wiring | ACCEPTED |
-| M12.3 | Providers — investigated; accepted or evidence-backed DEFERRED | PLANNED |
+| M12.3 | Providers — investigated; evidence-backed DEFERRED | DEFERRED |
 | M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | PLANNED |
 | M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | PLANNED |
 | M12.6 | Checksums / license inventory / release manifest | PLANNED |
@@ -493,6 +493,46 @@ None yet — implementation has not started. Updated per slice.
   (unknown plugin, disabled plugin, no-selection, and a full
   approved-plugin-runs-end-to-end proof reaping the real session record).
   445 unit + 76 fake-HTTP total, fmt/clippy clean.
+
+- 2026-09-22: M12.3 (providers) investigated per this document's own
+  pre-authorized decision path and **DEFERRED with evidence**, mirroring
+  M9.6's precedent exactly (investigate first, defer only with evidence,
+  never silently). Findings:
+  - `docs/RESEARCH.md`'s own `docs/providers.md` reference was never
+    actually written (confirmed: no such file exists in `docs/`) --
+    unlike M11's Eye/Pulse/blast-radius, which reused already-accepted
+    M1-M10 primitives, providers have no existing design, no existing
+    fixture, and no existing HTTP client scaffolding to compose from.
+  - `Cargo.toml` has no standalone HTTP client dependency (`http`/
+    `http-body-util` exist only as `kube`'s own transitive plumbing) --
+    a real provider adapter would need a new dependency and a genuinely
+    new network/trust boundary, the same class of "new architecture, not
+    composition" M12.1's plugin execution already was, except at the
+    project's own lowest priority tier.
+  - Neither `sauron-test` nor `sauron-m9` (the only two isolated kind
+    clusters this project is authorized to write fixtures to) has a
+    Prometheus/VictoriaMetrics/VictoriaLogs instance deployed. Proving a
+    provider adapter live (per this project's own "never accept on unit
+    tests alone when the failure mode is live" discipline) would require
+    deploying and maintaining a new class of fixture before any adapter
+    code could even be tested against something real.
+  - `docs/SOFKA_PARITY.md` marks **both** provider rows P3 DEFERRED (the
+    project's own lowest priority tier, "Not yet delivered"), and
+    `docs/ROADMAP.md`'s own M12 acceptance line ("Process limits/trust;
+    four platform builds; checksums/license inventory; reproducible
+    performance campaign") does not name providers at all -- confirmed
+    already in M12.0's own reconnaissance, reconfirmed here rather than
+    silently trusted.
+
+  Conclusion: unlike M11.6 (context diff), where investigation found a
+  small, cleanly composable win, M12.3 finds the opposite -- a genuinely
+  large new integration surface with zero existing scaffolding, at the
+  lowest priority tier, not required by the roadmap's own acceptance
+  contract, and untestable live without first building new cluster
+  fixtures this session has no evidence-backed need to build. **DEFERRED**,
+  not implemented, not half-built. `PROVIDER EVIDENCE != KUBERNETES TRUTH`
+  and the rest of this document's own provider trust-model section remain
+  as a frozen contract for whichever future milestone takes this on.
 
 ## Final acceptance checklist
 

@@ -2,7 +2,7 @@
 
 Canonical project memory. Read this before each major phase, inspect the code, reconcile
 claims with reality, and update this file after meaningful changes. README is for users.
-Last reconciled: 2026-09-21, through accepted M10. Project began in an empty directory with no Git repository.
+Last reconciled: 2026-09-22, through accepted M11. Project began in an empty directory with no Git repository.
 
 ## Production boundary — explicit user instruction
 
@@ -165,7 +165,12 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Configurable keymaps / themes | ACCEPTED (M10.6-M10.7) | actionable per-mode conflict diagnostics; both fail safe (visible warning, never a crash) on malformed config |
 | Config persistence / migration | ACCEPTED (M10.8) | first write path `Config` has ever had; atomic (0600, temp-file-then-rename); pre-M10 files load unchanged |
 | M10.9 combined acceptance/soak | ACCEPTED | full M1-M9 regression + combined M10 acceptance run twice clean + 300s soak (178 cycles, flat RSS/fd/threads); docs/M10_ACCEPTANCE.md; local annotated m10-accepted |
-| Eye/Pulse/bundles/diff | RESEARCHED | bounded evidence collection |
+| Eye | ACCEPTED (M11.2) | priority-ordered current-scope overview reusing Severity/Health verbatim, zero new Kubernetes requests; live RBAC-forbidden proof |
+| Pulse | ACCEPTED (M11.3) | refreshed health/metrics tile summary, zero new requests; distinct from :info |
+| Evidence bundle | ACCEPTED (M11.4) | local redacted export; live sensitive-fixture-absence proof from actual exported bytes; 0600/0700, refuse/--force overwrite |
+| Blast radius | ACCEPTED (M11.5) | read-only safety lens over the same bounded Xray graph, grouped by Provenance; never causal language; no mutation path |
+| Context diff | ACCEPTED (M11.6, reduced scope) | bounded two-context comparison on a temporary second Connection; comparison key explicitly not identity |
+| M11.8 combined acceptance/soak | ACCEPTED | full M1-M10 regression + combined M11 acceptance run twice clean + 300s soak (103 cycles, flat RSS/fd/threads); docs/M11_ACCEPTANCE.md; local annotated m11-accepted |
 | Plugins/providers/fleet/packaging | DEFERRED | stable core first |
 
 Detailed capability status and acceptance plans live in `docs/SOFKA_PARITY.md`.
@@ -258,8 +263,9 @@ and report truncation. Describe is SAURON's contextual native report, not kubect
 
 M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
 (Helm rollback/uninstall) is explicitly DEFERRED, not implemented.
-M10.0–M10.9 are ACCEPTED. Local annotated `m10-accepted` points to the
-tip of this milestone's work; never pushed.
+M10.0–M10.9 are ACCEPTED. M11.0–M11.8 are ACCEPTED (M11.6 context diff at
+a reduced scope, see its own journal entry). Local annotated `m11-accepted`
+points to the tip of this milestone's work; never pushed.
 
 Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
 tests; locked fmt/check/clippy/test green in the acceptance record. Combined
@@ -282,6 +288,33 @@ fixed during this milestone's own acceptance work (a `startup_warning`
 visibility bug, and an `accept-m3.py` cursor-detection break caused by
 M10's own new row markers) and one suspected regression that was
 root-caused to be a stale test binary, not a defect.
+
+Recorded M11 checks: 427 unit + 76 fake HTTP; locked fmt/check/clippy/test
+green. M11 composes M1-M10's own evidence primitives rather than building
+new ones: Eye/Pulse are pure re-renders of `state.rows`/`state.metrics`
+(zero new Kubernetes requests); evidence bundle reuses
+`kube::evidence::document`/`kube::relationships::report::adjacent`
+verbatim plus a new atomic multi-file writer modeled on `Config::save`'s
+own pattern; blast radius reuses the same bounded `xray` collector Xray
+already uses, grouped by the existing `graph::Provenance` with
+safety-oriented labels; context diff (M11.6, reduced scope after
+investigation, not deferred) does one bounded GET on a temporary second
+`Connection` that `Runtime` never stores. `scripts/accept-m11.py` (8
+sequences: Eye priority ordering + Follow navigation, Pulse tiles, bundle
+export with a live sensitive-fixture-absence proof, blast radius
+provenance grouping, context diff EQUIVALENT/UNKNOWN, 32x9, terminal
+restoration, and Eye/Pulse never claiming healthy/zero under a real
+RBAC-forbidden LIST) passed twice clean. Full M1-M10 regression (every
+existing `accept-m*.py`, unmodified) reconfirmed green -- including finding
+and fixing a real pre-existing bug in `accept-m9.py`/`soak-m9.py`'s own
+Argo CD rollback-revision source (`.status.sync.revision` can mirror an
+unresolved branch name; `:argocd_rollback`'s own denial of that was
+correct, the test scripts' assumption was not; fixed to source
+`.status.history[-1:].revision` instead). M11's bounded soak was
+**300 seconds**, 103 cycles (Eye/Pulse/blast-radius every cycle, bundle
+export and context diff throttled to every 5th cycle since both are real
+I/O, an M4 forward held alive and checked every cycle), flat RSS/fds/
+threads, zero reconnects/transient errors.
 These are recorded results, not tests rerun during this documentation update.
 
 Current architecture: M6 bounded Adjacent/Xray; M7 policy/confirmation/
@@ -293,8 +326,14 @@ guarded actions through that same gateway; M10 bounded multi-select
 plus workspaces/bookmarks (`app::workspace`/`app::bookmark`) and their
 persistence in `Config` (the first write path `Config` has ever had:
 atomic, `0600`, temp-file-then-rename), configurable keymaps and themes
-(both fail safe on malformed config — a visible warning, never a crash).
-Helm is inspection-only, with an explicit user-triggered, bounded,
+(both fail safe on malformed config — a visible warning, never a crash);
+M11 read-only evidence composition -- Eye (priority-ordered current-scope
+overview, `src/eye.rs`), Pulse (refreshed health/metrics tiles,
+`src/pulse.rs`), evidence bundle (`:bundle PATH [--force]`, local redacted
+export, `src/bundle.rs`), blast radius (`:blast_radius`, relationship
+safety lens, `src/blast_radius.rs`), context diff (`:context_diff
+CONTEXT`, bounded two-context comparison, `src/context_diff.rs`). Helm is
+inspection-only, with an explicit user-triggered, bounded,
 UID/type-checked Secret-body reader. Values masking is heuristic, manifest
 output is identities only, NOTES are omitted. No general Secret-reveal
 permission is implied.
@@ -312,7 +351,7 @@ seen and remediated during M10.9, unrelated to any SAUR-ON code.
 The explicit mutation-test flag is a harness assertion, not automatic proof
 of cluster identity or permission to operate on production.
 
-M11 is next and has not started. Read the relevant acceptance ledger before
+M12 is next and has not started. Read the relevant acceptance ledger before
 continuing; preserve accepted behavior and the unresolved bounded terminal
 stdin limitation in `docs/EXEC.md`. No implementation is authorized merely
 by this status update.

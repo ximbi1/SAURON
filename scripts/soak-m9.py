@@ -247,9 +247,16 @@ def main():
         def argocd_rollback_step():
             if cycle % 10 != 0:
                 return
+            # M11.8 finding (same root cause as accept-m9.py's own fix):
+            # .status.sync.revision can mirror an unresolved branch name
+            # (this fixture's targetRevision is "master") rather than the
+            # resolved commit SHA .status.history actually records --
+            # :argocd_rollback correctly denies a revision that isn't in
+            # history, so this was silently failing every attempt. Use the
+            # last history entry, the one value guaranteed to be valid.
             revision = kubectl(
                 'get', 'application', 'guestbook', '-n', 'argocd', '-o',
-                'jsonpath={.status.sync.revision}',
+                'jsonpath={.status.history[-1:].revision}',
             ).strip()
             if not revision:
                 return

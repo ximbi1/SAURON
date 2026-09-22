@@ -25,12 +25,12 @@ action without passing explicit safety and policy boundaries.
 
 SAURON is being built as a 12-milestone project.
 
-M1 through M10 are currently **ACCEPTED** (M9.6 explicitly deferred, see
+M1 through M11 are currently **ACCEPTED** (M9.6 explicitly deferred, see
 below), with local annotated milestone tags (`m1-accepted` through
-`m10-accepted`) and live verification against isolated Kubernetes `kind`
+`m11-accepted`) and live verification against isolated Kubernetes `kind`
 clusters.
 
-M11 is the next milestone and has not started yet.
+M12 is the next milestone and has not started yet.
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ M11 is the next milestone and has not started yet.
 | M8B | Advanced cluster operations: Cordon/Uncordon, Set image, CronJob trigger, Evict, Drain, Force delete | ACCEPTED |
 | M9 | Flux, Argo CD and Helm integrations | ACCEPTED (M9.6 Helm rollback/uninstall DEFERRED — see below) |
 | M10 | Bulk workflows, workspaces, bookmarks, themes and keymaps | ACCEPTED |
-| M11 | Eye, Pulse, evidence bundles, context diff and blast-radius analysis | NOT STARTED |
+| M11 | Eye, Pulse, evidence bundles, context diff and blast-radius analysis | ACCEPTED |
 | M12 | Plugins, providers, headless workflows, packaging and performance hardening | NOT STARTED |
 
 See [`HANDBOOK.md`](HANDBOOK.md) for the full engineering record and
@@ -1165,25 +1165,54 @@ churn, zero reconnects, zero transient errors, flat RSS/fd/thread).
 
 ---
 
-### M11 — Eye / Pulse / evidence intelligence
+### M11 — Eye / Pulse / evidence bundle / blast radius / context diff
 
-Not started.
+ACCEPTED: M11.0-M11.8 (M11.6 context diff at a reduced scope — see below).
+Full record in [`docs/M11_ACCEPTANCE.md`](docs/M11_ACCEPTANCE.md).
 
-Planned scope includes:
+M11 is a composition milestone: it builds five thin, evidence-preserving
+lenses over what M1-M10 already compute, reusing accepted primitives
+directly rather than building parallel ones. No AI diagnosis, no numeric
+score, no second health/relationship/mutation-safety engine.
 
-- Eye overview
-- cluster Pulse
-- evidence bundles
-- context comparison
-- baseline diff
-- blast-radius analysis
-- related-resource summaries
-- bounded operational snapshots
-- portable diagnostic bundles
+- **Eye** (`:eye`) — a priority-ordered view of the currently watched
+  scope: `resources::priority::by_attention` sorts by the existing,
+  explainable `Severity` (Critical, Warning, Unknown, then Healthy — no
+  opaque scoring), and each row's "why" is `Health.evidence` verbatim.
+  Zero new Kubernetes requests — a pure re-render of already-loaded state,
+  reusing `adjacent::Target` for navigation so Follow jumps to the exact
+  UID. An explicit `CAVEAT` line covers a not-yet-synced, bound-hit, or
+  RBAC-partial scope — proven live against a real RBAC-forbidden
+  `ServiceAccount`: Eye never renders a false "0 problems, all healthy."
+- **Pulse** (`:pulse`) — refreshed HEALTH/METRICS/SCOPE tiles for the same
+  scope, deliberately narrower than `:info` (which already covers
+  connection/task plumbing). Also zero new requests.
+- **Evidence bundle** (`:bundle PATH [--force]`) — a local, bounded,
+  redacted export of one target's health/Explain/Events/relationships/
+  Timeline/metrics to a directory plus a manifest, reusing the exact same
+  collectors Explain/Events/Adjacent already use. Atomic per-file writes
+  (`0600`, directory `0700`), no silent overwrite. Live-proven: exporting
+  a real Secret fixture with a known plaintext sentinel value produces a
+  bundle whose bytes, grepped in full, never contain that sentinel.
+- **Blast radius** (`:blast_radius`) — a read-only safety lens over the
+  exact same bounded relationship graph Xray already collects, grouped by
+  `graph::Provenance` with safety-oriented labels (`VERIFIED OWNERSHIP/
+  DEPENDENCY`, `EXPLICIT REFERENCE`, `SELECTOR-DERIVED (INFERENCE)`,
+  `STATUS-REPORTED`). Never causal or predictive language — a fixed
+  disclaimer states the invariant in the report itself. No mutation, not
+  reachable as a confirmation bypass.
+- **Context diff** (`:context_diff CONTEXT`) — investigated per this
+  project's own M9.6 "investigate before deferring" precedent, then
+  accepted at a reduced scope rather than deferred: a bounded, on-demand
+  comparison of one target's kind/namespace/name against another named
+  context, on a temporary second connection `Runtime` never stores. The
+  comparison key is stated in the report's own text as explicitly NOT
+  identity.
 
-These remain evidence-driven features.
-
-No required AI diagnosis is planned.
+Live-verified against `kind-sauron-test`/`sauron-fixtures`:
+`scripts/accept-m11.py` (8 sequences) passed twice clean; a 300-second
+bounded soak (`scripts/soak-m11.py`) ran 103 cycles with zero reconnects
+and zero transient errors, flat RSS/fd/thread.
 
 ---
 

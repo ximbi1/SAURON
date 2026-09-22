@@ -35,7 +35,8 @@ the two clusters and guards separate; production remains excluded.
 
 M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
 (Helm rollback/uninstall) is explicitly DEFERRED, not implemented.
-M10.0–M10.9 are ACCEPTED. Local annotated `m10-accepted` points to
+M10.0–M10.9 are ACCEPTED. M11.0–M11.8 are ACCEPTED (M11.6 context diff at
+a reduced scope). Local annotated `m11-accepted` points to
 the tip of this milestone's work; never pushed.
 
 Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
@@ -60,6 +61,25 @@ reconnects/transient errors. See `docs/M10_ACCEPTANCE.md`'s M10.9 journal
 entry for two real bugs found and fixed during this milestone's own
 acceptance work and one suspected regression root-caused to a stale test
 binary, not a defect.
+
+Recorded M11 checks: 427 unit + 76 fake HTTP; locked fmt/check/clippy/test
+green. M11 is a composition milestone: Eye/Pulse are pure re-renders of
+already-loaded state (zero new Kubernetes requests); evidence bundle
+reuses the exact same Explain/Events/Adjacent collectors plus a new atomic
+multi-file writer modeled on `Config::save`; blast radius reuses the same
+bounded Xray collector, grouped by the existing `graph::Provenance`;
+context diff (investigated, then accepted at reduced scope rather than
+deferred) does one bounded GET on a temporary second `Connection` that
+`Runtime` never stores. `scripts/accept-m11.py` (8 sequences, including a
+live proof that Eye/Pulse never claim healthy/zero under a real
+RBAC-forbidden LIST) passed twice clean. Full M1-M10 regression
+reconfirmed green, including finding and fixing a real pre-existing bug in
+`accept-m9.py`/`soak-m9.py`'s own Argo CD rollback-revision source
+(`.status.sync.revision` can mirror an unresolved branch name;
+`:argocd_rollback`'s own denial of that was correct — the test scripts'
+assumption was not). M11's bounded soak was **300 seconds**, 103 cycles,
+flat RSS/fds/threads, zero reconnects/transient errors. See
+`docs/M11_ACCEPTANCE.md`'s M11.8 journal entry for full detail.
 These are recorded results, not tests rerun during this documentation update.
 
 Current architecture: M6 bounded Adjacent/Xray; M7 policy/confirmation/
@@ -69,7 +89,10 @@ guarded actions through that same gateway; M10 bounded multi-select driving
 bulk mutations that reuse the unmodified M7/M8/M8B gateway per target, plus
 workspaces/bookmarks and their persistence in `Config` (the first write
 path `Config` has ever had: atomic, `0600`, temp-file-then-rename),
-configurable keymaps and themes (both fail safe on malformed config).
+configurable keymaps and themes (both fail safe on malformed config); M11
+read-only evidence composition -- Eye, Pulse, evidence bundle
+(`:bundle PATH [--force]`), blast radius (`:blast_radius`), context diff
+(`:context_diff CONTEXT`).
 Helm is inspection-only, with an
 explicit user-triggered, bounded, UID/type-checked Secret-body reader.
 Values masking is heuristic, manifest output is identities only, NOTES are
@@ -87,7 +110,7 @@ kubelet/API x509 trust failure after long uptime.
 The explicit mutation-test flag is a harness assertion, not automatic proof
 of cluster identity or permission to operate on production.
 
-M11 is next and has not started. Read the relevant acceptance ledger before
+M12 is next and has not started. Read the relevant acceptance ledger before
 continuing; preserve accepted behavior and the unresolved bounded terminal
 stdin limitation in `docs/EXEC.md`. No implementation is authorized merely
 by this status update.
@@ -270,6 +293,45 @@ selection/bulk/workspace/bookmark additions don't regress it) ran 178
 cycles with zero reconnects and zero transient errors, flat RSS/fds/
 threads. **All of M10 (M10.0-M10.9) ACCEPTED.** Local tag `m10-accepted`,
 never pushed without explicit authorization.
+
+M11 (Eye/Pulse/evidence bundle/blast radius/context diff) started from
+accepted M10 -- see [M11_ACCEPTANCE.md](M11_ACCEPTANCE.md) for the full
+slice-by-slice record. Reconnaissance (M11.0) found every evidence
+primitive M11 needed already existed and was accepted: `src/evidence.rs`
+is literally the "shared evidence vocabulary" the milestone needed,
+`graph::Provenance` is literally the relationship-category set blast
+radius needed. M11.1 (shared priority/count foundation over
+`Object.health`), M11.2 (Eye), M11.3 (Pulse, deliberately narrower than
+`:info`, zero new Kubernetes requests), M11.4 (evidence bundle, atomic
+multi-file export modeled on `Config::save`), M11.5 (blast radius,
+reordered ahead of context diff per `docs/SOFKA_PARITY.md`'s own P1 vs P3
+classification), M11.7 (cross-feature UX, confirmed accepted by
+construction -- every command already went through the one central
+registry as it shipped) all ACCEPTED individually with their own
+unit/live evidence. M11.6 (context diff) was investigated per the
+project's own M9.6 precedent and found NOT blocked -- accepted at a
+reduced scope (single-target comparison only) instead of deferred, since
+`kube::connect` is a free function and a temporary second `Connection`
+never needs to live on `Runtime`. M11.8 (combined acceptance/full
+regression/soak) found and fixed a real pre-existing bug in
+`accept-m9.py`/`soak-m9.py`'s own Argo CD rollback-revision source during
+the M1-M10 regression sweep (`.status.sync.revision` can mirror an
+unresolved branch name rather than the resolved commit SHA
+`.status.history` records; `:argocd_rollback`'s own denial of an
+unrecorded revision was correct app behavior, the test scripts' assumption
+was not) -- fixed both scripts to source the last history entry instead,
+documented, and the full M9 regression (including its own 240s soak)
+re-ran clean afterward. New `scripts/accept-m11.py` (8 sequences,
+including a live proof -- a real RBAC-forbidden `ServiceAccount`, the same
+pattern M6's own seq11 established -- that Eye/Pulse never convert
+partial/unknown evidence into a false "healthy/zero problems" claim)
+passed twice clean. A 300-second bounded soak (`soak-m10.py`'s own scoping
+precedent -- every M11 view under soak is read-only, so unlike M8/M8B/M9/
+M10's soaks there is no mutation cadence to throttle, only I/O: bundle
+export and context diff run every 5th cycle) ran 103 cycles with zero
+reconnects and zero transient errors, flat RSS/fds/threads. **All of M11
+(M11.0-M11.8) ACCEPTED.** Local tag `m11-accepted`, never pushed without
+explicit authorization.
 
 M4 is fully ACCEPTED: M4.0, M4.1, all of M4.2 (one-shot exec + interactive shell),
 M4.2b (attach), M4.3 (port-forward manager), and M4.4 (combined adversarial

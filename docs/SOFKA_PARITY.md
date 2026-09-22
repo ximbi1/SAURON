@@ -110,7 +110,7 @@ above is unchanged.
 | Relationships | Configurable CRD children/refs/kind and namespace paths | Validated declarative graph rules | P2 | RESEARCHED | Pending: unit + scoped acceptance | Explicitly out of M6 core scope (optional P2, generic CRD ownerReferences already work) |
 | Relationships | On-demand generic CRD children search with budgets | Paged bounded owner-UID discovery | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Relationships | Xray ownership hierarchy | Graph traversal view | P1 | ACCEPTED | M6.5/M6.6 live acceptance | Bounded depth 1–3; not cluster-wide completeness |
-| Overview | Pulse refreshed health tiles | Bounded asynchronous overview | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Overview | Pulse refreshed health tiles | Bounded asynchronous overview | P1 | ACCEPTED (M11.3) | M11.8 unit + live accept-m11.py/soak-m11.py | Zero new Kubernetes requests; deliberately narrower than :info |
 | Safety | Readonly global/context/cluster and flags | Layered config + hard CLI override at operation boundary | P0 | TESTED | M4 exec/attach/forward denial; M7 policy readonly/override gates; reload regression + live | Delivered; M7 adds the central policy layer, M8 still owns the actual mutation UX |
 | Safety | Guardrails deny/confirmation/type context/type name/bulk limits | Combine all restrictions deterministically | P0 | TESTED | M7.0-M7.3 unit+fake+live: `mutation::policy::evaluate` (deterministic, structured `PolicyReason`s, UNKNOWN never Allow) + `Confirmation` binding + `kube::mutation::commit`'s TOCTOU revalidation | Delivered as infrastructure (no user-facing mutation command yet — M8) |
 | Safety | Managed object warnings | Evidence of controlling manager in preview | P1 | RESEARCHED | Pending: deny/conflict/outcome regression | Not yet delivered |
@@ -125,7 +125,7 @@ above is unchanged.
 | Themes | Dark/light palettes, semantic colors, live override | Original semantic themes | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Sessions | Bookmarks/workspaces/view cycling/persistent namespaces | Saved structured queries | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Notifications | Independent single-resource watches, bell/desktop | Bounded notification subscriptions | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
-| Diagnostics | Redacted incident bundle with manifest/limits/preview/export | Local evidence bundle | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Diagnostics | Redacted incident bundle with manifest/limits/preview/export | Local evidence bundle | P1 | ACCEPTED (M11.4) | M11.8 unit + live sensitive-fixture-absence proof against real exported bytes | Bounded sections, atomic 0600/0700 writes, refuse/--force overwrite; no raw logs/env vars |
 | Diagnostics | Interactive text/JSON/YAML snapshots, browse/delete | Explicit local export inventory | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Headless | --check, --snapshot, info, info --offline | CLI with deterministic non-TTY output | P0 | TESTED | M1 baseline + M3 typed-filter live snapshots | No TTY needed |
 | Observability | Tracing/redaction, request latency, watch/reconnect counts | Safe event metadata and counters | P0 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
@@ -141,9 +141,9 @@ above is unchanged.
 | Plugins | Bundled sanitize; external Popeye/Trivy catalog integrations | Extensions after safety and process controls | P3 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
 | Distribution | Linux/macOS x86_64/aarch64, Cargo/Homebrew/Nix | Build and release automation | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
 | Performance | Published startup/filter/view/RSS methodology | Pipeline benchmark and session soak | P0 | TESTED (subset) | benches/pipeline.rs; M4.4 75-minute RSS/fd/thread observations in M4_ACCEPTANCE.md | No comparative performance claim; startup/large-cluster campaign remains |
-| SAURON | Eye problem-priority overview (mission addition) | Evidence-ranked current-context view | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
-| SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | DESIGNED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
-| SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | DEFERRED | Pending: unit + scoped acceptance | Mission addition; no exclusivity claim |
+| SAURON | Eye problem-priority overview (mission addition) | Evidence-ranked current-context view | P1 | ACCEPTED (M11.2) | M11.8 unit + live RBAC-forbidden proof (never claims healthy/zero) | Reverse-Severity ordering, no numeric score; reuses adjacent::Target for navigation |
+| SAURON | Blast radius, safety lens, change preview | Labeled inference + typed patch policy | P1 | ACCEPTED (M11.5) | M11.8 unit + live owner-chain grouping | Reuses the same bounded Xray graph, grouped by graph::Provenance; never causal language; no mutation path |
+| SAURON | Context diff, navigation replay, explainable score | Read-only comparison/replay; scoring optional | P3 | ACCEPTED (M11.6, reduced scope) | M11.8 unit + live EQUIVALENT/UNKNOWN proof | Single-target kind/namespace/name comparison only; comparison key explicitly not identity; no scoring |
 
 ## Current gap review — M9 accepted, reconciled 2026-09-21
 

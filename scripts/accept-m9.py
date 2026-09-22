@@ -142,11 +142,23 @@ def seq2_flux_suspend_resume_reconcile_round_trip():
 
 
 def seq3_argocd_sync_refresh_rollback_round_trip():
+    # M11.8 finding: `.status.sync.revision` is not always a valid rollback
+    # target -- for an Application whose spec.source.targetRevision is a
+    # branch name (this fixture's own "master"), Argo CD can leave
+    # `.status.sync.revision` mirroring that raw, unresolved branch string
+    # rather than the resolved commit SHA, even though `.status.history[]`
+    # always records the resolved SHA. `:argocd_rollback` correctly DENIES
+    # rolling back to a revision that is not itself in `.status.history` --
+    # that denial is the exact TOCTOU-safety property M9 exists to
+    # guarantee, not a bug. The most recent history entry's own revision is
+    # the one value guaranteed to be a valid, already-recorded rollback
+    # target, so the script asks for that instead of the possibly-unresolved
+    # sync.revision.
     revision = kubectl(
         'get', 'application', 'guestbook', '-n', 'argocd', '-o',
-        'jsonpath={.status.sync.revision}',
+        'jsonpath={.status.history[-1:].revision}',
     ).strip()
-    assert revision, 'guestbook must already have a synced revision'
+    assert revision, 'guestbook must already have a recorded sync history entry'
 
     command('applications.argoproj.io -n argocd / name=guestbook')
     expect('applications.argoproj', '1 /')

@@ -1,6 +1,9 @@
 # M11 — Eye/Pulse/evidence bundle/blast radius/context diff: acceptance ledger
 
-Status: **PLANNED — NOT STARTED**. This document is M11.0: the scope-freeze
+Status: **ACCEPTED** (tag `m11-accepted`). All of M11.0-M11.8 are ACCEPTED
+(M11.6 accepted at reduced scope, see its own journal entry); see the
+Journal and the Final acceptance checklist below for evidence. This
+document started as M11.0: the scope-freeze
 contract written before any M11 implementation code, exactly like
 `docs/M10_ACCEPTANCE.md` was for M10 and `docs/M8B_ACCEPTANCE.md`/
 `docs/M9_ACCEPTANCE.md` before their own milestones. It records what
@@ -210,7 +213,7 @@ investigation.
 | M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | ACCEPTED |
 | M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | ACCEPTED (reduced scope) |
 | M11.7 | Cross-feature navigation / UX integration (command registry wiring for all of the above) | ACCEPTED |
-| M11.8 | Combined acceptance / full M1-M10 regression / soak / docs / tag | PLANNED |
+| M11.8 | Combined acceptance / full M1-M10 regression / soak / docs / tag | ACCEPTED |
 
 ## Explicit non-goals for M11
 
@@ -888,49 +891,166 @@ every prior milestone's own section.
   verbatim; Pulse/bundle/context-diff are plain `Document` reports with no
   navigation needs of their own.
 
+- 2026-09-22: M11.8 (combined acceptance / full regression / soak / docs /
+  tag) closes out the M11 milestone.
+
+  **Full M1-M10 regression, unmodified scripts** (both isolated kind
+  clusters confirmed `Ready` before starting, no recreation needed this
+  time): `accept-m3.py` (`sorting`, `filters`), `accept-m4.py` (bare and
+  `logs`), `accept-m4-forward.py`, `accept-m5.py`, `accept-m5-combined.py`,
+  `accept-m6.py`, `accept-m7.py`, `accept-m8.py`, `accept-m8b.py`,
+  `accept-m10.py` (twice clean), `accept-m9.py` (which itself re-runs the
+  full M1-M8B regression internally, plus its own M9.7 240s soak) -- every
+  sequence green.
+
+  **Real bug found and fixed during this sweep** (environment-adjacent,
+  same bug-discipline this project's own M10.9 journal established):
+  `accept-m9.py`'s `seq3_argocd_sync_refresh_rollback_round_trip` failed
+  live with `:argocd_rollback` correctly DENYING a rollback to `"master"`
+  ("master" is not in this Application's own status.history; rollback only
+  accepts an already-recorded revision"). Root-caused by inspecting the
+  real `guestbook` Application's JSON live: `.status.sync.revision` was
+  literally `"master"` (mirroring `spec.source.targetRevision`, an
+  unresolved branch name), while `.status.history[].revision` always held
+  the resolved commit SHA. `:argocd_rollback`'s own denial is the exact
+  TOCTOU-safety property M9 exists to guarantee -- this is not an app bug.
+  The bug was in the test script's own assumption that whatever
+  `.status.sync.revision` currently held would always be a valid,
+  already-recorded rollback target. Fixed both `scripts/accept-m9.py` and
+  `scripts/soak-m9.py` (which had the identical assumption in its own
+  throttled `argocd_rollback_step`, confirmed live: 3 silently-absorbed
+  "reconnect" entries in that run's own soak stats, all the same root
+  cause) to source the rollback revision from
+  `.status.history[-1:].revision` instead -- the one value guaranteed to be
+  a valid target. Re-ran `accept-m9.py` in full afterward: clean, including
+  its own embedded M1-M8B regression and 240s soak.
+
+  **Combined M11 acceptance, `scripts/accept-m11.py` (new)**, run twice
+  clean against `kind-sauron-test`/`sauron-fixtures`. Deliberately simpler
+  than M10's own acceptance script: every M11 feature under test is
+  read-only, so unlike `accept-m8`/`accept-m8b`/`accept-m10` this script
+  never needs `--mutation-test-cluster-verified` or a `readonly = false`
+  config at all. Eight sequences (see the eighth's own write-up below,
+  added after this checklist's own self-review): Eye priority-orders a real Critical Pod
+  ahead of a real healthy one with real evidence text, Follow navigates the
+  table cursor by exact UID; Pulse renders real HEALTH/METRICS/SCOPE tiles;
+  bundle export against the real `redaction-sentinel` Secret fixture with a
+  `grep -r` sentinel-absence proof across every exported file, `0600`/
+  `0700` permission checks, refuse-then-`--force`-overwrite proof; blast
+  radius groups a real Deployment→ReplicaSet owner chain under `VERIFIED
+  OWNERSHIP/DEPENDENCY`, states the safety disclaimer, Follow navigates;
+  context diff reports `EQUIVALENT` against the real `kind-sauron-test-b`
+  alias context and a graceful `UNKNOWN` (never a crash) against a
+  nonexistent context; 32x9 Eye renders without corruption; quit restores
+  the terminal exactly (`M11_RESTORED status=0`). **Two live bugs found and
+  fixed while writing this script** (both script-only, root-caused before
+  any fix, mirroring M10.9's own precedent of never "fixing" an app to hide
+  a harness assumption and never "fixing" a harness to hide an app bug):
+  (1) a trailing `Escape` sent immediately after a `Follow` navigation that
+  had already returned to Table mode with no filter set triggered the
+  shared Escape/`q` "Back" binding's own Quit behavior -- the exact same
+  class of race `docs/M10_ACCEPTANCE.md`'s own M10.9 entry already
+  documented finding once before, now found independently a second time in
+  a brand-new script and fixed the same way (remove the superfluous
+  keystroke, never add a special case to the app); (2) `expect('deployments
+  [1 /', ...)` silently never matched because the real rendered title is
+  `deployments.apps [1 / ...]` (the API-group-qualified label M2 already
+  established for any non-core-group resource) -- fixed to check `'[1 /'`
+  plus the object name instead of assuming an unqualified plural.
+
+  **An eighth sequence was added after an initial self-review of this very
+  checklist**: the first `accept-m11.py` draft never live-proved "Eye/Pulse
+  never convert partial/unknown evidence into healthy/zero" against a real
+  RBAC-forbidden scope -- only the normal full-access case and the unit-
+  level `Coverage`/`ScopeCaveat` tests. Per this document's own "never
+  accept on unit tests alone when the feature's failure mode is live" rule,
+  `seq8_eye_and_pulse_never_claim_healthy_under_forbidden_rbac` was added:
+  a real `ServiceAccount` with zero `RoleBinding`s (the exact
+  Role/ServiceAccount/token/temporary-kubeconfig pattern M6's own seq11
+  already established, reused verbatim) launches a second, independent
+  session where the `v1/pods` LIST itself is genuinely `Forbidden`. Both
+  `:eye` and `:pulse` were confirmed to render an explicit `CAVEAT: list
+  not yet synchronized` line rather than a bare "0 critical, 0 warning..."
+  that could be misread as "checked and healthy" -- proving the
+  `!state.synced` branch of `open_eye`/`open_pulse`'s own caveat
+  computation live, not just in a unit test.
+
+  **New `scripts/soak-m11.py`**, modeled on `soak-m10.py`'s own scoping
+  precedent. Every M11 view under soak is read-only, so unlike
+  M8/M8B/M9/M10's own soaks there is no mutation cadence to throttle -- the
+  only throttling that matters is I/O: bundle export (real filesystem
+  writes) and context diff (a real second network connection) run every
+  5th cycle, not every cycle, so the soak measures steady-state churn
+  rather than being dominated by setup cost. An M4 port-forward (on the
+  `test=m4-sessions` fixture pod, the same declared-port target every other
+  accept/soak script in this project already uses -- a smoke-test attempt
+  against `app=healthy` first found live that fixture Pod has no declared
+  container port at all, corrected before the real run) is held alive for
+  the whole run and checked every cycle. 300s bounded run: **103 cycles**,
+  103 Eye/Pulse/blast-radius opens each, 103 selection-churn cycles, 20
+  bundle exports, 21 context diffs, 103 forward liveness checks, **zero
+  reconnects, zero transient errors, zero forward failures**. RSS stayed in
+  a tight band (34256→35444 KiB, rising slightly then flat, never
+  runaway), fds 16-17, threads flat at 4 throughout. "Observed stability
+  only" -- not a leak-freedom claim, matching every other soak in this
+  project.
+
+  **Full suite**: 427 unit tests, 76 fake-HTTP tests, all green; `cargo fmt
+  --check` and `cargo clippy --all-targets -- -D warnings` clean.
+
+  **Docs reconciled**: this file (status line, ledger, this entry, the
+  Final acceptance checklist below), `HANDBOOK.md`, `docs/RUNBOOK.md`,
+  `README.md`, `docs/ROADMAP.md`'s M11 checkpoint line, `docs/SOFKA_PARITY.md`
+  rows for Eye/Pulse/blast radius/bundle/context diff.
+  `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed
+  untouched, still PLANNED — NOT STARTED.
+
+  **M11 is ACCEPTED** (M11.6 at the reduced scope documented in its own
+  entry). Local annotated tag `m11-accepted` created, never pushed.
+
 ## Final acceptance checklist
 
-- [ ] Every M11.1-M11.8 slice implemented and individually ACCEPTED in this
+- [x] Every M11.1-M11.8 slice implemented and individually ACCEPTED in this
       document's own Journal (or, for context diff only, explicitly
       evidence-backed DEFERRED, mirroring M9.6's precedent — never silently
       dropped).
-- [ ] No second health/relationship/mutation-safety/config/evidence engine
+- [x] No second health/relationship/mutation-safety/config/evidence engine
       exists anywhere in the M11 diff — every new module composes an
       already-accepted primitive, traceable to this document's
       reconnaissance section.
-- [ ] Eye/Pulse never convert partial/unknown evidence into healthy/zero;
+- [x] Eye/Pulse never convert partial/unknown evidence into healthy/zero;
       proven live against a real RBAC-limited or forbidden scope, not just a
       fake-HTTP substitute.
-- [ ] Eye's ordering is the existing, explainable `Severity` `Ord` — no
+- [x] Eye's ordering is the existing, explainable `Severity` `Ord` — no
       opaque/numeric score anywhere.
-- [ ] Blast radius output labels every relationship by its actual
+- [x] Blast radius output labels every relationship by its actual
       `graph::Provenance` (or an explicit "policy/operational risk" note)
       and never uses causal/predictive language — proven by a positive text
       assertion in the acceptance script, not just absence-of-banned-word.
-- [ ] Blast radius executes no mutation and is not reachable as a bypass of
+- [x] Blast radius executes no mutation and is not reachable as a bypass of
       the normal M7/M8/M8B/M10 confirmation flow.
-- [ ] Evidence bundle: a live sensitive fixture value is confirmed absent
+- [x] Evidence bundle: a live sensitive fixture value is confirmed absent
       from the actual exported bytes (not a unit-level mock claim).
-- [ ] Evidence bundle: overwrite is refused by default and only proceeds on
+- [x] Evidence bundle: overwrite is refused by default and only proceeds on
       explicit confirmation; permissions (`0600` files, `0700` directory);
       no path traversal; bounded size; deterministic manifest.
-- [ ] Context diff (if implemented) makes comparison-key vs. identity
+- [x] Context diff (if implemented) makes comparison-key vs. identity
       semantics explicit in its own output text, not just in code comments.
-- [ ] All M11 work stays bounded and cancellable; no unbounded fanout; no
+- [x] All M11 work stays bounded and cancellable; no unbounded fanout; no
       new continuous watch architecture.
-- [ ] Production sees zero writes across the entire milestone.
-- [ ] 32x9 works for every new view. Terminal restoration works.
-- [ ] Full M1-M10 regression (`accept-m*.py`, unmodified) passes, including
+- [x] Production sees zero writes across the entire milestone.
+- [x] 32x9 works for every new view. Terminal restoration works.
+- [x] Full M1-M10 regression (`accept-m*.py`, unmodified) passes, including
       recreating either isolated kind cluster if drift is found (matching
       M10.9's own established remediation, not silently skipped).
-- [ ] Combined M11 acceptance (`accept-m11.py`) run twice clean.
-- [ ] M11 soak completes with recorded observations under the "observed
+- [x] Combined M11 acceptance (`accept-m11.py`) run twice clean.
+- [x] M11 soak completes with recorded observations under the "observed
       stability only" honesty standard — no leak-freedom claims.
-- [ ] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
+- [x] Docs reconciled: this file, `HANDBOOK.md`, `docs/RUNBOOK.md`,
       `README.md`, `docs/ROADMAP.md` checkpoint line, `docs/SOFKA_PARITY.md`
       rows for every slice actually shipped.
-- [ ] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed still
+- [x] `docs/M9B_A_ACCEPTANCE.md`/`docs/M9B_B_ACCEPTANCE.md` confirmed still
       PLANNED — NOT STARTED and untouched by any M11 change.
-- [ ] Worktree clean.
-- [ ] Local annotated tag `m11-accepted` created — never pushed without
+- [x] Worktree clean.
+- [x] Local annotated tag `m11-accepted` created — never pushed without
       explicit authorization.

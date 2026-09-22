@@ -2,11 +2,14 @@
 
 Complete vertical slices and update HANDBOOK/parity after each. No acceptance by scaffolding.
 
-Current checkpoint (2026-09-21): M1–M8 and the added M8B advanced-operations
+Current checkpoint (2026-09-22): M1–M8 and the added M8B advanced-operations
 milestone accepted; M9.0–M9.5/M9.7 accepted, M9.6 Helm mutations explicitly
 deferred; M10.0–M10.9 accepted (tag `m10-accepted`) — bulk multi-select
 mutations, workspaces, bookmarks, configurable keymaps, themes, and config
-persistence, all reusing the unmodified M7/M8/M8B mutation gateway. M11 is
+persistence, all reusing the unmodified M7/M8/M8B mutation gateway;
+M11.0–M11.8 accepted (tag `m11-accepted`) — Eye, Pulse, evidence bundle,
+blast radius, and context diff (reduced scope), all composing M1-M10's own
+evidence primitives rather than building new ones. M12 is
 next, not started. The table below states milestone goals,
 not claims of full feature parity; acceptance ledgers record shipped subsets.
 

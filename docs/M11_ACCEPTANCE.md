@@ -203,7 +203,7 @@ investigation.
 | Slice | Scope | Status |
 | --- | --- | --- |
 | M11.0 | Acceptance contract / architecture freeze (this document) | ACCEPTED |
-| M11.1 | Shared evidence snapshot foundation (formalize what already exists; the one new piece: a pure priority-ordering helper) | PLANNED |
+| M11.1 | Shared evidence snapshot foundation (formalize what already exists; the one new piece: a pure priority-ordering helper) | ACCEPTED |
 | M11.2 | Eye — problem-priority current-context overview | PLANNED |
 | M11.3 | Pulse — bounded refreshed operational overview | PLANNED |
 | M11.4 | Evidence bundle — redacted local incident export | PLANNED |
@@ -603,6 +603,28 @@ every prior milestone's own section.
   proposed ledger" with the evidence and the explicit reasoning for why this
   is not a stop-and-ask fork. **Next: M11.1** (shared evidence snapshot
   foundation), continuing directly in this session.
+
+- 2026-09-22: M11.1 (shared evidence snapshot foundation) implemented.
+  Reconnaissance already confirmed the vocabulary (`evidence::*`,
+  `resources::health::{Health,Severity}`) exists and needs no change, so the
+  only new code is `src/resources/priority.rs`: `by_attention(&[SharedObject])
+  -> Vec<SharedObject>` (stable sort by `Reverse(Severity)`, ties left in
+  caller order exactly like `resources::sort::rows`'s own documented
+  convention of trusting the store's canonical order) and
+  `severity_counts(&[SharedObject]) -> SeverityCounts` (four exhaustive
+  buckets, `total()`/`problems()` helpers) for Pulse's own tiles. No new
+  struct wraps `Object`/`Health`; both functions take a plain slice and
+  return owned `Arc` clones, so there is nothing here that can itself go
+  stale — the caller (`State::rows` after `prepare()`) already owns the
+  epoch/scope-safety M11.1's own contract asked for. 6 new unit tests:
+  fixed-input ordering (Critical, Warning, Unknown, Healthy), a broader
+  every-problem-before-every-healthy invariant check (not just the one fixed
+  case), stable-tie-order regression, exhaustive severity-count
+  reconstruction of `rows.len()`, empty-scope zero-counts (never a default
+  "healthy" claim), and same-name/different-UID never merging into one row
+  (this project's `UID != NAME` invariant, directly regression-tested at
+  this new layer rather than only trusted-by-composition). 394 unit tests
+  total (up from 388), fmt/clippy clean.
 
 ## Final acceptance checklist
 

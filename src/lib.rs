@@ -14,6 +14,7 @@ pub mod graph;
 pub mod integrations;
 pub mod kube;
 pub mod mutation;
+pub mod plugin;
 pub mod pulse;
 pub mod resources;
 pub mod safety;

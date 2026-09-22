@@ -159,7 +159,7 @@ roadmap's own acceptance line). **Amended scope**:
 | Slice | Scope | Status |
 | --- | --- | --- |
 | M12.0 | Acceptance contract / architecture freeze (this document) | ACCEPTED |
-| M12.1 | Plugin execution foundation: subprocess trust/process-group/bounds, reusing `app::session::Sessions` | PLANNED |
+| M12.1 | Plugin execution foundation: subprocess trust/process-group/bounds, reusing `app::session::Sessions` | ACCEPTED |
 | M12.2 | Plugin protocol (smallest safe shape) + command registry wiring | PLANNED |
 | M12.3 | Providers — investigated; accepted or evidence-backed DEFERRED | PLANNED |
 | M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | PLANNED |
@@ -364,6 +364,70 @@ None yet — implementation has not started. Updated per slice.
   acceptance line, mirroring M11.0's own precedent for this exact class of
   reconciliation). **Next: M12.1** (plugin execution foundation),
   continuing directly in this session.
+
+- 2026-09-22: M12.1 (plugin execution foundation) implemented. New
+  `src/plugin.rs`: `Trust` (`Approved`/`Disabled`, default `Disabled` --
+  no "untrusted but runs with a warning" state), `PluginConfig`
+  (executable + fixed argv + trust + bounded `timeout_secs`), and
+  `run(config, input, cancel) -> Status` (`Completed{exit_code, stdout,
+  stderr, truncated flags}` / `TimedOut` / `Cancelled` / `Failed(reason)`).
+  `tokio::process::Command`: `env_clear()` + an explicit 3-variable
+  allowlist (`PATH`/`HOME`/`LANG`, never the parent's full environment,
+  never `KUBECONFIG`/tokens/credentials), fixed `current_dir`
+  (`config::directory()`, never the shell's own CWD), `kill_on_drop(true)`,
+  and (unix) `process_group(0)` so the child becomes its own process-group
+  leader. Cancellation/timeout both call a new `kill_process_group` (added
+  `libc` as a unix-only dependency for the one raw `kill(-pid, SIGKILL)`
+  syscall neither `std` nor `tokio` expose safely) targeting the whole
+  group, not just the direct child -- proven live by a test whose child
+  itself forks a grandchild `sleep 30` (`sh -c "sleep 30 & wait"`): a 1s
+  timeout kills both, confirmed by wall-clock (`elapsed() < 5s`, never
+  blocking on the 30s grandchild). stdout/stderr capture reuses
+  `kube::logs`'s own 16 KiB-per-line clip bound exactly, plus a new
+  500-line total cap independent of line length, both explicitly marked
+  `truncated` rather than silently dropping data. Added `tokio`'s
+  `process` feature (previously absent -- confirmed via
+  `grep -rn "std::process::Command\|tokio::process::Command" src/`
+  returning zero matches before this slice, the literal "genuinely new
+  architecture" claim from this document's own reconnaissance section).
+
+  `Settings` gained `pub plugins: BTreeMap<String, PluginConfig>`
+  (same `deny_unknown_fields`/fail-safe-reload discipline `keys`/`theme`
+  already established), and `Config::resolve()`'s own hand-built base
+  `toml::Value` was extended to include it -- a real gap caught before any
+  test ran: `resolve()` lists `Settings`'s fields explicitly rather than
+  deriving them, so a new field silently would not have flowed through at
+  all without this one-line addition (found by reading `resolve()`'s own
+  implementation, not by a failing test, a "catch it in review" outcome
+  the M10.8 `runtime()` test-helper finding already precedented in this
+  project). Two new config tests prove base-level plugin config resolves
+  correctly and that a context layer can approve a plugin the base left
+  `Disabled` -- and that approval is per-context, never globally implied.
+
+  `app::session::Kind` gained `Plugin` (reusing `Sessions` verbatim, no
+  second task-supervision system). A new end-to-end test
+  (`dropping_sessions_leaves_no_real_child_process_running`) spawns a real
+  `plugin::run(/bin/sleep 30)` through `Sessions::spawn` exactly the way
+  `Runtime` will, confirms via `pgrep` that the real OS process is running,
+  drops the owning `Sessions`, and confirms via `pgrep` again that it is
+  gone -- proving "no orphan process after quit" against the actual
+  process table, not just a cancellation-token flag, and proving it holds
+  even under `Sessions::drop`'s own `abort_all()` path (which does not run
+  `plugin::run`'s cooperative-cancel branch at all -- `kill_on_drop` on
+  the owned `Child` is what actually fires here, a stronger and more
+  literal proof than the unit-level cooperative-cancellation test alone).
+
+  9 new unit tests in `plugin.rs` (disabled trust never spawns; missing
+  executable is an explicit failure, never a panic; stdout/exit-code/
+  stdin-transport all correct on a real `cat`; non-zero exit reported
+  correctly; process-group timeout kill including a grandchild; explicit
+  cancellation; stdout bounded at 500 lines with `truncated` set; a real
+  `KUBECONFIG`/fake-token environment variable pair set in the test
+  process is confirmed absent from `/usr/bin/env`'s own child output;
+  stdout/stderr captured and kept separate). 439 unit + 76 fake-HTTP
+  total, fmt/clippy clean. No live-cluster evidence needed for this slice
+  (pure OS-process behavior, no Kubernetes I/O) -- live/interactive
+  acceptance is M12.2's own job once there is a command surface to drive.
 
 ## Final acceptance checklist
 

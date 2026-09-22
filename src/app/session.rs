@@ -22,6 +22,9 @@ pub enum Kind {
     Logs,
     Exec,
     PortForward,
+    /// M12.1: a local subprocess -- see `plugin::run`. Reuses this exact
+    /// bounded/cancellable/`Drop`-safe ownership, not a second one.
+    Plugin,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
@@ -325,5 +328,64 @@ mod tests {
             .expect("spawn");
         drop(sessions);
         assert!(token.is_cancelled());
+    }
+    /// M12.1's own "no orphan process after quit" guarantee end-to-end:
+    /// a real `plugin::run` spawned through `Sessions::spawn` (exactly the
+    /// way `Runtime` will do it, not a synthetic `pending()` future) must
+    /// leave no child process alive once the owning `Sessions` drops --
+    /// proven by inspecting the real OS process table, not just the
+    /// cancellation token.
+    #[tokio::test]
+    async fn dropping_sessions_leaves_no_real_child_process_running() {
+        let mut sessions = Sessions::default();
+        let config = crate::plugin::PluginConfig {
+            executable: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            trust: crate::plugin::Trust::Approved,
+            timeout_secs: 30,
+        };
+        // The outer Sessions-level token is deliberately never cancelled in
+        // this test: what's under test is that dropping `Sessions` itself
+        // (which aborts the underlying tokio task outright) still leaves
+        // `plugin::run`'s own `tokio::process::Child` -- `kill_on_drop`
+        // set -- no chance to leak, not the cooperative-cancel path
+        // `plugin.rs`'s own unit tests already cover in isolation.
+        sessions
+            .spawn(
+                Kind::Plugin,
+                scope(),
+                CancellationToken::new(),
+                move |_| async move {
+                    let _ = crate::plugin::run(
+                        &config,
+                        &serde_json::json!({}),
+                        CancellationToken::new(),
+                    )
+                    .await;
+                    Outcome::Completed
+                },
+            )
+            .expect("spawn");
+        // Let the child actually start before we drop the owner.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let before = std::process::Command::new("pgrep")
+            .args(["-f", "sleep 30"])
+            .output()
+            .expect("pgrep");
+        assert!(
+            !before.stdout.is_empty(),
+            "the plugin's sleep must actually be running first"
+        );
+        drop(sessions);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after = std::process::Command::new("pgrep")
+            .args(["-f", "sleep 30"])
+            .output()
+            .expect("pgrep");
+        assert!(
+            after.stdout.is_empty(),
+            "no orphan child process may survive Sessions being dropped: {}",
+            String::from_utf8_lossy(&after.stdout)
+        );
     }
 }

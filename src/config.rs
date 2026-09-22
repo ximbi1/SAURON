@@ -1,4 +1,5 @@
 use crate::app::{bookmark::Bookmark, workspace::Workspace};
+use crate::plugin::PluginConfig;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -27,6 +28,13 @@ pub struct Settings {
     pub aliases: BTreeMap<String, String>,
     pub favorite_namespaces: Vec<String>,
     pub keys: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// M12.1: keyed by plugin name. Absent/malformed entries never crash
+    /// startup (same `deny_unknown_fields`-per-entry/fail-safe-reload
+    /// discipline `keys`/`theme` already established) -- see
+    /// `plugin::PluginConfig`'s own doc comment for the trust contract.
+    /// Default `Trust::Disabled` means a plugin merely *listed* here does
+    /// not run; it must be explicitly set to `trust = "approved"`.
+    pub plugins: BTreeMap<String, PluginConfig>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -43,6 +51,7 @@ impl Default for Settings {
             aliases: BTreeMap::new(),
             favorite_namespaces: Vec::new(),
             keys: BTreeMap::new(),
+            plugins: BTreeMap::new(),
         }
     }
 }
@@ -201,7 +210,8 @@ impl Config {
             "resource": self.base.resource, "readonly": self.base.readonly, "theme":self.base.theme,
             "max_objects":self.base.max_objects,"max_bytes":self.base.max_bytes,
             "request_timeout_secs":self.base.request_timeout_secs,"aliases":self.base.aliases,
-            "favorite_namespaces":self.base.favorite_namespaces,"keys":self.base.keys
+            "favorite_namespaces":self.base.favorite_namespaces,"keys":self.base.keys,
+            "plugins":self.base.plugins
         }))?;
         if let Some(ns) = &self.base.namespace {
             value["namespace"] = toml::Value::String(ns.clone());
@@ -274,6 +284,58 @@ mod tests {
         let resolved = c.resolve("cluster", "team/prod").expect("valid");
         assert_eq!(resolved.theme, "mono");
         assert_eq!(resolved.aliases.len(), 2);
+    }
+    #[test]
+    fn base_level_plugins_flow_through_resolve_default_trust_is_disabled() {
+        let mut c = Config::default();
+        c.base.plugins.insert(
+            "sanitize".into(),
+            crate::plugin::PluginConfig {
+                executable: "/usr/local/bin/sanitize".into(),
+                args: vec!["--format".into(), "json".into()],
+                trust: crate::plugin::Trust::Disabled,
+                timeout_secs: 10,
+            },
+        );
+        let resolved = c.resolve("", "").expect("valid");
+        let plugin = resolved
+            .plugins
+            .get("sanitize")
+            .expect("base plugin present");
+        assert_eq!(plugin.executable, "/usr/local/bin/sanitize");
+        assert_eq!(plugin.trust, crate::plugin::Trust::Disabled);
+    }
+    #[test]
+    fn a_context_layer_can_approve_a_plugin_the_base_left_disabled() {
+        let mut c = Config::default();
+        c.base.plugins.insert(
+            "sanitize".into(),
+            crate::plugin::PluginConfig {
+                executable: "/usr/local/bin/sanitize".into(),
+                args: vec![],
+                trust: crate::plugin::Trust::Disabled,
+                timeout_secs: 10,
+            },
+        );
+        c.contexts.insert(
+            "kind-sauron-test".into(),
+            toml::from_str(
+                "[plugins.sanitize]\nexecutable='/usr/local/bin/sanitize'\ntrust='approved'",
+            )
+            .expect("fixture"),
+        );
+        let resolved = c.resolve("", "kind-sauron-test").expect("valid");
+        assert_eq!(
+            resolved.plugins.get("sanitize").unwrap().trust,
+            crate::plugin::Trust::Approved
+        );
+        // The base (no context) resolution must stay Disabled -- approval
+        // is per-context, never globally implied by one context's config.
+        let base_only = c.resolve("", "").expect("valid");
+        assert_eq!(
+            base_only.plugins.get("sanitize").unwrap().trust,
+            crate::plugin::Trust::Disabled
+        );
     }
     #[test]
     fn an_unrecognized_theme_never_fails_resolution_startup_must_not_crash_on_a_typo() {

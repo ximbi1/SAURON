@@ -1983,6 +1983,7 @@ dependencies = [
  "http-body-util",
  "k8s-openapi",
  "kube",
+ "libc",
  "ratatui",
  "regex",
  "serde",

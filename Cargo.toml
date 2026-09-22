@@ -23,13 +23,18 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util", "io-std", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "io-util", "io-std", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+# Process-group termination only: kill(-pid, SIGKILL) has no safe std
+# equivalent. Nothing else in this codebase uses libc directly.
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

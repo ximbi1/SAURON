@@ -1661,6 +1661,7 @@ impl Runtime {
             Command::ContextDiff(context) => self.open_context_diff(context),
             Command::Plugin(name) => self.open_plugin(name),
             Command::Theme(name) => self.set_theme(name),
+            Command::ThemeSave => self.save_theme(),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2849,6 +2850,16 @@ impl Runtime {
                 Ok(())
             }
         }
+    }
+    /// M13.2: persist the live theme choice to `config.toml`'s base
+    /// layer -- a separate, explicit verb from `:theme NAME` itself
+    /// (matching this project's own "explicit approval gesture"
+    /// posture), so applying a theme never silently rewrites disk.
+    fn save_theme(&mut self) -> Result<()> {
+        self.config.base.theme = self.state.settings.theme.clone();
+        self.persist_config();
+        self.state.status = format!("Theme \"{}\" saved", self.state.settings.theme);
+        Ok(())
     }
     /// M11.6: a temporary, independent second `Connection` for exactly one
     /// bounded GET -- never stored on `Runtime`, never touching
@@ -4384,6 +4395,61 @@ mod tests {
         assert!(
             rt2.workspaces.contains_key("prod-pods"),
             "a fresh Runtime must load workspaces a prior session already persisted"
+        );
+        std::fs::remove_file(&path).ok();
+        rt2.shutdown().await;
+    }
+    #[tokio::test]
+    async fn applying_a_theme_without_saving_never_reaches_disk() {
+        let mut rt = runtime();
+        rt.state.settings.theme = "ember".into();
+        rt.command(":theme light").expect("applies live");
+        let path = rt.config_path.clone().expect("scratch path");
+        assert!(
+            !path.exists(),
+            "a live-only theme change must never silently write to disk"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn theme_save_actually_persists_the_live_choice_to_disk() {
+        let mut rt = runtime();
+        rt.command(":theme light").expect("applies live");
+        rt.command(":theme_save").expect("save succeeds");
+        assert!(
+            rt.state.status.contains("\"light\" saved"),
+            "{}",
+            rt.state.status
+        );
+        let path = rt.config_path.clone().expect("scratch path");
+        let on_disk = crate::config::Config::load(Some(&path)).expect("readable");
+        assert_eq!(
+            on_disk.base.theme, "light",
+            "an explicit :theme_save must actually reach disk"
+        );
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn theme_saved_in_one_runtime_is_loaded_fresh_by_the_next() {
+        let mut rt = runtime();
+        rt.command(":theme mono").expect("applies live");
+        rt.command(":theme_save").expect("save succeeds");
+        let path = rt.config_path.clone().expect("scratch path");
+        rt.shutdown().await;
+        let loaded_config = crate::config::Config::load(Some(&path)).expect("readable");
+        let (mut rt2, _) = Runtime::new(
+            crate::kube::ConnectOptions::default(),
+            loaded_config,
+            Some(path.clone()),
+            crate::kube::watch::Query {
+                resource: "pods".into(),
+                ..Default::default()
+            },
+        )
+        .expect("second runtime");
+        assert_eq!(
+            rt2.state.settings.theme, "mono",
+            "a fresh Runtime must load a theme a prior session already persisted"
         );
         std::fs::remove_file(&path).ok();
         rt2.shutdown().await;

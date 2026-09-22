@@ -682,6 +682,14 @@ pub enum Command {
     /// session-only (not persisted). Purely cosmetic -- never touches what
     /// is queried, filtered, or how health/evidence is computed.
     Theme(Option<String>),
+    /// M13.2: persist the current live theme choice (whatever `:theme
+    /// NAME` last applied this session) to `config.toml`'s base layer,
+    /// via the same `Config::save` atomic write every other persisted
+    /// setting already uses. A separate, explicit verb -- never bundled
+    /// into an unrelated save (e.g. `:workspace_save`) -- matching this
+    /// project's own "explicit approval gesture" posture (same class as
+    /// `readonly = false`, plugin `trust = Approved`).
+    ThemeSave,
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -1103,6 +1111,10 @@ pub fn parse(s: &str) -> Result<Command> {
             ensure!(tail.len() == 1 && !tail[0].is_empty(), "Use :theme [NAME]");
             return Ok(Command::Theme(Some(tail[0].clone())));
         }
+        "theme_save" => {
+            ensure!(tail.is_empty(), "Use :theme_save");
+            return Ok(Command::ThemeSave);
+        }
         "workspace_save" => {
             ensure!(
                 tail.len() == 1 && !tail[0].is_empty(),
@@ -1265,6 +1277,7 @@ pub fn command_names() -> Vec<&'static str> {
         "context_diff",
         "plugin",
         "theme",
+        "theme_save",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names

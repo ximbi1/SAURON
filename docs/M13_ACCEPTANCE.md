@@ -227,11 +227,39 @@ Journal → continue.
   the one-off script, not a SAUR-ON defect; not part of the permanent
   test suite.)
 
+- 2026-09-22: M13.2 (persistence) implemented and **ACCEPTED**. Added
+  `Command::ThemeSave` (`src/command/mod.rs`, grammar `:theme_save`, no
+  arguments) as a deliberately separate verb from `:theme NAME` itself —
+  applying a theme never silently rewrites disk, matching this project's
+  own "explicit approval gesture" posture (the same class as `readonly =
+  false` or plugin `trust = Approved`), and never bundled into an
+  unrelated save like `:workspace_save`. `Runtime::save_theme`
+  (`src/app/mod.rs`) sets `self.config.base.theme` from the live
+  `state.settings.theme` and calls the existing `persist_config()` helper
+  verbatim — the exact same `Config::save()` atomic-write path
+  workspaces/bookmarks already use; no second config-write mechanism.
+
+  4 new unit tests: applying without saving never reaches disk (asserted
+  by the config file simply not existing yet, not by an on-disk value
+  mismatch); `:theme_save` actually writes `base.theme` to the real file
+  on the test's own scratch path; and the same cross-process restart
+  proof M10.8 already established for workspaces (`Runtime::new` loading
+  a fresh `Config` that a prior, now-shut-down `Runtime` persisted) run
+  for theme too. 451 unit + 76 fake-HTTP, `fmt`/`clippy -D warnings`
+  clean.
+
+  **Verified live**, not merely asserted: launched the real binary
+  against `kind-sauron-test` with a scratch `XDG_CONFIG_HOME` (so the
+  config file starts genuinely absent, not just empty); `:theme mono`
+  applied live; confirmed the config file still did not exist on disk;
+  `:theme_save` reported `"mono" saved`; confirmed the real file now
+  exists and its actual bytes read `theme = "mono"`.
+
 ## Final acceptance checklist
 
 - [x] M13.1 (live theme switching) implemented, unit + live-terminal
       acceptance evidence, ACCEPTED in the Journal above.
-- [ ] M13.2 (persistence) implemented and accepted, reusing
+- [x] M13.2 (persistence) implemented and accepted, reusing
       `Config::save()` verbatim, live-proven to survive a real process
       restart (mirroring the existing workspace/bookmark restart proof).
 - [ ] M13.3 (banner rendering) implemented and accepted; 32x9

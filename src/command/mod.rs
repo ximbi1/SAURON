@@ -56,6 +56,7 @@ pub enum Action {
     ClearSelection,
     InvertSelection,
     InspectSelection,
+    Eye,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -189,6 +190,13 @@ pub fn registry() -> Vec<Binding> {
             "table",
             "Read-only: what a hypothetical mutation would do (M7 infrastructure)",
             "u",
+        ),
+        (
+            Action::Eye,
+            "eye",
+            "table",
+            "Priority-ordered attention view of the current scope (bounded, read-only)",
+            "e",
         ),
         (
             Action::Mutations,

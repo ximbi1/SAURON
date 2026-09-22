@@ -1706,6 +1706,7 @@ impl Runtime {
             Follow => self.follow_adjacent()?,
             Policy => self.open_policy_view()?,
             Mutations => self.open_mutations_view()?,
+            Eye => self.open_eye(),
             Timeline => {
                 let object = self.state.selected_object().context("Select a row first")?;
                 let uid = object.uid.clone();
@@ -2627,6 +2628,32 @@ impl Runtime {
         let text = crate::mutation::view::journal_report(&records);
         self.open_static("Mutation journal", text);
         Ok(())
+    }
+    /// M11.2: zero Kubernetes requests -- a pure re-render of whatever
+    /// `state.rows` already holds. Never widens scope beyond the currently
+    /// watched resource kind/namespace/context.
+    fn open_eye(&mut self) {
+        use crate::eye::ScopeCaveat;
+        let mut caveats = Vec::new();
+        if !self.state.synced {
+            caveats.push(ScopeCaveat::NotYetSynced);
+        }
+        if self.state.store.incomplete {
+            caveats.push(ScopeCaveat::Incomplete);
+        }
+        if self.state.filter_unknown > 0 {
+            caveats.push(ScopeCaveat::UnknownFieldsExcluded(
+                self.state.filter_unknown,
+            ));
+        }
+        let (text, adjacent) =
+            crate::eye::report(&self.state.rows, self.state.resource.as_ref(), &caveats);
+        self.document.cancel();
+        self.state.request += 1;
+        let mut doc = Document::new("Eye".into(), crate::safety::text(&text));
+        doc.adjacent = adjacent;
+        self.state.mode = Mode::Document(doc);
+        self.state.dirty = true;
     }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
@@ -4211,6 +4238,49 @@ mod tests {
         rt.action(Action::ToggleSelect).expect("toggle off");
         assert!(!rt.state.selection.contains("a"));
         assert!(rt.state.selection.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn eye_action_opens_a_document_with_navigable_priority_rows() {
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.rows = pod_rows(&["a", "b"]);
+        rt.action(Action::Eye).expect("eye opens");
+        match &rt.state.mode {
+            Mode::Document(doc) => {
+                assert_eq!(doc.title, "Eye");
+                assert_eq!(
+                    doc.adjacent.len(),
+                    2,
+                    "every row in scope must be navigable, never silently dropped"
+                );
+                let uids: std::collections::BTreeSet<_> =
+                    doc.adjacent.iter().map(|t| t.uid.clone()).collect();
+                assert!(uids.contains("a") && uids.contains("b"));
+            }
+            _ => panic!("expected Mode::Document after Action::Eye"),
+        }
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn eye_completes_synchronously_no_pending_task_spawned() {
+        // Reconnaissance's own load-bearing claim: Eye is a pure re-render of
+        // state.rows, never a new fetch -- unlike Explain/Xray/Adjacent,
+        // which spawn an async task and leave the mode in a Loading-like
+        // wait for a Payload::Document event. Eye's Document is fully
+        // populated (title, text, adjacent) the instant the action returns,
+        // with no task join required.
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.rows = pod_rows(&["a"]);
+        rt.action(Action::Eye).expect("eye opens");
+        assert!(rt.tasks.is_empty(), "Eye must not spawn any async task");
+        match &rt.state.mode {
+            Mode::Document(doc) => {
+                assert!(!doc.lines.is_empty(), "report text is already rendered")
+            }
+            _ => panic!("expected Mode::Document after Action::Eye"),
+        }
         rt.shutdown().await;
     }
     #[tokio::test]

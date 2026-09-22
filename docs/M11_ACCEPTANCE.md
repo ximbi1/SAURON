@@ -204,7 +204,7 @@ investigation.
 | --- | --- | --- |
 | M11.0 | Acceptance contract / architecture freeze (this document) | ACCEPTED |
 | M11.1 | Shared evidence snapshot foundation (formalize what already exists; the one new piece: a pure priority-ordering helper) | ACCEPTED |
-| M11.2 | Eye — problem-priority current-context overview | PLANNED |
+| M11.2 | Eye — problem-priority current-context overview | ACCEPTED |
 | M11.3 | Pulse — bounded refreshed operational overview | PLANNED |
 | M11.4 | Evidence bundle — redacted local incident export | PLANNED |
 | M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | PLANNED |
@@ -625,6 +625,41 @@ every prior milestone's own section.
   (this project's `UID != NAME` invariant, directly regression-tested at
   this new layer rather than only trusted-by-composition). 394 unit tests
   total (up from 388), fmt/clippy clean.
+
+- 2026-09-22: M11.2 (Eye) implemented. New `src/eye.rs::report(rows,
+  resource, caveats) -> (String, Vec<adjacent::Target>)` -- a pure function,
+  reusing `resources::priority::by_attention`/`severity_counts` for
+  ordering/summary and `adjacent::Target` verbatim for navigation (zero new
+  navigation mechanism: `Document.navigate`'s existing Up/Down-steps-through-
+  targets/Follow-jumps-to-UID code already handles any `Document` with a
+  non-empty `.adjacent`, unchanged). New `ScopeCaveat` enum
+  (`NotYetSynced`/`Incomplete`/`UnknownFieldsExcluded(n)`) is Eye's own
+  explicit "this scope may not be the whole truth" signal, deliberately kept
+  separate from `evidence::Unknown` (that enum is about one *value* being
+  unknown; this is about the *row set itself* being possibly incomplete) --
+  reconnaissance's own "a new enum only with explicit justification" bar,
+  met here in a comment, not silently added. New `Action::Eye`/`:eye`
+  registry entry (table mode, key `e`), `Runtime::open_eye` builds the
+  `Document` synchronously from `state.rows`/`state.resource`/the three
+  caveat sources already on `State` -- no async task, no `Payload::Document`
+  round trip, unlike Explain/Adjacent/Xray, because there is nothing to
+  fetch. 8 new unit/app tests: fixed-order and broader
+  every-problem-before-healthy invariant checks, Unknown-never-rendered-as-
+  healthy, caveats always stated explicitly (including the empty case,
+  stated as explicitly as the non-empty one), same-name/new-UID
+  non-collapse, navigable-target UID correctness, real-`Runtime`
+  `Action::Eye` wiring proving every row becomes a navigable target, and a
+  synchronous-completion proof (`rt.tasks.is_empty()` after the action,
+  unlike every async document action). **Live evidence** against
+  `kind-sauron-test`/`sauron-fixtures` (14 real Pods: CrashLoopBackOff,
+  ImagePullBackOff ×3, a genuinely `Failed` Job Pod, an `Unschedulable`
+  Pod, 7 Healthy): `:eye` correctly ordered all 6 Critical rows first, the
+  1 Warning next, 7 Healthy last, each with its real evidence line
+  (container waiting reason, restart count, scheduling message); `Down`
+  then `Enter` (Follow) navigated the table cursor to the exact UID of the
+  2nd priority row (`m5-job-failing-9ppwq`), not by name; 32x9 rendered
+  without corruption; quit restored the terminal cleanly. 402 unit + 76
+  fake-HTTP total, fmt/clippy clean.
 
 ## Final acceptance checklist
 

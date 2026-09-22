@@ -5,6 +5,7 @@ pub mod command;
 pub mod config;
 pub mod evidence;
 pub mod explain;
+pub mod eye;
 pub mod filters;
 pub mod graph;
 pub mod integrations;

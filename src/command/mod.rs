@@ -57,6 +57,7 @@ pub enum Action {
     InvertSelection,
     InspectSelection,
     Eye,
+    Pulse,
 }
 #[derive(Clone)]
 pub struct Binding {
@@ -197,6 +198,13 @@ pub fn registry() -> Vec<Binding> {
             "table",
             "Priority-ordered attention view of the current scope (bounded, read-only)",
             "e",
+        ),
+        (
+            Action::Pulse,
+            "pulse",
+            "table",
+            "Refreshed health/metrics tile summary of the current scope (bounded, read-only)",
+            "o",
         ),
         (
             Action::Mutations,

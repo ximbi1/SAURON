@@ -22,7 +22,7 @@ pub enum ScopeCaveat {
     UnknownFieldsExcluded(usize),
 }
 impl ScopeCaveat {
-    fn text(self) -> String {
+    pub fn text(self) -> String {
         match self {
             Self::NotYetSynced => "list not yet synchronized".into(),
             Self::Incomplete => "PARTIAL: object cache bound reached".into(),

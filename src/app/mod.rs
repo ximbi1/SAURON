@@ -1707,6 +1707,7 @@ impl Runtime {
             Policy => self.open_policy_view()?,
             Mutations => self.open_mutations_view()?,
             Eye => self.open_eye(),
+            Pulse => self.open_pulse(),
             Timeline => {
                 let object = self.state.selected_object().context("Select a row first")?;
                 let uid = object.uid.clone();
@@ -2654,6 +2655,27 @@ impl Runtime {
         doc.adjacent = adjacent;
         self.state.mode = Mode::Document(doc);
         self.state.dirty = true;
+    }
+    /// M11.3: same zero-Kubernetes-request contract as `open_eye` -- a pure
+    /// re-render of state already loaded, plus `state.metrics.summary()`
+    /// (itself already a pure read of the metrics collector's own cache,
+    /// not a fresh fetch).
+    fn open_pulse(&mut self) {
+        use crate::eye::ScopeCaveat;
+        let mut caveats = Vec::new();
+        if !self.state.synced {
+            caveats.push(ScopeCaveat::NotYetSynced);
+        }
+        if self.state.store.incomplete {
+            caveats.push(ScopeCaveat::Incomplete);
+        }
+        if self.state.filter_unknown > 0 {
+            caveats.push(ScopeCaveat::UnknownFieldsExcluded(
+                self.state.filter_unknown,
+            ));
+        }
+        let text = crate::pulse::report(&self.state.rows, &caveats, &self.state.metrics.summary());
+        self.open_static("Pulse", text);
     }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
@@ -4280,6 +4302,24 @@ mod tests {
                 assert!(!doc.lines.is_empty(), "report text is already rendered")
             }
             _ => panic!("expected Mode::Document after Action::Eye"),
+        }
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn pulse_completes_synchronously_and_never_requires_a_row_selected() {
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.rows = pod_rows(&["a", "b"]);
+        assert!(rt.state.selected.is_none(), "no cursor row required");
+        rt.action(Action::Pulse)
+            .expect("pulse opens with no selection");
+        assert!(rt.tasks.is_empty(), "Pulse must not spawn any async task");
+        match &rt.state.mode {
+            Mode::Document(doc) => {
+                assert_eq!(doc.title, "Pulse");
+                assert!(doc.lines.iter().any(|l| l.contains("2 row(s)")));
+            }
+            _ => panic!("expected Mode::Document after Action::Pulse"),
         }
         rt.shutdown().await;
     }

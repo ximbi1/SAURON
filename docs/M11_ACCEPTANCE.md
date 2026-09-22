@@ -205,7 +205,7 @@ investigation.
 | M11.0 | Acceptance contract / architecture freeze (this document) | ACCEPTED |
 | M11.1 | Shared evidence snapshot foundation (formalize what already exists; the one new piece: a pure priority-ordering helper) | ACCEPTED |
 | M11.2 | Eye — problem-priority current-context overview | ACCEPTED |
-| M11.3 | Pulse — bounded refreshed operational overview | PLANNED |
+| M11.3 | Pulse — bounded refreshed operational overview | ACCEPTED |
 | M11.4 | Evidence bundle — redacted local incident export | PLANNED |
 | M11.5 | Blast radius — evidence-backed safety lens (reordered ahead of context diff; P1 in SOFKA_PARITY) | PLANNED |
 | M11.6 | Context diff — read-only comparison (P3 in SOFKA_PARITY; attempt with evidence-backed scope, DEFER only if investigation shows a genuine architectural blocker, mirroring M9.6) | PLANNED |
@@ -659,6 +659,37 @@ every prior milestone's own section.
   then `Enter` (Follow) navigated the table cursor to the exact UID of the
   2nd priority row (`m5-job-failing-9ppwq`), not by name; 32x9 rendered
   without corruption; quit restored the terminal cleanly. 402 unit + 76
+  fake-HTTP total, fmt/clippy clean.
+
+- 2026-09-22: M11.3 (Pulse) implemented. New `src/pulse.rs::report(rows,
+  caveats, metrics_summary) -> String` -- a pure function reusing
+  `resources::priority::severity_counts` for the HEALTH tile,
+  `app::metrics::Cache::summary()` (already-existing, unchanged) verbatim
+  for the METRICS tile, and `eye::ScopeCaveat::text` (widened from private
+  to `pub` so both views share one caveat vocabulary instead of two) for the
+  SCOPE tile. Deliberately scoped narrower than `:info`: `:info` already
+  covers connection/task/session/queue plumbing, so Pulse covers only what
+  `:info` does not -- the current resource scope's own health/metrics
+  evidence -- rather than duplicating it. v1 makes zero new Kubernetes
+  requests: `Runtime::open_pulse` builds the report synchronously from
+  `state.rows`/`state.metrics` exactly like `open_eye`, no async task, no
+  new bounded collector added (reconnaissance's own M11.3 "decision 2" this
+  slice confirmed rather than revisited -- no genuinely new bounded source
+  was needed to make Pulse useful). New `Action::Pulse`/`:pulse` registry
+  entry (table mode, key `o`), never requires a selected row. 5 new unit/app
+  tests: zero-rows-is-explicit (never an implicit "all healthy" claim),
+  metrics-unavailable tile textually distinct from metrics-sampled,
+  exhaustive severity counts, caveats-never-silently-dropped (including the
+  absence case stated as explicitly as presence), and a real-`Runtime`
+  wiring test proving synchronous completion (`rt.tasks.is_empty()`) with no
+  selection required. **Live evidence** against
+  `kind-sauron-test`/`sauron-fixtures` (same 14-Pod scope as M11.2's own
+  live check): `:pulse` correctly showed 6 Critical/1 Warning/0 Unknown/7
+  Healthy, a real `Metrics PARTIAL: 6/6 fresh; omitted=8 malformed=0` tile
+  (the bounded metrics collector had only pinned/sampled 6 of the 14 rows at
+  that point -- shown as PARTIAL, never silently rounded up to "all
+  sampled"), and "No caveats" for a fully synced scope; 32x9 rendered
+  without corruption; quit restored the terminal cleanly. 407 unit + 76
   fake-HTTP total, fmt/clippy clean.
 
 ## Final acceptance checklist

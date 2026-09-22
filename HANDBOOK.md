@@ -185,6 +185,9 @@ ACCEPTED requires demonstrated acceptance, not compilation or fixture-only rende
 | Performance campaign | ACCEPTED (M12.7) | cold-startup + 20k-object tier added to benches/pipeline.rs, run live with hardware/rustc/OS context recorded |
 | M12.8 combined acceptance/soak | ACCEPTED | full M1-M11 regression + `scripts/accept-m12.py` run twice clean + 180s soak (64 cycles, flat RSS/fd/threads, zero orphan plugin processes); docs/M12_ACCEPTANCE.md; local annotated m12-accepted |
 | Plugin catalog/registry, activity panel, bulk invocation, fleet | DEFERRED | stable core first |
+| Live theme switching (`:theme`/`:theme_save`) | ACCEPTED (M13.1/M13.2) | applies immediately (re-resolved every frame); explicit `:theme_save` persists via `Config::save`, never silently; unknown name rejected, never a crash |
+| Header ASCII banner + expanded info panel | ACCEPTED (M13.3/M13.5) | `banner = true/false`; panel (Context/Cluster real URL/Namespace/Resource/Objects) only on a genuinely large terminal (own threshold, independent of and above every existing script's 180x40); 32x9 unaffected |
+| Banner style selection | DEFERRED (M13.4) | single fixed design confirmed sufficient; no second variant requested |
 
 Detailed capability status and acceptance plans live in `docs/SOFKA_PARITY.md`.
 

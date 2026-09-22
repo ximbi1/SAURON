@@ -1,6 +1,7 @@
 # M13 — In-app theme switching + banner: acceptance ledger
 
-Status: **IN PROGRESS (M13.1 ACCEPTED)**. This document began as M13.0: the
+Status: **ACCEPTED (M13.1-M13.3, M13.5; M13.4 banner-selection explicitly
+DEFERRED, evidence-backed)**. This document began as M13.0: the
 scope-freeze contract written before any M13 implementation code, exactly
 like `docs/M10_ACCEPTANCE.md`/`M11_ACCEPTANCE.md`/`M12_ACCEPTANCE.md` were
 for their own milestones.
@@ -390,9 +391,13 @@ Journal → continue.
 - [x] Full M1-M12 regression (every existing `accept-m*.py` unmodified)
       still green (re-run after M13.5's own header-layout change, since
       it touches every milestone's own standard 180x40 terminal size).
-- [ ] Docs reconciled (`HANDBOOK.md`, `docs/RUNBOOK.md`,
-      `docs/SOFKA_PARITY.md` if theme/banner rows exist there, website
-      copy if it claims something no longer accurate).
-- [ ] Worktree clean; local annotated tag `m13-accepted` created — nothing
+- [x] Docs reconciled: `HANDBOOK.md` (new M13 rows), `docs/RUNBOOK.md`
+      (checkpoint updated, corrects the stale "never pushed"/"final
+      milestone" claims now that M12 was pushed and published),
+      `docs/SOFKA_PARITY.md` (Themes row: DESIGNED -> ACCEPTED
+      M13.1/M13.2), `docs/ROADMAP.md` (M13 summary, corrects the stale
+      "final milestone" claim). Website checked -- makes no claim about
+      theme/banner that needed correcting.
+- [x] Worktree clean; local annotated tag `m13-accepted` created — nothing
       pushed/published without explicit authorization beyond what was
       already given for `main`/tags through `m12-accepted`.

@@ -38,9 +38,14 @@ M1–M8B are ACCEPTED. M9.0–M9.5 and M9.7 are ACCEPTED; M9.6
 M10.0–M10.9 are ACCEPTED. M11.0–M11.8 are ACCEPTED (M11.6 context diff at
 a reduced scope). M12.0–M12.8 are ACCEPTED (M12.3 providers explicitly
 DEFERRED, evidence-backed; M12.5 packaging proven live for Linux x86_64
-only, the other 3 platforms CI-defined but never executed). Local
-annotated `m12-accepted` points to the tip of this milestone's work — the
-final milestone of the current roadmap; never pushed.
+only, the other 3 platforms CI-defined but never executed) — `main` and
+every tag through `m12-accepted` are pushed to `origin`; the project is
+published on crates.io as `saur-on` (binary/crate name stays `sauron`)
+and has a draft GitHub Release with all 4 platform archives. M13
+(live theme switching, persistence, header banner/info panel) is the
+current milestone in progress: M13.1–M13.3 and M13.5 are ACCEPTED, M13.4
+(banner style selection) explicitly DEFERRED — see
+`docs/M13_ACCEPTANCE.md`.
 
 Recorded M9 checks: 305 unit + 74 fake HTTP, plus 9 Flux/Argo CD/Helm live
 tests; locked fmt/check/clippy/test green in the acceptance record. Combined

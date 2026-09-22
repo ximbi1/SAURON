@@ -122,7 +122,7 @@ above is unchanged.
 | Mouse | Rows/wheel/header sort; release for native text selection | Supplementary mouse modes | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Configuration | XDG base/drop-ins/cluster/context/view layers | TOML first, collision-free exact keys | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
 | Configuration | TOML/YAML, reload/validation, migration/Home Manager | TOML first; YAML/Nix deferred | P2 | DEFERRED | Pending: unit + scoped acceptance | Not yet delivered |
-| Themes | Dark/light palettes, semantic colors, live override | Original semantic themes | P1 | DESIGNED | Pending: unit + scoped acceptance | Not yet delivered |
+| Themes | Dark/light palettes, semantic colors, live override | Original semantic themes | P1 | ACCEPTED (M13.1/M13.2) | M13's own unit + live-terminal + restart-persistence proof | Live `:theme NAME`/bare `:theme` list, explicit `:theme_save`; 3 fixed themes (ember/light/mono), no custom palette editor |
 | Sessions | Bookmarks/workspaces/view cycling/persistent namespaces | Saved structured queries | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Notifications | Independent single-resource watches, bell/desktop | Bounded notification subscriptions | P2 | RESEARCHED | Pending: unit + scoped acceptance | Not yet delivered |
 | Diagnostics | Redacted incident bundle with manifest/limits/preview/export | Local evidence bundle | P1 | ACCEPTED (M11.4) | M11.8 unit + live sensitive-fixture-absence proof against real exported bytes | Bounded sections, atomic 0600/0700 writes, refuse/--force overwrite; no raw logs/env vars |

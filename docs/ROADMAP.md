@@ -17,9 +17,14 @@ Linux x86_64 packaging built and live-verified locally, the other three
 platforms CI-defined but never executed; dual MIT/Apache-2.0 licensing
 with a full dependency license inventory; a performance campaign closing
 the cold-startup and large-object-count gaps. Providers remained
-evidence-backed DEFERRED (see `docs/SOFKA_PARITY.md`); this was the final
-milestone of the current roadmap. The table below states milestone goals,
-not claims of full feature parity; acceptance ledgers record shipped subsets.
+evidence-backed DEFERRED (see `docs/SOFKA_PARITY.md`). SAUR-ON is
+published on crates.io as `saur-on` (binary/crate name stays `sauron`)
+with a draft GitHub Release carrying all 4 platform archives. M13 (live
+theme switching/persistence, header banner/expanded info panel) followed
+as a small, user-requested milestone; M13.1-M13.3 and M13.5 accepted,
+M13.4 (banner style selection) explicitly DEFERRED — see
+`docs/M13_ACCEPTANCE.md`. The table below states milestone goals, not
+claims of full feature parity; acceptance ledgers record shipped subsets.
 
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |

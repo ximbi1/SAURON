@@ -674,6 +674,9 @@ pub enum Command {
     /// row's kind/namespace/name against another named context. Never a
     /// background watcher, never an identity claim across contexts.
     ContextDiff(String),
+    /// M12.2: run one explicitly `approved` plugin by name against the
+    /// selected row's bounded, redacted projection. Never a mutation path.
+    Plugin(String),
 }
 
 /// Shared `:label KEY=VALUE` / `:label KEY-` (remove) grammar for `:label`
@@ -1086,6 +1089,10 @@ pub fn parse(s: &str) -> Result<Command> {
             );
             return Ok(Command::ContextDiff(tail[0].clone()));
         }
+        "plugin" => {
+            ensure!(tail.len() == 1 && !tail[0].is_empty(), "Use :plugin NAME");
+            return Ok(Command::Plugin(tail[0].clone()));
+        }
         "workspace_save" => {
             ensure!(
                 tail.len() == 1 && !tail[0].is_empty(),
@@ -1246,6 +1253,7 @@ pub fn command_names() -> Vec<&'static str> {
         "bookmarks",
         "bundle",
         "context_diff",
+        "plugin",
     ];
     names.extend(registry().iter().map(|b| b.name));
     names

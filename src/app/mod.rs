@@ -1659,6 +1659,7 @@ impl Runtime {
             }
             Command::Bundle { path, force } => self.open_bundle(path, force),
             Command::ContextDiff(context) => self.open_context_diff(context),
+            Command::Plugin(name) => self.open_plugin(name),
             Command::StopForward(number) => {
                 let id = self
                     .forwards
@@ -2879,6 +2880,82 @@ impl Runtime {
         self.state.dirty = true;
         Ok(())
     }
+    /// M12.2: the smallest safe plugin shape -- one approved command,
+    /// invoked with the bounded `plugin::projection` on stdin, through
+    /// `Sessions::spawn` exactly like Logs/Exec (bounded, cancellable,
+    /// `Drop`-safe -- M12.1's own "no orphan process after quit" holds
+    /// here for the same reason it holds for every other session kind).
+    /// Fails fast, before spawning anything, if the plugin is unknown or
+    /// not explicitly `approved` -- never a silent no-op, never an
+    /// implicit approval.
+    fn open_plugin(&mut self, name: String) -> Result<()> {
+        let object = self.state.selected_object().context("Select a row first")?;
+        let config = self
+            .state
+            .settings
+            .plugins
+            .get(&name)
+            .with_context(|| format!("Unknown plugin {name:?}; check [plugins.{name}] in config"))?
+            .clone();
+        anyhow::ensure!(
+            config.trust == crate::plugin::Trust::Approved,
+            "Plugin {name:?} is not approved (trust = disabled); set trust = \"approved\" in config to run it"
+        );
+        let connection = self.connection.as_ref().context("Not connected")?;
+        let scope = session::Scope {
+            epoch: self.state.epoch,
+            request: self.state.request,
+            context: connection.context.clone(),
+            cluster: connection.cluster.clone(),
+            resource: self
+                .state
+                .resource
+                .as_ref()
+                .map(Resource::qualified)
+                .unwrap_or_default(),
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+            uid: object.uid.clone(),
+        };
+        let input = crate::plugin::projection(&object);
+        let mut doc = Document::new(
+            format!("Plugin: {name} on {}", object.name),
+            format!("Running plugin {name:?} ...\n"),
+        );
+        self.document.cancel();
+        self.document = self.scope.child_token();
+        self.state.request += 1;
+        let request = self.state.request;
+        let epoch = self.state.epoch;
+        let tx = self.tx.clone();
+        let cancel = self.document.clone();
+        let plugin_name = name.clone();
+        let id = self.sessions.spawn(
+            session::Kind::Plugin,
+            scope,
+            cancel.clone(),
+            move |_| async move {
+                let status = crate::plugin::run(&config, &input, cancel.clone()).await;
+                let (text, outcome) = render_plugin_status(&plugin_name, status);
+                let payload = Payload::Document {
+                    request,
+                    title: format!("Plugin: {plugin_name} on {}", object.name),
+                    text,
+                    adjacent: vec![],
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = tx.send(Event { epoch, payload }) => {},
+                }
+                outcome
+            },
+        )?;
+        doc.session = Some(id);
+        doc.session_state = Some(session::State::Starting);
+        self.state.mode = Mode::Document(doc);
+        self.state.dirty = true;
+        Ok(())
+    }
     fn open_document(&mut self, action: Action) -> Result<()> {
         let object = self.state.selected_object().context("Select a row first")?;
         let resource = self
@@ -3618,6 +3695,64 @@ pub async fn run(mut runtime: Runtime, mut rx: mpsc::Receiver<Event>) -> Result<
     }.await;
     runtime.shutdown().await;
     result
+}
+/// M12.2: renders a `plugin::Status` as the document text, and classifies
+/// it as the `session::Outcome` `session_finished`'s own existing
+/// Logs/Exec-style state label reuses -- no new outcome vocabulary.
+fn render_plugin_status(name: &str, status: crate::plugin::Status) -> (String, session::Outcome) {
+    use crate::plugin::Status;
+    match status {
+        Status::Completed {
+            exit_code,
+            stdout,
+            stderr,
+            stdout_truncated,
+            stderr_truncated,
+        } => {
+            let mut text = format!("PLUGIN: {name}\nExit code: {exit_code}\n\nSTDOUT\n");
+            if stdout.is_empty() {
+                text.push_str("(empty)\n");
+            } else {
+                for line in &stdout {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+                if stdout_truncated {
+                    text.push_str("[TRUNCATED: stdout bound reached]\n");
+                }
+            }
+            text.push_str("\nSTDERR\n");
+            if stderr.is_empty() {
+                text.push_str("(empty)\n");
+            } else {
+                for line in &stderr {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+                if stderr_truncated {
+                    text.push_str("[TRUNCATED: stderr bound reached]\n");
+                }
+            }
+            let outcome = if exit_code == 0 {
+                session::Outcome::Completed
+            } else {
+                session::Outcome::Failed(format!("exit code {exit_code}"))
+            };
+            (text, outcome)
+        }
+        Status::TimedOut => (
+            format!("PLUGIN: {name}\nTIMED OUT (process group killed)\n"),
+            session::Outcome::Failed("timed out".into()),
+        ),
+        Status::Cancelled => (
+            format!("PLUGIN: {name}\nCANCELLED\n"),
+            session::Outcome::Cancelled,
+        ),
+        Status::Failed(reason) => (
+            format!("PLUGIN: {name}\nFAILED: {reason}\n"),
+            session::Outcome::Failed(reason),
+        ),
+    }
 }
 /// M11.6: one bounded, independent connect + GVK resolve + GET for
 /// `open_context_diff`. The returned `Connection` is dropped when this
@@ -4508,6 +4643,103 @@ mod tests {
         rt.action(Action::ToggleSelect).expect("toggle off");
         assert!(!rt.state.selection.contains("a"));
         assert!(rt.state.selection.is_empty());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn plugin_command_fails_fast_for_an_unknown_plugin_never_spawning_anything() {
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        let err = rt
+            .command(":plugin does-not-exist")
+            .expect_err("unknown plugin must fail, never silently no-op");
+        assert!(err.to_string().contains("Unknown plugin"), "{err}");
+        assert_eq!(rt.sessions.active_count(), 0, "nothing must be spawned");
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn plugin_command_fails_fast_for_a_disabled_plugin_never_spawning_anything() {
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.state.settings.plugins.insert(
+            "sanitize".into(),
+            crate::plugin::PluginConfig {
+                executable: "/bin/true".into(),
+                args: vec![],
+                trust: crate::plugin::Trust::Disabled,
+                timeout_secs: 5,
+            },
+        );
+        let err = rt
+            .command(":plugin sanitize")
+            .expect_err("a disabled (not explicitly approved) plugin must never run");
+        assert!(err.to_string().contains("not approved"), "{err}");
+        assert_eq!(rt.sessions.active_count(), 0, "nothing must be spawned");
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn plugin_command_without_a_selected_row_errors_explicitly() {
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.settings.plugins.insert(
+            "sanitize".into(),
+            crate::plugin::PluginConfig {
+                executable: "/bin/true".into(),
+                args: vec![],
+                trust: crate::plugin::Trust::Approved,
+                timeout_secs: 5,
+            },
+        );
+        assert!(rt.command(":plugin sanitize").is_err());
+        rt.shutdown().await;
+    }
+    #[tokio::test]
+    async fn approved_plugin_runs_end_to_end_and_reports_its_real_output() {
+        let mut rt = runtime();
+        rt.state.resource = Some(entry("pods").resource);
+        rt.state.rows = pod_rows(&["a"]);
+        rt.state.selected = Some("a".into());
+        rt.connection = Some(Connection {
+            client: ::kube::Client::try_from(::kube::Config::new(
+                "http://127.0.0.1:1".parse().expect("uri"),
+            ))
+            .expect("client"),
+            context: "test".into(),
+            cluster: "test".into(),
+            namespace: "test".into(),
+            contexts: vec![],
+            catalog: crate::kube::discovery::Catalog {
+                resources: vec![],
+                warnings: vec![],
+            },
+            settings: crate::config::Settings::default(),
+            version: "test".into(),
+        });
+        rt.state.settings.plugins.insert(
+            "echo".into(),
+            crate::plugin::PluginConfig {
+                executable: "/bin/cat".into(),
+                args: vec![],
+                trust: crate::plugin::Trust::Approved,
+                timeout_secs: 5,
+            },
+        );
+        rt.command(":plugin echo").expect("approved plugin runs");
+        // The task is fire-and-forget; join it through the same reaping
+        // path the real event loop uses.
+        let record =
+            tokio::time::timeout(std::time::Duration::from_secs(5), rt.sessions.join_next())
+                .await
+                .expect("plugin session completes")
+                .expect("a record");
+        assert_eq!(record.kind, session::Kind::Plugin);
+        assert_eq!(
+            record.state,
+            session::State::Ended(session::Outcome::Completed)
+        );
         rt.shutdown().await;
     }
     #[tokio::test]

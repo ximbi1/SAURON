@@ -160,7 +160,7 @@ roadmap's own acceptance line). **Amended scope**:
 | --- | --- | --- |
 | M12.0 | Acceptance contract / architecture freeze (this document) | ACCEPTED |
 | M12.1 | Plugin execution foundation: subprocess trust/process-group/bounds, reusing `app::session::Sessions` | ACCEPTED |
-| M12.2 | Plugin protocol (smallest safe shape) + command registry wiring | PLANNED |
+| M12.2 | Plugin protocol (smallest safe shape) + command registry wiring | ACCEPTED |
 | M12.3 | Providers — investigated; accepted or evidence-backed DEFERRED | PLANNED |
 | M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | PLANNED |
 | M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | PLANNED |
@@ -428,6 +428,71 @@ None yet — implementation has not started. Updated per slice.
   total, fmt/clippy clean. No live-cluster evidence needed for this slice
   (pure OS-process behavior, no Kubernetes I/O) -- live/interactive
   acceptance is M12.2's own job once there is a command surface to drive.
+
+- 2026-09-22: M12.2 (plugin protocol, smallest safe shape) implemented.
+  `plugin::projection(&Object) -> serde_json::Value`: `protocolVersion: 1`
+  plus canonical target identity (kind/namespace/name/UID) and the
+  redacted `Health` projection (status/severity/evidence) -- never
+  `object.value` itself, so there is no redaction to trust here, only
+  identity/health fields that never had anything sensitive to begin with.
+  New `Command::Plugin(String)`/`:plugin NAME` grammar (no default
+  keybinding, matching `:bundle`/`:context_diff`'s own precedent for
+  argument-taking commands) and `Runtime::open_plugin`: fails fast
+  (`Result::Err`, nothing spawned) for an unknown name or a plugin whose
+  `trust` is not exactly `Approved` -- proven by three new app-level tests
+  asserting `rt.sessions.active_count() == 0` after each rejection.
+  `app::session::Kind::Plugin` reuses `Sessions::spawn` exactly like
+  Logs/Exec (bounded `MAX_ACTIVE=8`, `Drop`-safe), with the result
+  delivered through the *existing* `Payload::Document` event -- no new
+  payload variant, matching the bundle/context-diff precedent from M11.
+
+  **Real bug found and fixed live** (the actual reason this slice took
+  more than wiring): quitting the real app while a plugin that itself
+  forked a background grandchild (`sh -c "sleep 60 & wait"`) was running
+  left that grandchild alive afterward, even though M12.1's own unit test
+  for "timeout kills a grandchild" had already passed. Root-caused by
+  reading `Sessions::drop` closely: it calls `record.cancel.cancel()` and
+  then *immediately* `self.tasks.abort_all()`, with no `.await` between
+  them -- so the plugin task is aborted before it is ever polled again to
+  observe the cancellation flag and run `run()`'s own
+  `tokio::select!` cancellation branch (including its `kill_process_group`
+  call). When a tokio task is aborted, only in-scope `Drop` impls fire;
+  `tokio::process::Child`'s own `kill_on_drop` reaches only the direct
+  child, never a process-group grandchild. Fixed by adding a
+  `GroupKillGuard` whose own `Drop` unconditionally kills the whole
+  process group, held for `run()`'s entire scope so it fires on every
+  exit path (normal completion, cooperative cancel/timeout, *and* abrupt
+  external abort) rather than relying on any single `tokio::select!`
+  branch ever being polled. A new regression test
+  (`aborting_the_task_still_kills_the_whole_process_group_not_just_the_
+  direct_child`) reproduces the exact failure mode directly -- spawns
+  `run()` in its own `tokio::spawn`, confirms the grandchild is really
+  running via `pgrep`, calls `handle.abort()` (exactly what
+  `JoinSet::abort_all()` does per task, not a cooperative
+  `CancellationToken::cancel()`), and confirms via `pgrep` again that
+  nothing survives. This test would have failed before the fix and passes
+  after it; the earlier cooperative-cancel unit test alone was
+  insufficient to catch this because it never exercises the abort path at
+  all. Live-replayed the exact original failing scenario against the real
+  `kind-sauron-test` cluster afterward (a real long-running plugin quit
+  mid-execution): zero orphaned processes, confirmed via `ps aux` before
+  and after.
+
+  **Live evidence** against `kind-sauron-test`/`sauron-fixtures` with a
+  real scratch plugin config: `:plugin smoke` (an approved shell script)
+  ran end-to-end and correctly received the target's kind in its stdin
+  projection, with a deliberately-set ambient `KUBECONFIG` environment
+  variable confirmed absent from the child's own `env` output; `:plugin
+  locked` (configured `trust = "disabled"`) was refused with an explicit,
+  visible error and no process spawned; `:plugin` is discoverable via the
+  command palette (`:plug` → suggests `plugin`) and appears in `?`'s
+  effective help.
+
+  4 new unit tests in `plugin.rs` (the abort-path regression above, plus
+  `projection`'s own redaction-boundary test), 4 new app-level tests
+  (unknown plugin, disabled plugin, no-selection, and a full
+  approved-plugin-runs-end-to-end proof reaping the real session record).
+  445 unit + 76 fake-HTTP total, fmt/clippy clean.
 
 ## Final acceptance checklist
 

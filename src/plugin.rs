@@ -121,10 +121,57 @@ fn kill_process_group(pid: Option<u32>) {
 #[cfg(not(unix))]
 fn kill_process_group(_pid: Option<u32>) {}
 
+/// Real bug found live during M12.2's own acceptance work (see
+/// `docs/M12_ACCEPTANCE.md`'s M12.1 journal entry for the full
+/// root-cause): `Sessions::drop` cancels the token and immediately calls
+/// `JoinSet::abort_all()` with no `.await` in between, so an aborted
+/// plugin task's future is dropped in place *without ever being polled
+/// again* -- the `tokio::select!` cancellation branch below, including its
+/// own `kill_process_group` call, never runs on that path. Only
+/// in-scope `Drop` impls fire. `tokio::process::Child`'s own
+/// `kill_on_drop` reaches only the direct child, not a grandchild the
+/// plugin itself forked (proven exactly this way live: a real
+/// `sh -c "sleep 60 & wait"` plugin left its `sleep` grandchild running
+/// after a real app quit, even though the unit-level cooperative-cancel
+/// test for the same scenario passed). This guard's own `Drop` is what
+/// actually has to run unconditionally on every exit path -- normal
+/// completion, cooperative cancel/timeout, and abrupt task abort alike --
+/// which no `tokio::select!` branch can guarantee by itself.
+struct GroupKillGuard(Option<u32>);
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        kill_process_group(self.0);
+    }
+}
+
+/// M12.2's own protocol input: canonical target identity plus the already-
+/// redacted `Health` projection -- never a raw object body, never a
+/// Secret-adjacent field, never a credential. `resources::Object::new`
+/// already ran `safety::redact` on `object.value` at construction time,
+/// but this function deliberately does not touch `object.value` at all,
+/// so there is no redaction to trust or re-derive here: only the
+/// identity/health fields ever existed to leak in the first place.
+pub fn projection(object: &crate::resources::Object) -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": 1,
+        "target": {
+            "kind": object.kind,
+            "namespace": object.namespace,
+            "name": object.name,
+            "uid": object.uid,
+        },
+        "health": {
+            "status": object.health.status,
+            "severity": format!("{:?}", object.health.severity),
+            "evidence": object.health.evidence,
+        },
+    })
+}
+
 /// Runs one approved plugin to completion, bounded by `config.timeout_secs`
 /// and `cancel`. `input` is whatever bounded, already-redacted JSON
-/// projection the caller built (M12.2's own job) -- this function does not
-/// inspect or redact it further; it only transports bytes.
+/// projection the caller built (`projection`, above) -- this function does
+/// not inspect or redact it further; it only transports bytes.
 pub async fn run(
     config: &PluginConfig,
     input: &serde_json::Value,
@@ -154,6 +201,12 @@ pub async fn run(
         Err(e) => return Status::Failed(format!("cannot start plugin: {e}")),
     };
     let pid = child.id();
+    // Lives for this whole function's scope and fires on every exit path --
+    // normal completion, cooperative cancel/timeout below, AND an abrupt
+    // external task abort (`Sessions::drop`'s own path) that never lets
+    // this function run another line of its own code. See the guard's own
+    // doc comment for the real bug this closes.
+    let _group_guard = GroupKillGuard(pid);
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -181,17 +234,15 @@ pub async fn run(
         }
     };
 
+    // `_group_guard`'s own `Drop` is the actual, unconditional termination
+    // mechanism now (see its doc comment) -- these branches only decide
+    // which `Status` to report; they no longer need to kill anything
+    // themselves.
     let timeout = Duration::from_secs(config.timeout_secs.max(1));
     tokio::select! {
         biased;
-        _ = cancel.cancelled() => {
-            kill_process_group(pid);
-            Status::Cancelled
-        }
-        _ = tokio::time::sleep(timeout) => {
-            kill_process_group(pid);
-            Status::TimedOut
-        }
+        _ = cancel.cancelled() => Status::Cancelled,
+        _ = tokio::time::sleep(timeout) => Status::TimedOut,
         status = work => status,
     }
 }
@@ -199,6 +250,22 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_never_includes_raw_object_body_or_secret_adjacent_fields() {
+        let object = crate::resources::Object::new(serde_json::json!({
+            "apiVersion": "v1", "kind": "Secret",
+            "metadata": {"namespace": "default", "name": "s", "uid": "u"},
+            "data": {"password": "hunter2-should-never-leak"},
+        }));
+        let value = projection(&object);
+        let dump = value.to_string();
+        assert!(!dump.contains("hunter2"), "{dump}");
+        assert!(!dump.contains("password"), "{dump}");
+        assert_eq!(value["target"]["kind"], "Secret");
+        assert_eq!(value["target"]["uid"], "u");
+        assert_eq!(value["protocolVersion"], 1);
+    }
 
     fn config(executable: &str, args: &[&str]) -> PluginConfig {
         PluginConfig {
@@ -268,6 +335,53 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "timeout must actually bound wall time, not wait for the 30s child"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_the_task_still_kills_the_whole_process_group_not_just_the_direct_child() {
+        // Reproduces the real bug found live during M12.2's own
+        // acceptance work: `Sessions::drop` cancels the token and calls
+        // `JoinSet::abort_all()` with no `.await` in between, so `run`'s
+        // own `tokio::select!` cancellation branch never gets polled --
+        // only in-scope `Drop` impls run when a task is aborted, not the
+        // rest of its code. This test aborts the `JoinHandle` directly
+        // (exactly what `abort_all()` does per task) rather than
+        // cancelling the token, so it actually exercises the same path a
+        // cooperative-cancel test cannot.
+        // A unique sleep duration (not a bare "sleep 30") so this test's
+        // own `pgrep -f` matches the actual grandchild specifically --
+        // cargo test runs tests in parallel by default, and the sibling
+        // process-group test below intentionally spawns an
+        // identical-looking "sleep 30" of its own concurrently. The
+        // duration itself never matters (both are killed well before it
+        // elapses); only its uniqueness does.
+        let marker = format!("30.{}", std::process::id() % 1000);
+        let c = config("/bin/sh", &["-c", &format!("sleep {marker} & wait")]);
+        let handle =
+            tokio::spawn(
+                async move { run(&c, &serde_json::json!({}), CancellationToken::new()).await },
+            );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let before = std::process::Command::new("pgrep")
+            .args(["-f", &marker])
+            .output()
+            .expect("pgrep");
+        assert!(
+            !before.stdout.is_empty(),
+            "the child must actually be running first"
+        );
+        handle.abort();
+        let _ = handle.await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after = std::process::Command::new("pgrep")
+            .args(["-f", &marker])
+            .output()
+            .expect("pgrep");
+        assert!(
+            after.stdout.is_empty(),
+            "no orphan may survive an aborted task: {}",
+            String::from_utf8_lossy(&after.stdout)
         );
     }
 

@@ -165,7 +165,7 @@ roadmap's own acceptance line). **Amended scope**:
 | M12.4 | Headless maturity — hardening pass (schema version, exit-code/output contract confirmed) | ACCEPTED |
 | M12.5 | Packaging — CI build matrix defined (4 platforms); Linux x86_64 built+proven locally | ACCEPTED |
 | M12.6 | Checksums / license inventory / release manifest | ACCEPTED |
-| M12.7 | Performance — extend `benches/pipeline.rs`; startup + large-object-count campaign | PLANNED |
+| M12.7 | Performance — extend `benches/pipeline.rs`; startup + large-object-count campaign | ACCEPTED |
 | M12.8 | Combined acceptance / full M1-M11 regression / soak / docs / final tag | PLANNED |
 
 ## Explicit non-goals for M12
@@ -653,6 +653,47 @@ None yet — implementation has not started. Updated per slice.
   only one of three alternatives, not a forced obligation) -- no forced
   copyleft, no legal red flag, confirmed by inspection of the actual
   output rather than assumed from the crate ecosystem's usual reputation.
+
+- 2026-09-22: M12.7 (performance) implemented as an extension of
+  `benches/pipeline.rs`'s own already-established shape, not a rebuild.
+  Closed the two gaps this document's own performance methodology section
+  and `docs/SOFKA_PARITY.md` both named: cold-startup time and a
+  larger-object-count tier. Cold startup is measured by spawning the real
+  packaged binary (`env!("CARGO_BIN_EXE_sauron")`) running `info
+  --offline` end-to-end via `Instant`, median of 5 reps — not wall-clock
+  `time(1)`, matching the existing filter/render measurement's own
+  methodology. The object-count sweep gained a `20_000` tier (this
+  project's own `max_objects` default, closing the "large object count"
+  gap while staying honest about being bounded by this one machine's
+  memory, not a claim about arbitrary cluster scale). The bench now also
+  prints its own environment header before any measurement: `rustc
+  --version`, `uname -a`, and `/proc/cpuinfo` model name + logical core
+  count via `std::thread::available_parallelism()` — so every run's
+  numbers carry the hardware/toolchain context needed to judge them,
+  rather than being bare numbers.
+
+  **Run live** (release profile) on this development machine (12th Gen
+  Intel Core i7-1250U, 12 logical cores, rustc 1.95.0, Linux
+  7.0.12+kali-amd64):
+
+  ```
+  cold_startup_median_ms,1.580
+  objects,build_ms,filter_sort_median_ms,render_median_ms,estimated_json_bytes
+  100,2.739,0.044,0.391,37990
+  1000,15.632,0.386,1.285,380890
+  5000,78.335,2.952,5.262,1908890
+  20000,270.227,11.321,24.147,7648890
+  ```
+
+  No comparative claim is made against any other tool. No optimization
+  was made as a result of this campaign — every number above is a
+  first-and-only measurement, not a before/after; per this document's own
+  performance methodology, an optimization is only recorded here if a
+  measured bottleneck actually motivates one, and none of these numbers
+  (sub-second render even at 20k synthetic objects, ~1.6ms cold start)
+  crossed a threshold that warranted one this slice. `cargo fmt`,
+  `cargo clippy --all-targets`, and the full test suite (445 unit + 76
+  fake-HTTP) all stayed clean after the bench change.
 
 ## Final acceptance checklist
 
